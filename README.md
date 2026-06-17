@@ -83,6 +83,30 @@ powershell -ExecutionPolicy Bypass -File scripts/setup_local_olt_entulhos.ps1 -N
 
 O script cria backup `.env.backup_YYYYMMDD_HHMMSS`, mas `.env` e backups nunca devem ser commitados.
 
+## Smoke Test Do Fluxo WhatsApp
+
+Para simular o fluxo completo de novo aluguer via `POST /webhook/whatsapp`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/simulate_whatsapp_aluguer_flow.ps1
+```
+
+Tambem pode indicar URL base, remetente e nome de perfil:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/simulate_whatsapp_aluguer_flow.ps1 -BaseUrl "http://127.0.0.1:8000" -From "556198266551" -ProfileName "Danilo Fukuda"
+```
+
+Atencao: este script envia payloads fake para o webhook local. Por padrao ele forca mock com o header `X-OLT-Mock-Whatsapp=true`, sem alterar `.env`. Se rodar com `-AllowRealSend` e o client estiver em modo real (`ENV=development` com `WHATSAPP_ACCESS_TOKEN` e `WHATSAPP_PHONE_NUMBER_ID` preenchidos), o sistema pode responder pelo WhatsApp real. O script nao altera `.env`, nao imprime token e nao faz commit.
+
+Para resetar somente os dados locais de demonstracao:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/reset_local_demo_state.ps1
+```
+
+O reset apaga conversas, alugueres e eventos, e recoloca `C01` a `C20` como `disponivel`. Ele nao toca no `.env`, tokens, estrutura do banco, backups ou media.
+
 ## Testar webhook GET da Meta
 
 ```bash

@@ -8,9 +8,9 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-def send_text_message(to: str, body: str) -> dict[str, Any]:
+def send_text_message(to: str, body: str, force_mock: bool = False) -> dict[str, Any]:
     settings = get_settings()
-    if _should_mock(settings):
+    if force_mock or _should_mock(settings):
         logger.info("Mock WhatsApp send to=%s body=%s", to, body)
         return {"to": to, "body": body, "status": "mocked"}
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
@@ -24,10 +24,15 @@ def verify_whatsapp_webhook(
 
 
 @router.post("/whatsapp")
-def receive_whatsapp_webhook(payload: dict, db: Session = Depends(get_db)) -> dict:
+def receive_whatsapp_webhook(
+    payload: dict,
+    db: Session = Depends(get_db),
+    x_olt_mock_whatsapp: str | None = Header(default=None),
+) -> dict:
     router_agent = WhatsappRouterAgent(db)
     sent_messages = []
+    force_mock = (x_olt_mock_whatsapp or "").strip().lower() in {"1", "true", "yes", "sim"}
     for message in parse_whatsapp_payload(payload):
         response = router_agent.handle(message)
-        sent_messages.append(send_text_message(message.telefone, response))
+        sent_messages.append(send_text_message(message.telefone, response, force_mock=force_mock))
     return {"status": "ok", "messages": sent_messages}

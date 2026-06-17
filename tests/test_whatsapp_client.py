@@ -97,3 +97,20 @@ def test_modo_mock_quando_config_incompleta(monkeypatch):
     result = send_text_message("556198266551", "Ola")
 
     assert result["status"] == "mocked"
+
+
+def test_force_mock_impede_envio_real(monkeypatch):
+    clear_settings(monkeypatch)
+    monkeypatch.setenv("ENV", "development")
+    monkeypatch.setenv("WHATSAPP_ACCESS_TOKEN", "fake-token")
+    monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "1148807428322172")
+    get_settings.cache_clear()
+
+    def fake_post(*args, **kwargs):
+        raise AssertionError("httpx.post nao deveria ser chamado em force_mock")
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = send_text_message("556198266551", "Mensagem", force_mock=True)
+
+    assert result == {"to": "556198266551", "body": "Mensagem", "status": "mocked"}

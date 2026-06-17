@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
+from app.integrations.whatsapp.parser import parse_whatsapp_payload
 
 
 def test_get_webhook_with_correct_token(client, monkeypatch):
@@ -64,3 +65,49 @@ def test_webhook_com_status_delivered_nao_envia_resposta(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "messages": []}
+
+
+def test_payload_fake_meta_e_parseado_corretamente():
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "1502228507690349",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {
+                                "display_phone_number": "556196870361",
+                                "phone_number_id": "1148807428322172",
+                            },
+                            "contacts": [{"profile": {"name": "Danilo Fukuda"}, "wa_id": "556198266551"}],
+                            "messages": [
+                                {
+                                    "from": "556198266551",
+                                    "id": "wamid.fake",
+                                    "timestamp": "1780000000",
+                                    "type": "location",
+                                    "location": {
+                                        "latitude": 38.7223,
+                                        "longitude": -9.1393,
+                                        "name": "Obra teste Lisboa",
+                                        "address": "Lisboa, Portugal",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    messages = parse_whatsapp_payload(payload)
+
+    assert len(messages) == 1
+    assert messages[0].telefone == "556198266551"
+    assert messages[0].tipo == "location"
+    assert messages[0].latitude == 38.7223
+    assert messages[0].longitude == -9.1393
