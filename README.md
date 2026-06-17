@@ -1,6 +1,6 @@
-# olt-entulhos
+# OLT gestão de resíduos & demolições
 
-MVP de automacao WhatsApp para gestao de contentores/cacambas de entulho em Portugal.
+MVP de automação WhatsApp para gestão de contentores, resíduos e demolições em Portugal.
 
 Esta primeira versao usa FastAPI, SQLite, SQLAlchemy e agentes deterministicos. O nucleo de dominio nao depende do WhatsApp; a integracao WhatsApp fica limitada ao webhook, parser e cliente da Cloud API.
 
@@ -190,6 +190,18 @@ mbway
 ```
 
 Se `AUTHORIZED_OPERATOR_PHONE`, `AUTHORIZED_OPERATOR_PHONES`, `WHATSAPP_OWNER_PHONE` ou `OWNER_WHATSAPP` estiverem definidos no `.env`, apenas esses telefones podem iniciar o fluxo com `novo`.
+
+## Comandos WhatsApp
+
+Comandos operacionais disponíveis para a demo:
+
+- `novo`: inicia o registo de um novo aluguer.
+- `resumo`: mostra totais de contentores, alugueres ativos, vencimentos de amanhã e atrasos.
+- `lista`: lista todos os contentores `C01` a `C20` com o respetivo status.
+- `disponiveis`: lista apenas contentores disponíveis.
+- `alugados`: lista contentores alugados com cliente, vencimento e status do aluguer.
+- `vencendo`: lista alugueres com vencimento amanhã.
+- `atrasados`: lista alugueres ativos com vencimento anterior a hoje.
 
 ## Proximos passos
 

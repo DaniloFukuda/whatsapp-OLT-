@@ -5,10 +5,11 @@ from app.agents.recolha_agent import RecolhaAgent
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.core.config import get_settings
 from app.core.phone import normalize_phone
+from app.core.time import utcnow
 from app.integrations.whatsapp.client import send_text_message
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.aluguer import StatusAluguer
-from app.models.contentor import StatusContentor
+from app.models.contentor import Contentor, StatusContentor
 from app.models.conversa import ConversaWhatsApp
 from app.services.aluguer_service import AluguerService
 from app.services.seed_service import SeedService
@@ -16,6 +17,42 @@ from app.services.seed_service import SeedService
 
 def text_message(texto: str, telefone: str = "351900000000") -> NormalizedWhatsAppMessage:
     return NormalizedWhatsAppMessage(telefone=telefone, tipo="text", texto=texto, message_id="m1")
+
+
+def preparar_operacao_demo(db_session):
+    SeedService(db_session).seed_contentores_iniciais()
+    now = utcnow()
+    aluguer_amanha = AluguerService(db_session).registrar_novo_aluguer(
+        nome_cliente="Cliente Amanhã",
+        telefone_cliente="351900000101",
+        valor="100",
+        forma_pagamento="mbway",
+        pago=True,
+    )
+    aluguer_atrasado = AluguerService(db_session).registrar_novo_aluguer(
+        nome_cliente="Cliente Atrasado",
+        telefone_cliente="351900000102",
+        valor="120",
+        forma_pagamento="dinheiro",
+        pago=False,
+    )
+    aluguer_regular = AluguerService(db_session).registrar_novo_aluguer(
+        nome_cliente="Cliente Regular",
+        telefone_cliente="351900000103",
+        valor="130",
+        forma_pagamento="transferencia",
+        pago=True,
+    )
+    aluguer_amanha.data_vencimento = now + timedelta(days=1)
+    aluguer_atrasado.data_vencimento = now - timedelta(days=1)
+    aluguer_regular.data_vencimento = now + timedelta(days=4)
+
+    contentor_recolha = db_session.query(Contentor).filter_by(codigo="C04").one()
+    contentor_recolha.status = StatusContentor.AGUARDANDO_RECOLHA
+    contentor_manutencao = db_session.query(Contentor).filter_by(codigo="C05").one()
+    contentor_manutencao.status = StatusContentor.MANUTENCAO
+    db_session.commit()
+    return aluguer_amanha, aluguer_atrasado, aluguer_regular
 
 
 def test_router_chama_aluguer_agent_quando_mensagem_for_novo(db_session, monkeypatch):
@@ -213,3 +250,82 @@ def test_mensagem_novo_de_operador_autorizado_inicia_fluxo(db_session, monkeypat
 
     assert "foto do contentor" in response
     assert conversa.estado_atual == "aguardando_foto_entrega"
+
+
+def test_comando_resumo_mostra_contadores_operacionais(db_session):
+    preparar_operacao_demo(db_session)
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("resumo"))
+
+    assert response == "\n".join(
+        [
+            "📦 Resumo dos contentores",
+            "Total: 20",
+            "Disponíveis: 15",
+            "Alugados: 3",
+            "Aguardando recolha: 1",
+            "Manutenção: 1",
+            "Alugueres ativos: 3",
+            "Vencem amanhã: 1",
+            "Em atraso: 1",
+        ]
+    )
+
+
+def test_comando_lista_mostra_todos_os_contentores_com_status(db_session):
+    preparar_operacao_demo(db_session)
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("lista"))
+
+    assert "C01 - alugado" in response
+    assert "C02 - alugado" in response
+    assert "C03 - alugado" in response
+    assert "C04 - aguardando recolha" in response
+    assert "C05 - manutenção" in response
+    assert "C20 - disponível" in response
+    assert len(response.splitlines()) == 20
+
+
+def test_comando_disponiveis_lista_apenas_contentores_disponiveis(db_session):
+    preparar_operacao_demo(db_session)
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("disponiveis"))
+
+    assert response.startswith("Contentores disponíveis:\n")
+    assert "C06" in response
+    assert "C20" in response
+    assert "C01" not in response
+    assert "C04" not in response
+
+
+def test_comando_alugados_lista_cliente_vencimento_e_status(db_session):
+    aluguer_amanha, aluguer_atrasado, aluguer_regular = preparar_operacao_demo(db_session)
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("alugados"))
+
+    assert "Contentores alugados:" in response
+    assert f"C01 - Cliente Amanhã - vencimento {aluguer_amanha.data_vencimento:%d/%m/%Y} - ativo" in response
+    assert f"C02 - Cliente Atrasado - vencimento {aluguer_atrasado.data_vencimento:%d/%m/%Y} - ativo" in response
+    assert f"C03 - Cliente Regular - vencimento {aluguer_regular.data_vencimento:%d/%m/%Y} - ativo" in response
+
+
+def test_comando_vencendo_lista_alugueres_que_vencem_amanha(db_session):
+    aluguer_amanha, _, _ = preparar_operacao_demo(db_session)
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("vencendo"))
+
+    assert "Alugueres que vencem amanhã:" in response
+    assert f"C01 - Cliente Amanhã - vencimento {aluguer_amanha.data_vencimento:%d/%m/%Y} - ativo" in response
+    assert "Cliente Atrasado" not in response
+    assert "Cliente Regular" not in response
+
+
+def test_comando_atrasados_lista_alugueres_ativos_em_atraso(db_session):
+    _, aluguer_atrasado, _ = preparar_operacao_demo(db_session)
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("atrasados"))
+
+    assert "Alugueres em atraso:" in response
+    assert f"C02 - Cliente Atrasado - vencimento {aluguer_atrasado.data_vencimento:%d/%m/%Y} - ativo" in response
+    assert "Cliente Amanhã" not in response
+    assert "Cliente Regular" not in response
