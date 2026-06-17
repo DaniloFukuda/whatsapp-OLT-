@@ -178,13 +178,22 @@ function Get-WebhookVerifyUri {
 }
 
 function Test-WebhookUrl {
-    param([string]$BaseUrl, [bool]$AllowRestart = $false)
+    param(
+        [string]$BaseUrl,
+        [bool]$AllowRestart = $false,
+        [bool]$AllowUnavailable = $false
+    )
 
     $uri = Get-WebhookVerifyUri $BaseUrl
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Uri $uri -TimeoutSec 10
         $content = $response.Content.Trim()
     } catch {
+        $errorText = "$($_.Exception.Message) $($_.ErrorDetails.Message)"
+        if ($AllowUnavailable -and ($errorText -match "ERR_NGROK_3200|offline|NameResolutionFailure|timed out")) {
+            Write-Warning "Ngrok indisponivel; validacao publica ignorada. Detalhe: $($_.Exception.Message)"
+            return
+        }
         if ($AllowRestart) {
             Restart-LocalServer
             $response = Invoke-WebRequest -UseBasicParsing -Uri $uri -TimeoutSec 10
@@ -303,7 +312,7 @@ Test-WebhookUrl -BaseUrl "http://127.0.0.1:8000" -AllowRestart $true
 $cleanNgrokUrl = Normalize-NgrokUrl $NgrokUrl
 if ($cleanNgrokUrl) {
     Write-Step "Validando webhook via Ngrok"
-    Test-WebhookUrl -BaseUrl $cleanNgrokUrl -AllowRestart $false
+    Test-WebhookUrl -BaseUrl $cleanNgrokUrl -AllowRestart $false -AllowUnavailable $true
 }
 
 Ensure-GitRepository
