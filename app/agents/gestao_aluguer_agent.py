@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+import unicodedata
 
 from sqlalchemy.orm import Session
 
@@ -110,17 +111,19 @@ class GestaoAluguerAgent:
             self.db.commit()
             return (
                 self._format_details(aluguer)
-                + "\n\nTem certeza que deseja excluir este registro? Responda SIM para confirmar."
+                + "\n\nTem certeza que deseja apagar este registro?\n\n1 - Sim, continuar\n2 - Nao, cancelar"
             )
 
         if state == "exclusao_aguardando_confirmacao":
             aluguer_id = context["aluguer_id"]
-            confirmation = (message.texto or "").strip().lower()
-            if confirmation in {"sim", "confirmar", "apagar"}:
+            confirmation = self._parse_confirmacao_exclusao(message.texto)
+            if confirmation is True:
                 conversa.estado_atual = "exclusao_aguardando_justificativa"
                 conversa.contexto_json = context
                 self.db.commit()
                 return "Informe a justificativa da exclusao com pelo menos 10 caracteres."
+            if confirmation is None:
+                return "Opcao invalida. Responda 1 para Sim ou 2 para Nao."
             conversa.estado_atual = "confirmado"
             conversa.contexto_json = {"aluguer_id": aluguer_id, "ultima_operacao": "exclusao_cancelada"}
             self.db.commit()
@@ -185,7 +188,7 @@ class GestaoAluguerAgent:
         elif field == "tipo_residuo":
             tipo_residuo = self._parse_tipo_residuo(value)
             if tipo_residuo is None:
-                return "Responda Entulho limpo ou Entulho misto, ou escolha 1/2."
+                return "Opcao invalida. Responda com o numero da opcao."
             aluguer.tipo_residuo = tipo_residuo
         elif field == "valor":
             valor = self._parse_money(value)
@@ -199,7 +202,7 @@ class GestaoAluguerAgent:
         elif field == "pago":
             pago = self._parse_payment_status(value)
             if pago is None:
-                return "Responda sim/nao ou pago/pendente."
+                return "Opcao invalida. Responda com o numero da opcao."
             aluguer.pago = pago
         elif field == "data_vencimento":
             data = self._parse_date(value)
@@ -228,9 +231,9 @@ class GestaoAluguerAgent:
     def _prompt_for_field(self, field: str) -> str:
         labels = dict(self.EDITABLE_FIELDS)
         if field == "tipo_residuo":
-            return "Envie o novo tipo do residuo: 1 para Entulho limpo ou 2 para Entulho misto."
+            return "Envie o novo tipo do residuo:\n\n1 - Entulho limpo\n2 - Entulho misto"
         if field == "pago":
-            return "Envie o novo status de pagamento: pago ou pendente."
+            return "Envie o novo status de pagamento:\n\n1 - Pago\n2 - Pendente"
         if field == "localizacao":
             return "Envie a nova localizacao pelo WhatsApp."
         if field == "data_vencimento":
@@ -290,6 +293,26 @@ class GestaoAluguerAgent:
         if normalized in {"nao", "não", "n", "no", "pendente", "nao pago", "não pago"}:
             return False
         return None
+
+    def _parse_payment_status(self, value: str | None) -> bool | None:
+        normalized = self._normalize_option(value)
+        if normalized in {"1", "sim", "s", "yes", "y", "pago", "paga"}:
+            return True
+        if normalized in {"2", "nao", "n", "no", "pendente", "nao pago"}:
+            return False
+        return None
+
+    def _parse_confirmacao_exclusao(self, value: str | None) -> bool | None:
+        normalized = self._normalize_option(value)
+        if normalized in {"1", "sim", "s", "confirmar", "apagar"}:
+            return True
+        if normalized in {"2", "nao", "n", "cancelar"}:
+            return False
+        return None
+
+    def _normalize_option(self, value: str | None) -> str:
+        normalized = unicodedata.normalize("NFKD", value or "")
+        return "".join(char for char in normalized if not unicodedata.combining(char)).strip().lower()
 
     def _parse_date(self, value: str | None) -> datetime | None:
         try:

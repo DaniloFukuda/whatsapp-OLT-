@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+import unicodedata
 
 from sqlalchemy.orm import Session
 
@@ -111,24 +112,24 @@ class AluguerAgent:
                 conversa,
                 "aguardando_confirmacao_data_entrega",
                 context,
-                f"Confirma a data de entrega como hoje ({entrega:%d/%m/%Y})? Responda sim ou nao.",
+                f"Confirma a data de entrega como hoje ({entrega:%d/%m/%Y})?\n\n1 - Sim\n2 - Nao",
             )
 
         if state == "aguardando_confirmacao_data_entrega":
-            confirmado = self._parse_yes_no(message.texto)
+            confirmado = self._parse_sim_nao_opcao(message.texto)
             if confirmado is not True:
-                return "Para esta etapa, confirme a data atual respondendo sim."
+                return "Opcao invalida. Responda 1 para Sim ou 2 para Nao."
             return self._advance(
                 conversa,
                 "aguardando_tipo_residuo",
                 context,
-                "Qual e o tipo do residuo? Responda Entulho limpo ou Entulho misto.",
+                "Qual e o tipo do residuo?\n\n1 - Entulho limpo\n2 - Entulho misto",
             )
 
         if state == "aguardando_tipo_residuo":
             tipo_residuo = self._parse_tipo_residuo(message.texto)
             if tipo_residuo is None:
-                return "Responda Entulho limpo ou Entulho misto."
+                return "Opcao invalida. Responda com o numero da opcao."
             context["tipo_residuo"] = tipo_residuo
             return self._advance(conversa, "aguardando_valor", context, "Qual e o valor?")
 
@@ -143,12 +144,12 @@ class AluguerAgent:
             if not message.texto:
                 return "Envie a forma de pagamento."
             context["forma_pagamento"] = message.texto.strip()
-            return self._advance(conversa, "aguardando_pago", context, "Esta pago? Responda sim ou nao.")
+            return self._advance(conversa, "aguardando_pago", context, "Esta pago?\n\n1 - Sim\n2 - Nao")
 
         if state == "aguardando_pago":
-            pago = self._parse_yes_no(message.texto)
+            pago = self._parse_pagamento_opcao(message.texto)
             if pago is None:
-                return "Responda apenas sim ou nao."
+                return "Opcao invalida. Responda 1 para Sim ou 2 para Nao."
             context["pago"] = pago
             service_context = {
                 key: value
@@ -181,6 +182,26 @@ class AluguerAgent:
             return Decimal(value.replace("EUR", "").replace(",", ".").strip())
         except (InvalidOperation, AttributeError):
             return None
+
+    def _parse_sim_nao_opcao(self, value: str | None) -> bool | None:
+        normalized = self._normalize_option(value)
+        if normalized in {"1", "sim", "s", "yes", "y"}:
+            return True
+        if normalized in {"2", "nao", "n", "no"}:
+            return False
+        return self._parse_yes_no(value)
+
+    def _parse_pagamento_opcao(self, value: str | None) -> bool | None:
+        normalized = self._normalize_option(value)
+        if normalized in {"1", "sim", "s", "yes", "y", "pago", "paga"}:
+            return True
+        if normalized in {"2", "nao", "n", "no", "pendente", "nao pago"}:
+            return False
+        return self._parse_yes_no(value)
+
+    def _normalize_option(self, value: str | None) -> str:
+        normalized = unicodedata.normalize("NFKD", value or "")
+        return "".join(char for char in normalized if not unicodedata.combining(char)).strip().lower()
 
     def _parse_yes_no(self, value: str | None) -> bool | None:
         normalized = (value or "").strip().lower()

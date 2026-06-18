@@ -105,6 +105,46 @@ def preparar_resumo_paulo(db_session):
     return hoje, amanha
 
 
+def avancar_cadastro_ate_confirmacao_data(router, db_session, telefone: str = "351900001000"):
+    router.handle(text_message("novo", telefone=telefone))
+    router.handle(text_message("1", telefone=telefone))
+    router.handle(
+        NormalizedWhatsAppMessage(
+            telefone=telefone,
+            tipo="image",
+            message_id="foto-opcoes",
+            media_id="foto-opcoes",
+            mime_type="image/jpeg",
+        )
+    )
+    router.handle(
+        NormalizedWhatsAppMessage(
+            telefone=telefone,
+            tipo="location",
+            message_id="loc-opcoes",
+            latitude=38.7223,
+            longitude=-9.1393,
+        )
+    )
+    router.handle(text_message("Cliente Opcoes", telefone=telefone))
+    router.handle(text_message("912345678", telefone=telefone))
+    return router.handle(text_message("pular", telefone=telefone))
+
+
+def avancar_cadastro_ate_tipo_residuo(router, db_session, telefone: str = "351900001100"):
+    prompt_data = avancar_cadastro_ate_confirmacao_data(router, db_session, telefone=telefone)
+    prompt_tipo = router.handle(text_message("1", telefone=telefone))
+    return prompt_data, prompt_tipo
+
+
+def avancar_cadastro_ate_pagamento(router, db_session, telefone: str = "351900001200", tipo: str = "1"):
+    prompt_data, prompt_tipo = avancar_cadastro_ate_tipo_residuo(router, db_session, telefone=telefone)
+    router.handle(text_message(tipo, telefone=telefone))
+    router.handle(text_message("150", telefone=telefone))
+    prompt_pago = router.handle(text_message("mbway", telefone=telefone))
+    return prompt_data, prompt_tipo, prompt_pago
+
+
 def test_router_chama_aluguer_agent_quando_mensagem_for_novo(db_session, monkeypatch):
     monkeypatch.setenv("WHATSAPP_OWNER_PHONE", "")
     monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONE", "")
@@ -280,6 +320,110 @@ def test_fluxo_completo_de_novo_aluguer(db_session, monkeypatch):
     assert {evento.tipo for evento in aluguer.eventos} == {"entrega", "pagamento_informado", "criado"}
 
 
+def test_cadastro_opcoes_numeradas_confirmacao_data(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    prompt_data = avancar_cadastro_ate_confirmacao_data(router, db_session)
+    prompt_tipo = router.handle(text_message("1", telefone="351900001000"))
+
+    assert "1 - Sim" in prompt_data
+    assert "2 - Nao" in prompt_data
+    assert "1 - Entulho limpo" in prompt_tipo
+    assert "2 - Entulho misto" in prompt_tipo
+
+
+def test_cadastro_opcao_2_na_confirmacao_data_mantem_bloqueio_atual(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    avancar_cadastro_ate_confirmacao_data(router, db_session, telefone="351900001001")
+    response = router.handle(text_message("2", telefone="351900001001"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900001001").one()
+
+    assert response == "Opcao invalida. Responda 1 para Sim ou 2 para Nao."
+    assert conversa.estado_atual == "aguardando_confirmacao_data_entrega"
+
+
+def test_cadastro_tipo_residuo_aceita_1_e_2(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    _, prompt_tipo_1 = avancar_cadastro_ate_tipo_residuo(router, db_session, telefone="351900001002")
+    response_1 = router.handle(text_message("1", telefone="351900001002"))
+    conversa_1 = db_session.query(ConversaWhatsApp).filter_by(telefone="351900001002").one()
+
+    _, prompt_tipo_2 = avancar_cadastro_ate_tipo_residuo(router, db_session, telefone="351900001003")
+    response_2 = router.handle(text_message("2", telefone="351900001003"))
+    conversa_2 = db_session.query(ConversaWhatsApp).filter_by(telefone="351900001003").one()
+
+    assert "1 - Entulho limpo" in prompt_tipo_1
+    assert "2 - Entulho misto" in prompt_tipo_2
+    assert response_1 == "Qual e o valor?"
+    assert response_2 == "Qual e o valor?"
+    assert conversa_1.contexto_json["tipo_residuo"] == "Entulho limpo"
+    assert conversa_2.contexto_json["tipo_residuo"] == "Entulho misto"
+
+
+def test_cadastro_pagamento_aceita_1_e_2(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    _, _, prompt_pago_1 = avancar_cadastro_ate_pagamento(router, db_session, telefone="351900001004")
+    response_1 = router.handle(text_message("1", telefone="351900001004"))
+    conversa_1 = db_session.query(ConversaWhatsApp).filter_by(telefone="351900001004").one()
+    aluguer_1 = AluguerService(db_session)._get_or_raise(conversa_1.contexto_json["aluguer_id"])
+
+    _, _, prompt_pago_2 = avancar_cadastro_ate_pagamento(router, db_session, telefone="351900001005")
+    response_2 = router.handle(text_message("2", telefone="351900001005"))
+    conversa_2 = db_session.query(ConversaWhatsApp).filter_by(telefone="351900001005").one()
+    aluguer_2 = AluguerService(db_session)._get_or_raise(conversa_2.contexto_json["aluguer_id"])
+
+    assert "1 - Sim" in prompt_pago_1
+    assert "2 - Nao" in prompt_pago_2
+    assert "Status pagamento: pago" in response_1
+    assert "Status pagamento: pendente" in response_2
+    assert aluguer_1.pago is True
+    assert aluguer_2.pago is False
+
+
+def test_cadastro_continua_aceitando_texto_antigo_nas_opcoes(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    avancar_cadastro_ate_confirmacao_data(router, db_session, telefone="351900001006")
+    prompt_tipo_limpo = router.handle(text_message("sim", telefone="351900001006"))
+    response_limpo = router.handle(text_message("Entulho limpo", telefone="351900001006"))
+
+    avancar_cadastro_ate_confirmacao_data(router, db_session, telefone="351900001007")
+    prompt_tipo_misto = router.handle(text_message("sim", telefone="351900001007"))
+    response_misto = router.handle(text_message("Entulho misto", telefone="351900001007"))
+
+    _, _, prompt_pago = avancar_cadastro_ate_pagamento(router, db_session, telefone="351900001008")
+    response_pago = router.handle(text_message("pago", telefone="351900001008"))
+
+    _, _, prompt_pendente = avancar_cadastro_ate_pagamento(router, db_session, telefone="351900001009")
+    response_pendente = router.handle(text_message("pendente", telefone="351900001009"))
+
+    avancar_cadastro_ate_confirmacao_data(router, db_session, telefone="351900001010")
+    response_nao = router.handle(text_message("nao", telefone="351900001010"))
+
+    assert "1 - Entulho limpo" in prompt_tipo_limpo
+    assert "2 - Entulho misto" in prompt_tipo_misto
+    assert response_limpo == "Qual e o valor?"
+    assert response_misto == "Qual e o valor?"
+    assert "1 - Sim" in prompt_pago
+    assert "2 - Nao" in prompt_pendente
+    assert "Status pagamento: pago" in response_pago
+    assert "Status pagamento: pendente" in response_pendente
+    assert response_nao == "Opcao invalida. Responda 1 para Sim ou 2 para Nao."
+
+
 def test_alterar_e_modificar_iniciam_fluxo(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     SeedService(db_session).seed_contentores_iniciais()
@@ -377,9 +521,34 @@ def test_alteracao_de_tipo_residuo_valida_opcoes(db_session, monkeypatch):
     response = router.handle(text_message("2"))
 
     db_session.refresh(aluguer)
-    assert invalid == "Responda Entulho limpo ou Entulho misto, ou escolha 1/2."
+    assert invalid == "Opcao invalida. Responda com o numero da opcao."
     assert aluguer.tipo_residuo == "Entulho misto"
     assert "Tipo residuo: Entulho misto" in response
+
+
+def test_alteracao_tipo_residuo_aceita_opcoes_numeradas(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    aluguer = preparar_aluguer_gestao(db_session, "Cliente Residuo Opcao", "351912345627")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("alterar"))
+    router.handle(text_message("1"))
+    prompt = router.handle(text_message("6"))
+    response_1 = router.handle(text_message("1"))
+    db_session.refresh(aluguer)
+
+    router.handle(text_message("alterar"))
+    router.handle(text_message("1"))
+    router.handle(text_message("6"))
+    response_2 = router.handle(text_message("2"))
+    db_session.refresh(aluguer)
+
+    assert "1 - Entulho limpo" in prompt
+    assert "2 - Entulho misto" in prompt
+    assert "Tipo residuo: Entulho limpo" in response_1
+    assert "Tipo residuo: Entulho misto" in response_2
+    assert aluguer.tipo_residuo == "Entulho misto"
 
 
 def test_alteracao_de_valor_normaliza_formatos(db_session, monkeypatch):
@@ -414,6 +583,31 @@ def test_alteracao_de_status_pago_pendente(db_session, monkeypatch):
     assert "Status pagamento: pago" in response
 
 
+def test_alteracao_pagamento_aceita_opcoes_numeradas(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    aluguer = preparar_aluguer_gestao(db_session, "Cliente Pago Opcao", "351912345628")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("alterar"))
+    router.handle(text_message("1"))
+    prompt = router.handle(text_message("9"))
+    response_1 = router.handle(text_message("1"))
+    db_session.refresh(aluguer)
+
+    router.handle(text_message("alterar"))
+    router.handle(text_message("1"))
+    router.handle(text_message("9"))
+    response_2 = router.handle(text_message("2"))
+    db_session.refresh(aluguer)
+
+    assert "1 - Pago" in prompt
+    assert "2 - Pendente" in prompt
+    assert "Status pagamento: pago" in response_1
+    assert "Status pagamento: pendente" in response_2
+    assert aluguer.pago is False
+
+
 def test_excluir_e_deletar_iniciam_fluxo(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     SeedService(db_session).seed_contentores_iniciais()
@@ -438,11 +632,12 @@ def test_exclusao_exige_confirmacao(db_session, monkeypatch):
     response = router.handle(text_message("1"))
 
     assert f"ID/referencia: #{aluguer.id}" in response
-    assert "Responda SIM para confirmar" in response
+    assert "1 - Sim, continuar" in response
+    assert "2 - Nao, cancelar" in response
     assert AluguerService(db_session)._get_or_raise(aluguer.id)
 
 
-def test_exclusao_com_resposta_ambigua_cancela_sem_apagar(db_session, monkeypatch):
+def test_exclusao_com_opcao_2_cancela_sem_apagar(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     SeedService(db_session).seed_contentores_iniciais()
     aluguer = preparar_aluguer_gestao(db_session, "Cliente Cancela", "351912345612")
@@ -450,10 +645,23 @@ def test_exclusao_com_resposta_ambigua_cancela_sem_apagar(db_session, monkeypatc
 
     router.handle(text_message("excluir"))
     router.handle(text_message("1"))
-    response = router.handle(text_message("talvez"))
+    response = router.handle(text_message("2"))
 
     assert response == "Exclusao cancelada. Nenhum registro foi apagado."
     assert AluguerService(db_session)._get_or_raise(aluguer.id).id == aluguer.id
+
+
+def test_exclusao_com_opcao_1_pede_justificativa(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    preparar_aluguer_gestao(db_session, "Cliente Continua Exclusao", "351912345629")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("excluir"))
+    router.handle(text_message("1"))
+    response = router.handle(text_message("1"))
+
+    assert response == "Informe a justificativa da exclusao com pelo menos 10 caracteres."
 
 
 def test_exclusao_com_confirmacao_clara_exclui(db_session, monkeypatch):
@@ -549,6 +757,8 @@ def test_renovacao_escolha_por_numero_seleciona_registro_correto(db_session, mon
     assert f"ID/referencia: #{primeiro.id}" in response
     assert "Cliente: Cliente Renovacao Primeiro" in response
     assert "Deseja alterar alguma informacao antes de renovar?" in response
+    assert "1 - Sim" in response
+    assert "2 - Nao, prosseguir" in response
 
 
 def test_renovacao_sem_alteracoes_cria_novo_registro(db_session, monkeypatch):
@@ -571,6 +781,37 @@ def test_renovacao_sem_alteracoes_cria_novo_registro(db_session, monkeypatch):
     assert novo.telefone_cliente == origem.telefone_cliente
     assert novo.contentor_id == origem.contentor_id
     assert novo.criado_por_operador == "351900000000"
+
+
+def test_renovacao_aceita_opcao_2_para_prosseguir(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    origem = preparar_aluguer_gestao(db_session, "Cliente Renovacao Opcao 2", "351912345630")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("renovar"))
+    prompt = router.handle(text_message("1"))
+    response = router.handle(text_message("2"))
+
+    novo = db_session.query(AluguerContentor).order_by(AluguerContentor.id.desc()).first()
+    assert "1 - Sim" in prompt
+    assert "2 - Nao, prosseguir" in prompt
+    assert f"Registro antigo: #{origem.id}" in response
+    assert novo.id != origem.id
+
+
+def test_renovacao_aceita_opcao_1_para_alterar(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    preparar_aluguer_gestao(db_session, "Cliente Renovacao Opcao 1", "351912345631")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("renovar"))
+    router.handle(text_message("1"))
+    response = router.handle(text_message("1"))
+
+    assert "Campos alteraveis antes de renovar:" in response
+    assert "1. quantidade de contentores" in response
 
 
 def test_renovacao_calcula_novas_datas(db_session, monkeypatch):
@@ -635,6 +876,32 @@ def test_alteracao_antes_da_renovacao_muda_so_o_novo_registro(db_session, monkey
     assert "Cliente: Cliente Novo Renovado" in response
 
 
+def test_renovacao_tipo_e_pagamento_usam_opcoes_numeradas(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    preparar_aluguer_gestao(db_session, "Cliente Renovacao Opcoes", "351912345632")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("renovar"))
+    router.handle(text_message("1"))
+    router.handle(text_message("1"))
+    prompt_tipo = router.handle(text_message("6"))
+    router.handle(text_message("2"))
+    router.handle(text_message("1"))
+    prompt_pagamento = router.handle(text_message("9"))
+    router.handle(text_message("1"))
+    response = router.handle(text_message("2"))
+
+    novo = db_session.query(AluguerContentor).order_by(AluguerContentor.id.desc()).first()
+    assert "1 - Entulho limpo" in prompt_tipo
+    assert "2 - Entulho misto" in prompt_tipo
+    assert "1 - Pago" in prompt_pagamento
+    assert "2 - Pendente" in prompt_pagamento
+    assert novo.tipo_residuo == "Entulho misto"
+    assert novo.pago is True
+    assert "Status pagamento: pago" in response
+
+
 def test_telefone_alterado_antes_da_renovacao_normaliza_e_gera_link(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     SeedService(db_session).seed_contentores_iniciais()
@@ -666,7 +933,7 @@ def test_resposta_ambigua_na_renovacao_pede_confirmacao_segura(db_session, monke
     router.handle(text_message("1"))
     response = router.handle(text_message("talvez"))
 
-    assert response == "Responda SIM para alterar ou NAO para prosseguir."
+    assert response == "Opcao invalida. Responda 1 para Sim ou 2 para Nao."
     assert db_session.query(AluguerContentor).count() == 1
 
 

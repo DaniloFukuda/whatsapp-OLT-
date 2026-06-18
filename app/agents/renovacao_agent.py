@@ -1,4 +1,5 @@
 from decimal import Decimal, InvalidOperation
+import unicodedata
 
 from sqlalchemy.orm import Session
 
@@ -62,7 +63,7 @@ class RenovacaoAgent:
             self.db.commit()
             return (
                 self._format_details(aluguer)
-                + "\n\nDeseja alterar alguma informacao antes de renovar? Responda SIM para alterar ou NAO para prosseguir."
+                + "\n\nDeseja alterar alguma informacao antes de renovar?\n\n1 - Sim\n2 - Nao, prosseguir"
             )
 
         if state == "renovacao_aguardando_decisao_alterar":
@@ -74,7 +75,7 @@ class RenovacaoAgent:
                 return "Campos alteraveis antes de renovar:\n" + self._format_fields()
             if decision is False:
                 return self._finish(conversa, context, message.telefone)
-            return "Responda SIM para alterar ou NAO para prosseguir."
+            return "Opcao invalida. Responda 1 para Sim ou 2 para Nao."
 
         if state == "renovacao_aguardando_campo":
             field = self._select_field(message.texto)
@@ -96,7 +97,7 @@ class RenovacaoAgent:
             conversa.estado_atual = "renovacao_aguardando_decisao_alterar"
             conversa.contexto_json = context
             self.db.commit()
-            return "Alteracao registrada. Deseja alterar mais alguma coisa? Responda SIM para alterar ou NAO para prosseguir."
+            return "Alteracao registrada. Deseja alterar mais alguma coisa?\n\n1 - Sim\n2 - Nao, prosseguir"
 
         return "Comando nao reconhecido. Envie 'renovar' ou 'prorrogar' para iniciar."
 
@@ -156,7 +157,7 @@ class RenovacaoAgent:
         elif field == "tipo_residuo":
             tipo_residuo = self._parse_tipo_residuo(value)
             if tipo_residuo is None:
-                return "Responda Entulho limpo ou Entulho misto, ou escolha 1/2."
+                return "Opcao invalida. Responda com o numero da opcao."
             ajustes["tipo_residuo"] = tipo_residuo
         elif field == "valor":
             valor = self._parse_money(value)
@@ -170,9 +171,13 @@ class RenovacaoAgent:
         elif field == "pago":
             pago = self._parse_payment_status(value)
             if pago is None:
-                return "Responda sim/nao ou pago/pendente."
+                return "Opcao invalida. Responda com o numero da opcao."
             ajustes["pago"] = pago
         return None
+
+    def _normalize_option(self, value: str | None) -> str:
+        normalized = unicodedata.normalize("NFKD", value or "")
+        return "".join(char for char in normalized if not unicodedata.combining(char)).strip().lower()
 
     def _format_list(self, alugueres: list[AluguerContentor]) -> str:
         return "\n".join(f"{index}. {self._format_list_item(aluguer)}" for index, aluguer in enumerate(alugueres, start=1))
@@ -210,9 +215,9 @@ class RenovacaoAgent:
     def _prompt_for_field(self, field: str) -> str:
         labels = dict(self.EDITABLE_FIELDS)
         if field == "tipo_residuo":
-            return "Envie o novo tipo do residuo: 1 para Entulho limpo ou 2 para Entulho misto."
+            return "Envie o novo tipo do residuo:\n\n1 - Entulho limpo\n2 - Entulho misto"
         if field == "pago":
-            return "Envie o novo status de pagamento: pago ou pendente."
+            return "Envie o novo status de pagamento:\n\n1 - Pago\n2 - Pendente"
         if field == "localizacao":
             return "Envie a nova localizacao pelo WhatsApp."
         return f"Envie o novo valor para {labels[field]}."
@@ -242,6 +247,11 @@ class RenovacaoAgent:
         return parsed if parsed > 0 else None
 
     def _parse_yes_no(self, value: str | None) -> bool | None:
+        option = self._normalize_option(value)
+        if option in {"1", "sim", "s", "yes", "y"}:
+            return True
+        if option in {"2", "nao", "n", "no", "prosseguir"}:
+            return False
         normalized = (value or "").strip().lower()
         if normalized in {"sim", "s", "yes", "y"}:
             return True
@@ -268,6 +278,11 @@ class RenovacaoAgent:
             return None
 
     def _parse_payment_status(self, value: str | None) -> bool | None:
+        option = self._normalize_option(value)
+        if option in {"1", "sim", "s", "yes", "y", "pago", "paga"}:
+            return True
+        if option in {"2", "nao", "n", "no", "pendente", "nao pago"}:
+            return False
         normalized = (value or "").strip().lower()
         if normalized in {"sim", "s", "yes", "y", "pago", "paga"}:
             return True
