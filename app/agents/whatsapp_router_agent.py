@@ -1,9 +1,16 @@
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from sqlalchemy.orm import Session
 
 from app.agents.aluguer_agent import AluguerAgent
 from app.agents.contentor_agent import ContentorAgent
+from app.agents.gestao_aluguer_agent import GestaoAluguerAgent
+from app.agents.renovacao_agent import RenovacaoAgent
 from app.core.config import get_settings
-from app.core.phone import normalize_phone
+from app.core.phone import normalize_phone, whatsapp_link
+from app.core.time import utcnow
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.aluguer import AluguerContentor, StatusAluguer
 from app.models.conversa import ConversaWhatsApp
@@ -14,12 +21,18 @@ from app.services.contentor_service import ContentorService
 
 ACTIVE_ALUGUER_STATUSES = {StatusAluguer.ATIVO, StatusAluguer.VENCENDO, StatusAluguer.RENOVADO}
 COMMANDS = {"resumo", "lista", "disponiveis", "alugados", "vencendo", "atrasados"}
+START_COMMANDS = {"iniciar", "cadastrar", "comecar", "começar", "novo"}
+ALTER_COMMANDS = {"alterar", "modificar"}
+DELETE_COMMANDS = {"excluir", "deletar"}
+RENEW_COMMANDS = {"renovar", "prorrogar"}
 
 
 class WhatsappRouterAgent:
     def __init__(self, db: Session):
         self.db = db
         self.aluguer_agent = AluguerAgent(db)
+        self.gestao_aluguer_agent = GestaoAluguerAgent(db)
+        self.renovacao_agent = RenovacaoAgent(db)
         self.contentor_agent = ContentorAgent(db)
         self.aluguer_service = AluguerService(db)
         self.contentor_service = ContentorService(db)
@@ -29,20 +42,38 @@ class WhatsappRouterAgent:
         text = (message.texto or "").strip().lower()
 
         if text in COMMANDS:
+            if text == "resumo" and not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
             return self._handle_operational_command(text)
-        if text == "novo":
+        if text in START_COMMANDS:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
             return self.aluguer_agent.start(conversa)
+        if text in ALTER_COMMANDS:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para alterar registros. Contacte o administrador do sistema."
+            return self.gestao_aluguer_agent.start_alteracao(conversa)
+        if text in DELETE_COMMANDS:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
+            return self.gestao_aluguer_agent.start_exclusao(conversa)
+        if text in RENEW_COMMANDS:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para renovar registros. Contacte o administrador do sistema."
+            return self.renovacao_agent.start(conversa)
         if conversa.estado_atual in AluguerAgent.ACTIVE_STATES:
             return self.aluguer_agent.handle(conversa, message)
+        if conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES:
+            return self.gestao_aluguer_agent.handle(conversa, message)
+        if conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES:
+            return self.renovacao_agent.handle(conversa, message)
         if text in {"contentores", "status"}:
             return self.contentor_agent.listar_status()
         return "Comando nao reconhecido. Envie 'novo' para registar um aluguer."
 
     def _handle_operational_command(self, command: str) -> str:
         if command == "resumo":
-            return self._resumo()
+            return self._resumo_operacional()
         if command == "lista":
             return self._lista()
         if command == "disponiveis":
@@ -54,6 +85,47 @@ class WhatsappRouterAgent:
         if command == "atrasados":
             return self._atrasados()
         return "Comando nao reconhecido. Envie 'novo' para registar um aluguer."
+
+    def _resumo_operacional(self) -> str:
+        contentores = self.contentor_service.listar_contentores()
+        alugueres_ativos = self._active_alugueres()
+        vencendo_amanha = self.aluguer_service.listar_vencendo_amanha()
+        atrasados = self.aluguer_service.listar_atrasados()
+        counts = {status: 0 for status in StatusContentor}
+        for contentor in contentores:
+            counts[contentor.status] += 1
+
+        today = self._local_date(utcnow())
+        tomorrow = today + timedelta(days=1)
+        retiradas_hoje = self._alugueres_por_data_retirada(today)
+        retiradas_amanha = self._alugueres_por_data_retirada(tomorrow)
+        faturado_total, recebido_total = self._faturamento_mes_corrente()
+
+        return "\n".join(
+            [
+                "Resumo dos contentores",
+                f"Total: {len(contentores)}",
+                f"Disponiveis: {counts[StatusContentor.DISPONIVEL]}",
+                f"Alugados: {counts[StatusContentor.ALUGADO]}",
+                f"Aguardando recolha: {counts[StatusContentor.AGUARDANDO_RECOLHA]}",
+                f"Manutencao: {counts[StatusContentor.MANUTENCAO]}",
+                f"Alugueres ativos: {len(alugueres_ativos)}",
+                f"Vencem amanha: {len(vencendo_amanha)}",
+                f"Em atraso: {len(atrasados)}",
+                f"Quantidade de contentores alugados: {counts[StatusContentor.ALUGADO]}",
+                "",
+                "Retiradas hoje:",
+                self._format_retiradas(retiradas_hoje),
+                "",
+                "Retiradas amanha:",
+                self._format_retiradas(retiradas_amanha),
+                "",
+                "Faturamento do mes corrente:",
+                f"Faturado total do mes: {faturado_total:.2f}",
+                f"Recebido/pago no mes: {recebido_total:.2f}",
+                "Obs.: faturado total soma todos os alugueres do mes; recebido soma apenas registros pagos.",
+            ]
+        )
 
     def _resumo(self) -> str:
         contentores = self.contentor_service.listar_contentores()
@@ -119,6 +191,59 @@ class WhatsappRouterAgent:
             .order_by(AluguerContentor.data_vencimento, AluguerContentor.id)
             .all()
         )
+
+    def _alugueres_por_data_retirada(self, date) -> list[AluguerContentor]:
+        return [
+            aluguer
+            for aluguer in self._active_alugueres()
+            if self._local_date(aluguer.data_vencimento) == date
+        ]
+
+    def _faturamento_mes_corrente(self) -> tuple[Decimal, Decimal]:
+        local_now = self._to_local_datetime(utcnow())
+        faturado_total = Decimal("0")
+        recebido_total = Decimal("0")
+        for aluguer in self.db.query(AluguerContentor).all():
+            entrega = self._to_local_datetime(aluguer.data_entrega)
+            if entrega.year == local_now.year and entrega.month == local_now.month:
+                valor = Decimal(str(aluguer.valor or 0))
+                faturado_total += valor
+                if aluguer.pago:
+                    recebido_total += valor
+        return faturado_total, recebido_total
+
+    def _format_retiradas(self, alugueres: list[AluguerContentor]) -> str:
+        if not alugueres:
+            return "Nenhum contentor para retirar."
+        return "\n".join(self._format_retirada(aluguer) for aluguer in alugueres)
+
+    def _format_retirada(self, aluguer: AluguerContentor) -> str:
+        contentor = aluguer.contentor.codigo if aluguer.contentor else f"#{aluguer.contentor_id}"
+        telefone_info = "telefone nao informado"
+        if aluguer.telefone_cliente:
+            telefone_info = f"{normalize_phone(aluguer.telefone_cliente)} / {whatsapp_link(aluguer.telefone_cliente)}"
+        localizacao = "localizacao nao informada"
+        if aluguer.latitude is not None and aluguer.longitude is not None:
+            localizacao = f"https://www.google.com/maps?q={aluguer.latitude},{aluguer.longitude}"
+        return (
+            f"- {aluguer.nome_cliente} - #{aluguer.id} / {contentor} - "
+            f"telefone: {telefone_info} - localizacao: {localizacao} - "
+            f"retirada {aluguer.data_vencimento:%d/%m/%Y}"
+        )
+
+    def _to_local_datetime(self, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(self._timezone())
+
+    def _local_date(self, value: datetime):
+        return self._to_local_datetime(value).date()
+
+    def _timezone(self):
+        try:
+            return ZoneInfo(get_settings().timezone)
+        except ZoneInfoNotFoundError:
+            return timezone.utc
 
     def _format_aluguer(self, aluguer: AluguerContentor) -> str:
         vencimento = aluguer.data_vencimento.strftime("%d/%m/%Y")

@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
@@ -10,13 +11,15 @@ from app.models.conversa import ConversaWhatsApp
 from app.services.aluguer_service import AluguerService
 
 
-class RenovacaoAgent:
-    START_STATE = "renovacao_aguardando_item"
+class GestaoAluguerAgent:
+    ALTER_START_STATE = "alteracao_aguardando_item"
+    DELETE_START_STATE = "exclusao_aguardando_item"
     ACTIVE_STATES = {
-        "renovacao_aguardando_item",
-        "renovacao_aguardando_decisao_alterar",
-        "renovacao_aguardando_campo",
-        "renovacao_aguardando_valor",
+        "alteracao_aguardando_item",
+        "alteracao_aguardando_campo",
+        "alteracao_aguardando_valor",
+        "exclusao_aguardando_item",
+        "exclusao_aguardando_confirmacao",
     }
     EDITABLE_FIELDS = [
         ("quantidade_contentores", "quantidade de contentores"),
@@ -28,6 +31,7 @@ class RenovacaoAgent:
         ("valor", "valor"),
         ("forma_pagamento", "forma de pagamento"),
         ("pago", "status de pagamento"),
+        ("data_vencimento", "data de retirada"),
     ]
 
     def __init__(self, db: Session):
@@ -35,86 +39,91 @@ class RenovacaoAgent:
         self.aluguer_service = AluguerService(db)
         self.localizacao_agent = LocalizacaoAgent()
 
-    def start(self, conversa: ConversaWhatsApp) -> str:
+    def start_alteracao(self, conversa: ConversaWhatsApp) -> str:
         alugueres = self.aluguer_service.listar_cadastrados_nos_ultimos_dias(7)
         if not alugueres:
             conversa.estado_atual = "idle"
             conversa.contexto_json = {}
             self.db.commit()
             return "Nao encontrei registros cadastrados nos ultimos 7 dias."
-        conversa.estado_atual = self.START_STATE
-        conversa.contexto_json = {"aluguer_ids": [aluguer.id for aluguer in alugueres], "ajustes": {}}
+        conversa.estado_atual = self.ALTER_START_STATE
+        conversa.contexto_json = {"aluguer_ids": [aluguer.id for aluguer in alugueres]}
         self.db.commit()
-        return "Escolha o registro para renovar:\n" + self._format_list(alugueres)
+        return "Escolha o registro para alterar:\n" + self._format_list(alugueres)
+
+    def start_exclusao(self, conversa: ConversaWhatsApp) -> str:
+        alugueres = self.aluguer_service.listar_cadastrados_nos_ultimos_dias(7)
+        if not alugueres:
+            conversa.estado_atual = "idle"
+            conversa.contexto_json = {}
+            self.db.commit()
+            return "Nao encontrei registros cadastrados nos ultimos 7 dias."
+        conversa.estado_atual = self.DELETE_START_STATE
+        conversa.contexto_json = {"aluguer_ids": [aluguer.id for aluguer in alugueres]}
+        self.db.commit()
+        return "Escolha o registro para excluir:\n" + self._format_list(alugueres)
 
     def handle(self, conversa: ConversaWhatsApp, message: NormalizedWhatsAppMessage) -> str:
         state = conversa.estado_atual
         context = dict(conversa.contexto_json or {})
 
-        if state == "renovacao_aguardando_item":
+        if state == "alteracao_aguardando_item":
             aluguer = self._select_aluguer(context, message.texto)
             if not aluguer:
                 return "Escolha um numero valido da lista."
             context["aluguer_id"] = aluguer.id
-            context["ajustes"] = {}
-            conversa.estado_atual = "renovacao_aguardando_decisao_alterar"
+            conversa.estado_atual = "alteracao_aguardando_campo"
             conversa.contexto_json = context
             self.db.commit()
-            return (
-                self._format_details(aluguer)
-                + "\n\nDeseja alterar alguma informacao antes de renovar? Responda SIM para alterar ou NAO para prosseguir."
-            )
+            return self._format_details(aluguer) + "\n\nCampos alteraveis:\n" + self._format_fields()
 
-        if state == "renovacao_aguardando_decisao_alterar":
-            decision = self._parse_yes_no(message.texto)
-            if decision is True:
-                conversa.estado_atual = "renovacao_aguardando_campo"
-                conversa.contexto_json = context
-                self.db.commit()
-                return "Campos alteraveis antes de renovar:\n" + self._format_fields()
-            if decision is False:
-                return self._finish(conversa, context, message.telefone)
-            return "Responda SIM para alterar ou NAO para prosseguir."
-
-        if state == "renovacao_aguardando_campo":
+        if state == "alteracao_aguardando_campo":
             field = self._select_field(message.texto)
             if not field:
                 return "Escolha um numero valido de campo."
             context["field"] = field
-            conversa.estado_atual = "renovacao_aguardando_valor"
+            conversa.estado_atual = "alteracao_aguardando_valor"
             conversa.contexto_json = context
             self.db.commit()
             return self._prompt_for_field(field)
 
-        if state == "renovacao_aguardando_valor":
-            ajustes = dict(context.get("ajustes") or {})
-            error = self._apply_adjustment(ajustes, context["field"], message)
+        if state == "alteracao_aguardando_valor":
+            aluguer = self.aluguer_service._get_or_raise(context["aluguer_id"])
+            error = self._apply_field(aluguer, context["field"], message)
             if error:
                 return error
-            context["ajustes"] = ajustes
-            context.pop("field", None)
-            conversa.estado_atual = "renovacao_aguardando_decisao_alterar"
+            self.aluguer_service.salvar(aluguer)
+            conversa.estado_atual = "confirmado"
+            conversa.contexto_json = {"aluguer_id": aluguer.id, "ultima_operacao": "alteracao"}
+            self.db.commit()
+            return "Registro alterado.\n" + self._format_summary(aluguer)
+
+        if state == "exclusao_aguardando_item":
+            aluguer = self._select_aluguer(context, message.texto)
+            if not aluguer:
+                return "Escolha um numero valido da lista."
+            context["aluguer_id"] = aluguer.id
+            conversa.estado_atual = "exclusao_aguardando_confirmacao"
             conversa.contexto_json = context
             self.db.commit()
-            return "Alteracao registrada. Deseja alterar mais alguma coisa? Responda SIM para alterar ou NAO para prosseguir."
+            return (
+                self._format_details(aluguer)
+                + "\n\nTem certeza que deseja apagar este registro? Responda SIM para confirmar."
+            )
 
-        return "Comando nao reconhecido. Envie 'renovar' ou 'prorrogar' para iniciar."
+        if state == "exclusao_aguardando_confirmacao":
+            aluguer_id = context["aluguer_id"]
+            confirmation = (message.texto or "").strip().lower()
+            conversa.estado_atual = "confirmado"
+            conversa.contexto_json = {"aluguer_id": aluguer_id, "ultima_operacao": "exclusao"}
+            if confirmation in {"sim", "confirmar", "apagar"}:
+                self.aluguer_service.excluir(aluguer_id)
+                self.db.commit()
+                return f"Registro #{aluguer_id} excluido."
+            self.db.commit()
+            return "Exclusao cancelada. Nenhum registro foi apagado."
 
-    def _finish(self, conversa: ConversaWhatsApp, context: dict, operador_telefone: str) -> str:
-        origem = self.aluguer_service._get_or_raise(context["aluguer_id"])
-        novo = self.aluguer_service.renovar_criando_novo_registro(
-            origem.id,
-            operador_telefone=normalize_portugal_phone(operador_telefone),
-            ajustes=dict(context.get("ajustes") or {}),
-        )
-        conversa.estado_atual = "confirmado"
-        conversa.contexto_json = {
-            "aluguer_origem_id": origem.id,
-            "aluguer_id": novo.id,
-            "ultima_operacao": "renovacao",
-        }
-        self.db.commit()
-        return self._format_renewal_summary(origem, novo)
+        return "Comando nao reconhecido. Envie 'alterar' ou 'excluir' para iniciar."
 
     def _select_aluguer(self, context: dict, value: str | None) -> AluguerContentor | None:
         index = self._parse_positive_int(value)
@@ -129,49 +138,56 @@ class RenovacaoAgent:
             return None
         return self.EDITABLE_FIELDS[index - 1][0]
 
-    def _apply_adjustment(self, ajustes: dict, field: str, message: NormalizedWhatsAppMessage) -> str | None:
+    def _apply_field(self, aluguer: AluguerContentor, field: str, message: NormalizedWhatsAppMessage) -> str | None:
         value = (message.texto or "").strip()
         if field == "quantidade_contentores":
             parsed = self._parse_positive_int(value)
             if parsed is None:
                 return "Envie uma quantidade valida, por exemplo 1."
-            ajustes["quantidade_contentores"] = parsed
+            aluguer.quantidade_contentores = parsed
         elif field == "nome_cliente":
             if not value:
                 return "Envie o nome do cliente."
-            ajustes["nome_cliente"] = value
+            aluguer.nome_cliente = value
+            aluguer.cliente.nome = value
         elif field == "telefone_cliente":
             telefone = normalize_portugal_phone(value)
             if not telefone:
                 return "Envie um telefone valido do cliente."
-            ajustes["telefone_cliente"] = telefone
+            aluguer.telefone_cliente = telefone
+            aluguer.cliente.telefone = telefone
         elif field == "email_cliente":
-            ajustes["email_cliente"] = None if value.lower() in {"", "pular", "sem email", "sem e-mail"} else value
+            aluguer.email_cliente = None if value.lower() in {"", "pular", "sem email", "sem e-mail"} else value
         elif field == "localizacao":
             latitude, longitude = self.localizacao_agent.extract(message)
             if latitude is None or longitude is None:
                 return "Envie uma localizacao do WhatsApp para atualizar."
-            ajustes["latitude"] = latitude
-            ajustes["longitude"] = longitude
+            aluguer.latitude = latitude
+            aluguer.longitude = longitude
         elif field == "tipo_residuo":
             tipo_residuo = self._parse_tipo_residuo(value)
             if tipo_residuo is None:
                 return "Responda Entulho limpo ou Entulho misto, ou escolha 1/2."
-            ajustes["tipo_residuo"] = tipo_residuo
+            aluguer.tipo_residuo = tipo_residuo
         elif field == "valor":
             valor = self._parse_money(value)
             if valor is None:
                 return "Envie um valor valido, por exemplo 150, 150.00, 150,00 ou EUR 150."
-            ajustes["valor"] = valor
+            aluguer.valor = valor
         elif field == "forma_pagamento":
             if not value:
                 return "Envie a forma de pagamento."
-            ajustes["forma_pagamento"] = value
+            aluguer.forma_pagamento = value
         elif field == "pago":
             pago = self._parse_payment_status(value)
             if pago is None:
                 return "Responda sim/nao ou pago/pendente."
-            ajustes["pago"] = pago
+            aluguer.pago = pago
+        elif field == "data_vencimento":
+            data = self._parse_date(value)
+            if data is None:
+                return "Envie a data de retirada no formato DD/MM/AAAA."
+            aluguer.data_vencimento = data
         return None
 
     def _format_list(self, alugueres: list[AluguerContentor]) -> str:
@@ -182,27 +198,11 @@ class RenovacaoAgent:
         contentor = aluguer.contentor.codigo if aluguer.contentor else f"#{aluguer.contentor_id}"
         return (
             f"#{aluguer.id} / {contentor} - {aluguer.nome_cliente} - "
-            f"entrega {aluguer.data_entrega:%d/%m/%Y} - retirada {aluguer.data_vencimento:%d/%m/%Y} - "
-            f"valor {aluguer.valor} - {pagamento}"
+            f"entrega {aluguer.data_entrega:%d/%m/%Y} - retirada {aluguer.data_vencimento:%d/%m/%Y} - {pagamento}"
         )
 
     def _format_details(self, aluguer: AluguerContentor) -> str:
-        pagamento = "pago" if aluguer.pago else "pendente"
-        contentor = aluguer.contentor.codigo if aluguer.contentor else f"#{aluguer.contentor_id}"
-        return "\n".join(
-            [
-                "Registro selecionado:",
-                f"ID/referencia: #{aluguer.id}",
-                f"Contentor: {contentor}",
-                f"Cliente: {aluguer.nome_cliente}",
-                f"Telefone: {aluguer.telefone_cliente}",
-                f"WhatsApp cliente: {whatsapp_link(aluguer.telefone_cliente)}",
-                f"Data entrega: {aluguer.data_entrega:%d/%m/%Y}",
-                f"Data retirada: {aluguer.data_vencimento:%d/%m/%Y}",
-                f"Valor: {aluguer.valor}",
-                f"Status pagamento: {pagamento}",
-            ]
-        )
+        return "Registro selecionado:\n" + self._format_summary(aluguer)
 
     def _format_fields(self) -> str:
         return "\n".join(f"{index}. {label}" for index, (_, label) in enumerate(self.EDITABLE_FIELDS, start=1))
@@ -215,22 +215,29 @@ class RenovacaoAgent:
             return "Envie o novo status de pagamento: pago ou pendente."
         if field == "localizacao":
             return "Envie a nova localizacao pelo WhatsApp."
+        if field == "data_vencimento":
+            return "Envie a nova data de retirada no formato DD/MM/AAAA."
         return f"Envie o novo valor para {labels[field]}."
 
-    def _format_renewal_summary(self, origem: AluguerContentor, novo: AluguerContentor) -> str:
-        pagamento = "pago" if novo.pago else "pendente"
+    def _format_summary(self, aluguer: AluguerContentor) -> str:
+        pagamento = "pago" if aluguer.pago else "pendente"
+        contentor = aluguer.contentor.codigo if aluguer.contentor else f"#{aluguer.contentor_id}"
         return "\n".join(
             [
-                "Renovacao criada.",
-                f"Registro antigo: #{origem.id}",
-                f"Novo registro: #{novo.id}",
-                f"Cliente: {novo.nome_cliente}",
-                f"Telefone: {novo.telefone_cliente}",
-                f"WhatsApp cliente: {whatsapp_link(novo.telefone_cliente)}",
-                f"Nova data entrega: {novo.data_entrega:%d/%m/%Y}",
-                f"Nova data retirada: {novo.data_vencimento:%d/%m/%Y}",
-                f"Valor: {novo.valor}",
+                f"ID/referencia: #{aluguer.id}",
+                f"Contentor: {contentor}",
+                f"Quantidade: {aluguer.quantidade_contentores}",
+                f"Cliente: {aluguer.nome_cliente}",
+                f"Telefone: {aluguer.telefone_cliente}",
+                f"WhatsApp cliente: {whatsapp_link(aluguer.telefone_cliente)}",
+                f"E-mail: {aluguer.email_cliente or 'nao informado'}",
+                f"Data entrega: {aluguer.data_entrega:%d/%m/%Y}",
+                f"Data retirada: {aluguer.data_vencimento:%d/%m/%Y}",
+                f"Tipo residuo: {aluguer.tipo_residuo or 'nao informado'}",
+                f"Valor: {aluguer.valor}",
+                f"Forma pagamento: {aluguer.forma_pagamento or 'nao informada'}",
                 f"Status pagamento: {pagamento}",
+                f"Operador: {aluguer.operador_telefone or 'nao informado'}",
             ]
         )
 
@@ -240,14 +247,6 @@ class RenovacaoAgent:
         except ValueError:
             return None
         return parsed if parsed > 0 else None
-
-    def _parse_yes_no(self, value: str | None) -> bool | None:
-        normalized = (value or "").strip().lower()
-        if normalized in {"sim", "s", "yes", "y"}:
-            return True
-        if normalized in {"nao", "não", "n", "no"}:
-            return False
-        return None
 
     def _parse_tipo_residuo(self, value: str | None) -> str | None:
         normalized = (value or "").strip().lower()
@@ -260,8 +259,7 @@ class RenovacaoAgent:
     def _parse_money(self, value: str | None) -> Decimal | None:
         if not value:
             return None
-        normalized = value.replace("EUR", "").replace("eur", "").replace(",", ".").strip()
-        normalized = normalized.replace(chr(8364), "").strip()
+        normalized = value.replace("€", "").replace("EUR", "").replace("eur", "").replace(",", ".").strip()
         try:
             return Decimal(normalized)
         except (InvalidOperation, AttributeError):
@@ -274,3 +272,9 @@ class RenovacaoAgent:
         if normalized in {"nao", "não", "n", "no", "pendente", "nao pago", "não pago"}:
             return False
         return None
+
+    def _parse_date(self, value: str | None) -> datetime | None:
+        try:
+            return datetime.strptime((value or "").strip(), "%d/%m/%Y")
+        except ValueError:
+            return None

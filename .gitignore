@@ -10,4 +10,5 @@ venv/
 htmlcov/
 .coverage
 media/
+backups/
 .env.backup_*

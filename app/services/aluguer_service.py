@@ -26,6 +26,10 @@ class AluguerService:
         forma_pagamento: str | None,
         pago: bool,
         contentor_id: int | None = None,
+        quantidade_contentores: int = 1,
+        email_cliente: str | None = None,
+        tipo_residuo: str | None = None,
+        operador_telefone: str | None = None,
         foto_entrega_path: str | None = None,
         latitude: float | None = None,
         longitude: float | None = None,
@@ -43,11 +47,15 @@ class AluguerService:
             cliente_id=cliente.id,
             telefone_cliente=telefone_cliente,
             nome_cliente=nome_cliente,
+            email_cliente=email_cliente,
+            quantidade_contentores=quantidade_contentores,
             data_entrega=entrega,
             data_vencimento=entrega + timedelta(days=5),
+            tipo_residuo=tipo_residuo,
             valor=Decimal(str(valor)),
             forma_pagamento=forma_pagamento,
             pago=pago,
+            operador_telefone=operador_telefone,
             status=StatusAluguer.ATIVO,
             foto_entrega_path=foto_entrega_path,
             latitude=latitude,
@@ -73,6 +81,35 @@ class AluguerService:
         self.alugueres.add_event(aluguer.id, "renovado", "Aluguer renovado por mais 5 dias")
         return self.alugueres.save(aluguer)
 
+    def renovar_criando_novo_registro(
+        self,
+        aluguer_id: int,
+        operador_telefone: str,
+        ajustes: dict | None = None,
+    ) -> AluguerContentor:
+        origem = self._get_or_raise(aluguer_id)
+        ajustes = ajustes or {}
+        nova_entrega = origem.data_vencimento + timedelta(days=1)
+        novo = self.registrar_novo_aluguer(
+            contentor_id=origem.contentor_id,
+            quantidade_contentores=ajustes.get("quantidade_contentores", origem.quantidade_contentores),
+            nome_cliente=ajustes.get("nome_cliente", origem.nome_cliente),
+            telefone_cliente=ajustes.get("telefone_cliente", origem.telefone_cliente),
+            email_cliente=ajustes.get("email_cliente", origem.email_cliente),
+            latitude=ajustes.get("latitude", origem.latitude),
+            longitude=ajustes.get("longitude", origem.longitude),
+            tipo_residuo=ajustes.get("tipo_residuo", origem.tipo_residuo),
+            valor=ajustes.get("valor", origem.valor),
+            forma_pagamento=ajustes.get("forma_pagamento", origem.forma_pagamento),
+            pago=ajustes.get("pago", origem.pago),
+            operador_telefone=operador_telefone or origem.operador_telefone,
+            foto_entrega_path=origem.foto_entrega_path,
+            observacoes=origem.observacoes,
+            data_entrega=nova_entrega,
+        )
+        self.alugueres.add_event(novo.id, "renovado_de", f"Renovacao criada a partir do aluguer #{origem.id}")
+        return self.alugueres.save(novo)
+
     def marcar_recolha(self, aluguer_id: int) -> AluguerContentor:
         aluguer = self._get_or_raise(aluguer_id)
         aluguer.status = StatusAluguer.AGUARDANDO_RECOLHA
@@ -89,6 +126,32 @@ class AluguerService:
 
     def listar_atrasados(self, now: datetime | None = None) -> list[AluguerContentor]:
         return self.alugueres.list_overdue(now or utcnow())
+
+    def listar_cadastrados_nos_ultimos_dias(
+        self,
+        days: int = 7,
+        now: datetime | None = None,
+    ) -> list[AluguerContentor]:
+        base = now or utcnow()
+        since = base - timedelta(days=days)
+        return (
+            self.db.query(AluguerContentor)
+            .filter(AluguerContentor.criado_em >= since)
+            .order_by(AluguerContentor.criado_em.desc(), AluguerContentor.id.desc())
+            .all()
+        )
+
+    def salvar(self, aluguer: AluguerContentor) -> AluguerContentor:
+        return self.alugueres.save(aluguer)
+
+    def excluir(self, aluguer_id: int) -> None:
+        aluguer = self._get_or_raise(aluguer_id)
+        if aluguer.contentor:
+            aluguer.contentor.status = StatusContentor.DISPONIVEL
+        for evento in list(aluguer.eventos):
+            self.db.delete(evento)
+        self.db.delete(aluguer)
+        self.db.commit()
 
     def _get_or_raise(self, aluguer_id: int) -> AluguerContentor:
         aluguer = self.alugueres.get(aluguer_id)
