@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
@@ -27,6 +28,8 @@ START_COMMANDS = {"iniciar", "cadastrar", "comecar", "começar", "novo"}
 ALTER_COMMANDS = {"alterar", "modificar"}
 DELETE_COMMANDS = {"excluir", "deletar"}
 RENEW_COMMANDS = {"renovar", "prorrogar"}
+MENU_COMMANDS = {"menu", "ola", "oi", "ajuda"}
+MENU_STATE = "menu_principal"
 
 
 class WhatsappRouterAgent:
@@ -43,12 +46,15 @@ class WhatsappRouterAgent:
     def handle(self, message: NormalizedWhatsAppMessage) -> str:
         conversa = self._get_or_create_conversa(message.telefone)
         text = (message.texto or "").strip().lower()
+        normalized_text = self._normalize_text(message.texto)
 
+        if conversa.estado_atual == MENU_STATE:
+            return self._handle_menu_option(conversa, normalized_text, message.telefone)
         if text in COMMANDS:
-            if text == "resumo" and not self._is_authorized(message.telefone):
+            if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
             return self._handle_operational_command(text, message.telefone)
-        if text in START_COMMANDS:
+        if text in START_COMMANDS or normalized_text in {"comecar"}:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
             return self.aluguer_agent.start(conversa)
@@ -64,6 +70,10 @@ class WhatsappRouterAgent:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para renovar registros. Contacte o administrador do sistema."
             return self.renovacao_agent.start(conversa)
+        if normalized_text in MENU_COMMANDS:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para usar o menu operacional. Contacte o administrador do sistema."
+            return self._show_menu(conversa)
         if conversa.estado_atual in AluguerAgent.ACTIVE_STATES:
             return self.aluguer_agent.handle(conversa, message)
         if conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES:
@@ -71,8 +81,52 @@ class WhatsappRouterAgent:
         if conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES:
             return self.renovacao_agent.handle(conversa, message)
         if text in {"contentores", "status"}:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
             return self.contentor_agent.listar_status()
-        return "Comando nao reconhecido. Envie 'novo' para registar um aluguer."
+        if not self._is_authorized(message.telefone):
+            return "Telefone nao autorizado para usar o menu operacional. Contacte o administrador do sistema."
+        return self._show_menu(conversa)
+
+    def _show_menu(self, conversa: ConversaWhatsApp) -> str:
+        conversa.estado_atual = MENU_STATE
+        conversa.contexto_json = {}
+        self.db.commit()
+        return "\n".join(
+            [
+                "Olá, sou o Robô de Gestão de Contentores da OLT.",
+                "O que vamos fazer agora?",
+                "",
+                "1 - Cadastrar entrega de contentor",
+                "2 - Alterar informações",
+                "3 - Excluir pedido",
+                "4 - Ver resumo",
+                "5 - Renovar/prorrogar contentor",
+                "",
+                "Responda com o número da opção.",
+            ]
+        )
+
+    def _handle_menu_option(self, conversa: ConversaWhatsApp, option: str, telefone: str) -> str:
+        if not self._is_authorized(telefone):
+            conversa.estado_atual = "idle"
+            conversa.contexto_json = {}
+            self.db.commit()
+            return "Telefone nao autorizado para usar o menu operacional. Contacte o administrador do sistema."
+        if option == "1":
+            return self.aluguer_agent.start(conversa)
+        if option == "2":
+            return self.gestao_aluguer_agent.start_alteracao(conversa)
+        if option == "3":
+            return self.gestao_aluguer_agent.start_exclusao(conversa)
+        if option == "4":
+            conversa.estado_atual = "idle"
+            conversa.contexto_json = {}
+            self.db.commit()
+            return self._handle_operational_command("resumo", telefone)
+        if option == "5":
+            return self.renovacao_agent.start(conversa)
+        return "Opção inválida. Responda com o número da opção."
 
     def _handle_operational_command(self, command: str, telefone: str | None = None) -> str:
         if command == "resumo":
@@ -291,3 +345,7 @@ class WhatsappRouterAgent:
 
     def _is_authorized(self, telefone: str) -> bool:
         return self.operador_service.verificar_autorizacao(telefone)
+
+    def _normalize_text(self, value: str | None) -> str:
+        normalized = unicodedata.normalize("NFKD", value or "")
+        return "".join(char for char in normalized if not unicodedata.combining(char)).strip().lower()

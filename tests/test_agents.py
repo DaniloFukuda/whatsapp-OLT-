@@ -107,7 +107,6 @@ def preparar_resumo_paulo(db_session):
 
 def avancar_cadastro_ate_confirmacao_data(router, db_session, telefone: str = "351900001000"):
     router.handle(text_message("novo", telefone=telefone))
-    router.handle(text_message("1", telefone=telefone))
     router.handle(
         NormalizedWhatsAppMessage(
             telefone=telefone,
@@ -156,9 +155,10 @@ def test_router_chama_aluguer_agent_quando_mensagem_for_novo(db_session, monkeyp
     response = WhatsappRouterAgent(db_session).handle(text_message("novo"))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").first()
 
-    assert "quantidade de contentores" in response
+    assert "Envie a foto do contentor no local" in response
     assert conversa.estado_atual == AluguerAgent.START_STATE
     assert conversa.contexto_json["contentor_codigo"] == "C01"
+    assert conversa.contexto_json["quantidade_contentores"] == 1
 
 
 def test_comandos_de_inicio_disparam_cadastro(db_session, monkeypatch):
@@ -174,8 +174,108 @@ def test_comandos_de_inicio_disparam_cadastro(db_session, monkeypatch):
         response = WhatsappRouterAgent(db_session).handle(text_message(command, telefone=telefone))
         conversa = db_session.query(ConversaWhatsApp).filter_by(telefone=telefone).one()
 
-        assert "quantidade de contentores" in response
+        assert "Envie a foto do contentor no local" in response
         assert conversa.estado_atual == AluguerAgent.START_STATE
+
+
+def test_menu_retorna_menu_inicial(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("menu"))
+
+    assert "Olá, sou o Robô de Gestão de Contentores da OLT." in response
+    assert "1 - Cadastrar entrega de contentor" in response
+    assert "2 - Alterar informações" in response
+    assert "3 - Excluir pedido" in response
+    assert "4 - Ver resumo" in response
+    assert "5 - Renovar/prorrogar contentor" in response
+    assert "Responda com o número da opção." in response
+
+
+def test_oi_retorna_menu_inicial_para_operador_autorizado(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("oi"))
+
+    assert "Olá, sou o Robô de Gestão de Contentores da OLT." in response
+    assert "1 - Cadastrar entrega de contentor" in response
+
+
+def test_menu_opcao_1_inicia_cadastro(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("menu"))
+    response = router.handle(text_message("1"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one()
+
+    assert "Envie a foto do contentor no local" in response
+    assert "quantidade" not in response.lower()
+    assert conversa.estado_atual == "aguardando_foto_entrega"
+    assert conversa.contexto_json["quantidade_contentores"] == 1
+
+
+def test_menu_opcao_2_inicia_alteracao(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    preparar_aluguer_gestao(db_session, "Cliente Menu Alterar", "351912345640")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("menu"))
+    response = router.handle(text_message("2"))
+
+    assert "Escolha o registro para alterar:" in response
+
+
+def test_menu_opcao_3_inicia_exclusao(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    preparar_aluguer_gestao(db_session, "Cliente Menu Excluir", "351912345641")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("menu"))
+    response = router.handle(text_message("3"))
+
+    assert "Escolha o registro para excluir:" in response
+
+
+def test_menu_opcao_4_retorna_resumo(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    preparar_operacao_demo(db_session)
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("menu"))
+    response = router.handle(text_message("4"))
+
+    assert "Resumo dos contentores" in response
+    assert "Alugueres ativos:" in response
+
+
+def test_menu_opcao_5_inicia_renovacao(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    preparar_aluguer_gestao(db_session, "Cliente Menu Renovar", "351912345642")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("menu"))
+    response = router.handle(text_message("5"))
+
+    assert "Escolha o registro para renovar:" in response
+
+
+def test_operador_nao_autorizado_nao_recebe_menu(db_session, monkeypatch):
+    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONE", "351999999999")
+    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONES", "")
+    monkeypatch.setenv("WHATSAPP_OWNER_PHONE", "")
+    monkeypatch.setenv("OWNER_WHATSAPP", "")
+    get_settings.cache_clear()
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("oi", telefone="351900000000"))
+
+    assert response == "Telefone nao autorizado para usar o menu operacional. Contacte o administrador do sistema."
+    assert "Cadastrar entrega" not in response
+    assert "Resumo" not in response
 
 
 def test_aluguer_agent_avanca_estado_da_conversa(db_session):
@@ -187,7 +287,6 @@ def test_aluguer_agent_avanca_estado_da_conversa(db_session):
 
     agent = AluguerAgent(db_session)
     agent.start(conversa)
-    agent.handle(conversa, text_message("1", telefone=conversa.telefone))
     response = agent.handle(
         conversa,
         NormalizedWhatsAppMessage(
@@ -199,9 +298,68 @@ def test_aluguer_agent_avanca_estado_da_conversa(db_session):
         ),
     )
 
-    assert response == "Agora envie a localizacao."
+    assert response == "Agora envie a localizacao pelo WhatsApp."
     assert conversa.estado_atual == "aguardando_localizacao"
     assert conversa.contexto_json["foto_entrega_path"] == "whatsapp://media/media-1"
+
+
+def test_texto_na_etapa_de_foto_nao_avanca_e_pede_imagem(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("novo"))
+    response = router.handle(text_message("foto esta aqui"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one()
+
+    assert response == "⚠️ Ainda não recebi a imagem. Por favor, envie a foto do contentor no local para prosseguirmos."
+    assert conversa.estado_atual == "aguardando_foto_entrega"
+    assert "foto_entrega_path" not in conversa.contexto_json
+
+
+def test_documento_na_etapa_de_foto_nao_avanca(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("novo"))
+    response = router.handle(
+        NormalizedWhatsAppMessage(
+            telefone="351900000000",
+            tipo="document",
+            message_id="doc-1",
+            media_id="doc-1",
+            mime_type="application/pdf",
+        )
+    )
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one()
+
+    assert response == "⚠️ Ainda não recebi a imagem. Por favor, envie a foto do contentor no local para prosseguirmos."
+    assert conversa.estado_atual == "aguardando_foto_entrega"
+
+
+def test_texto_na_etapa_de_localizacao_nao_avanca_e_pede_localizacao_nativa(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("novo"))
+    router.handle(
+        NormalizedWhatsAppMessage(
+            telefone="351900000000",
+            tipo="image",
+            message_id="foto-localizacao",
+            media_id="foto-localizacao",
+            mime_type="image/jpeg",
+        )
+    )
+    response = router.handle(text_message("Rua das Flores, 123"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one()
+
+    assert response == "⚠️ Para garantir a precisão do mapa, preciso que envie a localização pelo WhatsApp. Use o botão de anexo/localização."
+    assert conversa.estado_atual == "aguardando_localizacao"
+    assert "latitude" not in conversa.contexto_json
+    assert "longitude" not in conversa.contexto_json
 
 
 def test_recolha_agent_marca_aluguer_como_aguardando_recolha(db_session):
@@ -233,8 +391,6 @@ def test_fluxo_completo_de_novo_aluguer(db_session, monkeypatch):
     responses = []
 
     responses.append(router.handle(text_message("novo")))
-    states.append(db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one().estado_atual)
-    responses.append(router.handle(text_message("2")))
     states.append(db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one().estado_atual)
     responses.append(
         router.handle(
@@ -281,7 +437,6 @@ def test_fluxo_completo_de_novo_aluguer(db_session, monkeypatch):
     aluguer = AluguerService(db_session)._get_or_raise(conversa.contexto_json["aluguer_id"])
 
     assert states == [
-        "aguardando_quantidade_contentores",
         "aguardando_foto_entrega",
         "aguardando_localizacao",
         "aguardando_nome_cliente",
@@ -295,7 +450,7 @@ def test_fluxo_completo_de_novo_aluguer(db_session, monkeypatch):
         "confirmado",
     ]
     assert "ID/referencia" in responses[-1]
-    assert "Quantidade: 2" in responses[-1]
+    assert "Quantidade:" not in responses[-1]
     assert "WhatsApp cliente: https://wa.me/351911111111" in responses[-1]
     assert "Tipo residuo: Entulho misto" in responses[-1]
     assert "Status pagamento: pago" in responses[-1]
@@ -304,7 +459,7 @@ def test_fluxo_completo_de_novo_aluguer(db_session, monkeypatch):
     assert aluguer.nome_cliente == "Cliente Final"
     assert aluguer.telefone_cliente == "351911111111"
     assert aluguer.email_cliente is None
-    assert aluguer.quantidade_contentores == 2
+    assert aluguer.quantidade_contentores == 1
     assert aluguer.tipo_residuo == "Entulho misto"
     assert aluguer.forma_pagamento == "mbway"
     assert aluguer.pago is True
@@ -1021,8 +1176,9 @@ def test_mensagem_novo_de_operador_autorizado_inicia_fluxo(db_session, monkeypat
     response = WhatsappRouterAgent(db_session).handle(text_message("Novo", telefone="556198266551"))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="556198266551").one()
 
-    assert "quantidade de contentores" in response
-    assert conversa.estado_atual == "aguardando_quantidade_contentores"
+    assert "Envie a foto do contentor no local" in response
+    assert conversa.estado_atual == "aguardando_foto_entrega"
+    assert conversa.contexto_json["quantidade_contentores"] == 1
 
 
 def test_comando_resumo_mostra_contadores_operacionais(db_session, monkeypatch):
@@ -1203,7 +1359,8 @@ def test_numero_nao_autorizado_nao_recebe_resumo_detalhado(db_session, monkeypat
     assert "Cliente Retirada Hoje" not in response
 
 
-def test_comando_lista_mostra_todos_os_contentores_com_status(db_session):
+def test_comando_lista_mostra_todos_os_contentores_com_status(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
     preparar_operacao_demo(db_session)
 
     response = WhatsappRouterAgent(db_session).handle(text_message("lista"))
@@ -1217,7 +1374,8 @@ def test_comando_lista_mostra_todos_os_contentores_com_status(db_session):
     assert len(response.splitlines()) == 20
 
 
-def test_comando_disponiveis_lista_apenas_contentores_disponiveis(db_session):
+def test_comando_disponiveis_lista_apenas_contentores_disponiveis(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
     preparar_operacao_demo(db_session)
 
     response = WhatsappRouterAgent(db_session).handle(text_message("disponiveis"))
@@ -1229,7 +1387,8 @@ def test_comando_disponiveis_lista_apenas_contentores_disponiveis(db_session):
     assert "C04" not in response
 
 
-def test_comando_alugados_lista_cliente_vencimento_e_status(db_session):
+def test_comando_alugados_lista_cliente_vencimento_e_status(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
     aluguer_amanha, aluguer_atrasado, aluguer_regular = preparar_operacao_demo(db_session)
 
     response = WhatsappRouterAgent(db_session).handle(text_message("alugados"))
@@ -1240,7 +1399,8 @@ def test_comando_alugados_lista_cliente_vencimento_e_status(db_session):
     assert f"C03 - Cliente Regular - vencimento {aluguer_regular.data_vencimento:%d/%m/%Y} - ativo" in response
 
 
-def test_comando_vencendo_lista_alugueres_que_vencem_amanha(db_session):
+def test_comando_vencendo_lista_alugueres_que_vencem_amanha(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
     aluguer_amanha, _, _ = preparar_operacao_demo(db_session)
 
     response = WhatsappRouterAgent(db_session).handle(text_message("vencendo"))
@@ -1251,7 +1411,8 @@ def test_comando_vencendo_lista_alugueres_que_vencem_amanha(db_session):
     assert "Cliente Regular" not in response
 
 
-def test_comando_atrasados_lista_alugueres_ativos_em_atraso(db_session):
+def test_comando_atrasados_lista_alugueres_ativos_em_atraso(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
     _, aluguer_atrasado, _ = preparar_operacao_demo(db_session)
 
     response = WhatsappRouterAgent(db_session).handle(text_message("atrasados"))

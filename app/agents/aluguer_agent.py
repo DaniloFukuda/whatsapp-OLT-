@@ -15,10 +15,9 @@ from app.services.contentor_service import ContentorService
 
 
 class AluguerAgent:
-    START_STATE = "aguardando_quantidade_contentores"
+    START_STATE = "aguardando_foto_entrega"
     CONFIRMED_STATE = "confirmado"
     ACTIVE_STATES = {
-        "aguardando_quantidade_contentores",
         "aguardando_foto_entrega",
         "aguardando_localizacao",
         "aguardando_nome_cliente",
@@ -50,34 +49,28 @@ class AluguerAgent:
         conversa.contexto_json = {
             "contentor_id": contentor.id,
             "contentor_codigo": contentor.codigo,
+            "quantidade_contentores": 1,
             "operador_telefone": normalize_portugal_phone(conversa.telefone),
         }
         self.db.commit()
-        return f"Vamos registrar um novo aluguer com o contentor {contentor.codigo}. Qual e a quantidade de contentores?"
+        return f"Vamos registrar uma entrega com o contentor {contentor.codigo}. Envie a foto do contentor no local."
 
     def handle(self, conversa: ConversaWhatsApp, message: NormalizedWhatsAppMessage) -> str:
         state = conversa.estado_atual
         context = dict(conversa.contexto_json or {})
 
-        if state == "aguardando_quantidade_contentores":
-            quantidade = self._parse_positive_int(message.texto)
-            if quantidade is None:
-                return "Envie a quantidade de contentores, por exemplo 1."
-            context["quantidade_contentores"] = quantidade
-            return self._advance(conversa, "aguardando_foto_entrega", context, "Envie a foto do contentor no local.")
-
         if state == "aguardando_foto_entrega":
             media_path = self.comprovativo_agent.extract_media_path(message)
             if not media_path:
-                return "Envie uma foto do contentor no local para continuar."
+                return "⚠️ Ainda não recebi a imagem. Por favor, envie a foto do contentor no local para prosseguirmos."
             context["foto_entrega_path"] = media_path
             context["media_id"] = message.media_id
-            return self._advance(conversa, "aguardando_localizacao", context, "Agora envie a localizacao.")
+            return self._advance(conversa, "aguardando_localizacao", context, "Agora envie a localizacao pelo WhatsApp.")
 
         if state == "aguardando_localizacao":
             latitude, longitude = self.localizacao_agent.extract(message)
             if latitude is None or longitude is None:
-                return "Envie a localizacao do contentor para continuar."
+                return "⚠️ Para garantir a precisão do mapa, preciso que envie a localização pelo WhatsApp. Use o botão de anexo/localização."
             context["latitude"] = latitude
             context["longitude"] = longitude
             return self._advance(conversa, "aguardando_nome_cliente", context, "Qual e o nome do cliente?")
@@ -234,7 +227,6 @@ class AluguerAgent:
         return "\n".join(
             [
                 f"Cadastro concluido. ID/referencia: #{aluguer.id}",
-                f"Quantidade: {aluguer.quantidade_contentores}",
                 f"Cliente: {aluguer.nome_cliente}",
                 f"Telefone: {aluguer.telefone_cliente}",
                 f"WhatsApp cliente: {whatsapp_link(aluguer.telefone_cliente)}",
