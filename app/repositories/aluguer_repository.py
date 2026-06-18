@@ -17,13 +17,19 @@ class AluguerRepository:
         return aluguer
 
     def get(self, aluguer_id: int) -> AluguerContentor | None:
-        return self.db.get(AluguerContentor, aluguer_id)
+        return (
+            self.db.query(AluguerContentor)
+            .filter(AluguerContentor.id == aluguer_id)
+            .filter(AluguerContentor.is_deleted.is_(False))
+            .first()
+        )
 
     def list_by_due_range(self, start: datetime, end: datetime) -> list[AluguerContentor]:
         return (
             self.db.query(AluguerContentor)
             .filter(AluguerContentor.data_vencimento >= start)
             .filter(AluguerContentor.data_vencimento < end)
+            .filter(AluguerContentor.is_deleted.is_(False))
             .filter(AluguerContentor.status.in_([StatusAluguer.ATIVO, StatusAluguer.VENCENDO, StatusAluguer.RENOVADO]))
             .order_by(AluguerContentor.data_vencimento)
             .all()
@@ -33,6 +39,7 @@ class AluguerRepository:
         return (
             self.db.query(AluguerContentor)
             .filter(AluguerContentor.data_vencimento < now)
+            .filter(AluguerContentor.is_deleted.is_(False))
             .filter(AluguerContentor.status.in_([StatusAluguer.ATIVO, StatusAluguer.VENCENDO, StatusAluguer.RENOVADO]))
             .order_by(AluguerContentor.data_vencimento)
             .all()

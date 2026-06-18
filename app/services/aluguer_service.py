@@ -56,6 +56,7 @@ class AluguerService:
             forma_pagamento=forma_pagamento,
             pago=pago,
             operador_telefone=operador_telefone,
+            criado_por_operador=operador_telefone,
             status=StatusAluguer.ATIVO,
             foto_entrega_path=foto_entrega_path,
             latitude=latitude,
@@ -137,6 +138,7 @@ class AluguerService:
         return (
             self.db.query(AluguerContentor)
             .filter(AluguerContentor.criado_em >= since)
+            .filter(AluguerContentor.is_deleted.is_(False))
             .order_by(AluguerContentor.criado_em.desc(), AluguerContentor.id.desc())
             .all()
         )
@@ -144,14 +146,17 @@ class AluguerService:
     def salvar(self, aluguer: AluguerContentor) -> AluguerContentor:
         return self.alugueres.save(aluguer)
 
-    def excluir(self, aluguer_id: int) -> None:
+    def excluir(self, aluguer_id: int, operador_telefone: str | None, justificativa: str) -> AluguerContentor:
+        if len((justificativa or "").strip()) < 10:
+            raise ValueError("Justificativa de exclusao deve ter pelo menos 10 caracteres")
         aluguer = self._get_or_raise(aluguer_id)
         if aluguer.contentor:
             aluguer.contentor.status = StatusContentor.DISPONIVEL
-        for evento in list(aluguer.eventos):
-            self.db.delete(evento)
-        self.db.delete(aluguer)
-        self.db.commit()
+        aluguer.is_deleted = True
+        aluguer.justificativa_exclusao = justificativa.strip()
+        aluguer.excluido_por_operador = operador_telefone
+        self.alugueres.add_event(aluguer.id, "excluido", "Aluguer excluido logicamente")
+        return self.alugueres.save(aluguer)
 
     def _get_or_raise(self, aluguer_id: int) -> AluguerContentor:
         aluguer = self.alugueres.get(aluguer_id)

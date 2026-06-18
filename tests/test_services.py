@@ -2,9 +2,11 @@ from datetime import datetime, timedelta
 
 from app.models.aluguer import StatusAluguer
 from app.models.contentor import StatusContentor
+from app.models.operador import Operador, PerfilOperador
 from app.repositories.cliente_repository import ClienteRepository
 from app.services.aluguer_service import AluguerService
 from app.services.contentor_service import ContentorService
+from app.services.operador_service import OperadorService
 from app.services.seed_service import SeedService
 
 
@@ -85,3 +87,51 @@ def test_listagem_de_alugueres_que_vencem_amanha(db_session):
     result = service.listar_vencendo_amanha(now=datetime(2026, 1, 5, 9, 0, 0))
 
     assert [aluguer.id for aluguer in result] == [vencendo.id]
+
+
+def test_operador_ativo_autorizado(db_session):
+    db_session.add(
+        Operador(
+            telefone_whatsapp="351900000001",
+            nome_operador="Operador Ativo",
+            perfil=PerfilOperador.FUNCIONARIO,
+            ativo=True,
+        )
+    )
+    db_session.commit()
+
+    service = OperadorService(db_session)
+
+    assert service.verificar_autorizacao("351900000001") is True
+    assert service.obter_perfil("351900000001") == PerfilOperador.FUNCIONARIO
+
+
+def test_operador_inativo_bloqueado(db_session):
+    db_session.add(
+        Operador(
+            telefone_whatsapp="351900000002",
+            nome_operador="Operador Inativo",
+            perfil=PerfilOperador.GESTOR,
+            ativo=False,
+        )
+    )
+    db_session.commit()
+
+    service = OperadorService(db_session)
+
+    assert service.verificar_autorizacao("351900000002") is False
+    assert service.obter_perfil("351900000002") is None
+
+
+def test_fallback_operador_pelo_env(db_session, monkeypatch):
+    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONE", "351900000003")
+    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONES", "")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+
+    service = OperadorService(db_session)
+
+    assert service.verificar_autorizacao("351900000003") is True
+    assert service.obter_perfil("351900000003") == PerfilOperador.GESTOR
+    assert service.verificar_autorizacao("351900000004") is False

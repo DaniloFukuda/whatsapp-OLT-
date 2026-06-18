@@ -11,6 +11,7 @@ from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.aluguer import AluguerContentor, StatusAluguer
 from app.models.contentor import Contentor, StatusContentor
 from app.models.conversa import ConversaWhatsApp
+from app.models.operador import Operador, PerfilOperador
 from app.services.aluguer_service import AluguerService
 from app.services.seed_service import SeedService
 
@@ -268,6 +269,7 @@ def test_fluxo_completo_de_novo_aluguer(db_session, monkeypatch):
     assert aluguer.forma_pagamento == "mbway"
     assert aluguer.pago is True
     assert aluguer.operador_telefone == "351900000000"
+    assert aluguer.criado_por_operador == "351900000000"
     assert aluguer.foto_entrega_path == "whatsapp://media/foto-123"
     assert aluguer.latitude == 38.7223
     assert aluguer.longitude == -9.1393
@@ -342,6 +344,7 @@ def test_alteracao_de_nome_do_cliente(db_session, monkeypatch):
     assert "Cliente: Cliente Depois" in response
     assert aluguer.nome_cliente == "Cliente Depois"
     assert aluguer.cliente.nome == "Cliente Depois"
+    assert aluguer.alterado_por_operador == "351900000000"
 
 
 def test_alteracao_de_telefone_normaliza_portugal_e_atualiza_link(db_session, monkeypatch):
@@ -462,10 +465,25 @@ def test_exclusao_com_confirmacao_clara_exclui(db_session, monkeypatch):
 
     router.handle(text_message("deletar"))
     router.handle(text_message("1"))
-    response = router.handle(text_message("confirmar"))
+    pedido_justificativa = router.handle(text_message("confirmar"))
+    curta = router.handle(text_message("curta"))
+    response = router.handle(text_message("Cliente pediu cancelamento"))
 
+    db_session.refresh(aluguer)
+    assert pedido_justificativa == "Informe a justificativa da exclusao com pelo menos 10 caracteres."
+    assert curta == "A justificativa deve ter pelo menos 10 caracteres."
     assert response == f"Registro #{aluguer_id} excluido."
-    assert db_session.get(type(aluguer), aluguer_id) is None
+    assert db_session.get(type(aluguer), aluguer_id) is not None
+    assert aluguer.is_deleted is True
+    assert aluguer.justificativa_exclusao == "Cliente pediu cancelamento"
+    assert aluguer.excluido_por_operador == "351900000000"
+    assert (
+        db_session.query(AluguerContentor)
+        .filter(AluguerContentor.id == aluguer_id)
+        .filter(AluguerContentor.is_deleted.is_(False))
+        .first()
+        is None
+    )
 
 
 def test_numero_nao_autorizado_nao_altera_nem_exclui(db_session, monkeypatch):
@@ -552,6 +570,7 @@ def test_renovacao_sem_alteracoes_cria_novo_registro(db_session, monkeypatch):
     assert novo.nome_cliente == origem.nome_cliente
     assert novo.telefone_cliente == origem.telefone_cliente
     assert novo.contentor_id == origem.contentor_id
+    assert novo.criado_por_operador == "351900000000"
 
 
 def test_renovacao_calcula_novas_datas(db_session, monkeypatch):
@@ -826,6 +845,81 @@ def test_resumo_calcula_faturado_total_e_recebido_no_mes(db_session, monkeypatch
     assert "Faturado total do mes: 300.00" in response
     assert "Recebido/pago no mes: 100.00" in response
     assert "faturado total soma todos os alugueres do mes" in response
+
+
+def test_resumo_gestor_mostra_financeiro(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    preparar_resumo_paulo(db_session)
+    db_session.add(
+        Operador(
+            telefone_whatsapp="351900000010",
+            nome_operador="Gestor",
+            perfil=PerfilOperador.GESTOR,
+            ativo=True,
+        )
+    )
+    db_session.commit()
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000010"))
+
+    assert "Faturamento do mes corrente:" in response
+    assert "Faturado total do mes: 300.00" in response
+
+
+def test_resumo_funcionario_nao_mostra_financeiro(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    preparar_resumo_paulo(db_session)
+    db_session.add(
+        Operador(
+            telefone_whatsapp="351900000011",
+            nome_operador="Funcionario",
+            perfil=PerfilOperador.FUNCIONARIO,
+            ativo=True,
+        )
+    )
+    db_session.commit()
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000011"))
+
+    assert "Retiradas hoje:" in response
+    assert "Cliente Retirada Hoje" in response
+    assert "Faturamento do mes corrente:" not in response
+    assert "Faturado total do mes" not in response
+    assert "Recebido/pago no mes" not in response
+
+
+def test_registros_deletados_nao_aparecem_em_listas_e_resumo(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    deletado = preparar_aluguer_gestao(db_session, "Cliente Deletado", "351912345690")
+    ativo = preparar_aluguer_gestao(db_session, "Cliente Ativo", "351912345691")
+    AluguerService(db_session).excluir(deletado.id, "351900000000", "Duplicidade operacional")
+
+    router = WhatsappRouterAgent(db_session)
+    alterar = router.handle(text_message("alterar"))
+    alugados = router.handle(text_message("alugados"))
+    resumo = router.handle(text_message("resumo"))
+
+    assert f"#{deletado.id}" not in alterar
+    assert "Cliente Deletado" not in alugados
+    assert "Cliente Deletado" not in resumo
+    assert f"#{ativo.id}" in alterar
+    assert "Cliente Ativo" in alugados
+
+
+def test_renovacao_ignora_registros_deletados(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    deletado = preparar_aluguer_gestao(db_session, "Cliente Renovacao Deletado", "351912345692")
+    ativo = preparar_aluguer_gestao(db_session, "Cliente Renovacao Ativo", "351912345693")
+    AluguerService(db_session).excluir(deletado.id, "351900000000", "Contrato encerrado")
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("renovar"))
+
+    assert f"#{deletado.id}" not in response
+    assert "Cliente Renovacao Deletado" not in response
+    assert f"#{ativo.id}" in response
+    assert "Cliente Renovacao Ativo" in response
 
 
 def test_numero_nao_autorizado_nao_recebe_resumo_detalhado(db_session, monkeypatch):

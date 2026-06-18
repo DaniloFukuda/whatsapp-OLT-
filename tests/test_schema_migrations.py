@@ -61,6 +61,28 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
             text("SELECT quantidade_contentores FROM alugueres_contentor WHERE id = 1")
         ).scalar_one()
 
-    assert {"email_cliente", "quantidade_contentores", "tipo_residuo", "operador_telefone"} <= columns
+    operadores_columns = set()
+    with engine.connect() as connection:
+        operadores_columns = {
+            row["name"]
+            for row in connection.execute(text("PRAGMA table_info(operadores)")).mappings()
+        }
+
+    assert {
+        "email_cliente",
+        "quantidade_contentores",
+        "tipo_residuo",
+        "operador_telefone",
+        "criado_por_operador",
+        "alterado_por_operador",
+        "excluido_por_operador",
+        "is_deleted",
+        "justificativa_exclusao",
+        "id_fatura_fiscal",
+        "google_event_entrega_id",
+        "google_event_retirada_id",
+        "status_ciclo_cliente",
+    } <= columns
+    assert {"telefone_whatsapp", "nome_operador", "perfil", "ativo"} <= operadores_columns
     assert row_count == 1
     assert quantidade == 1

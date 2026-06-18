@@ -15,8 +15,10 @@ from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.aluguer import AluguerContentor, StatusAluguer
 from app.models.conversa import ConversaWhatsApp
 from app.models.contentor import StatusContentor
+from app.models.operador import PerfilOperador
 from app.services.aluguer_service import AluguerService
 from app.services.contentor_service import ContentorService
+from app.services.operador_service import OperadorService
 
 
 ACTIVE_ALUGUER_STATUSES = {StatusAluguer.ATIVO, StatusAluguer.VENCENDO, StatusAluguer.RENOVADO}
@@ -36,6 +38,7 @@ class WhatsappRouterAgent:
         self.contentor_agent = ContentorAgent(db)
         self.aluguer_service = AluguerService(db)
         self.contentor_service = ContentorService(db)
+        self.operador_service = OperadorService(db)
 
     def handle(self, message: NormalizedWhatsAppMessage) -> str:
         conversa = self._get_or_create_conversa(message.telefone)
@@ -44,7 +47,7 @@ class WhatsappRouterAgent:
         if text in COMMANDS:
             if text == "resumo" and not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
-            return self._handle_operational_command(text)
+            return self._handle_operational_command(text, message.telefone)
         if text in START_COMMANDS:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
@@ -71,9 +74,9 @@ class WhatsappRouterAgent:
             return self.contentor_agent.listar_status()
         return "Comando nao reconhecido. Envie 'novo' para registar um aluguer."
 
-    def _handle_operational_command(self, command: str) -> str:
+    def _handle_operational_command(self, command: str, telefone: str | None = None) -> str:
         if command == "resumo":
-            return self._resumo_operacional()
+            return self._resumo_operacional(self.operador_service.obter_perfil(telefone) or PerfilOperador.GESTOR)
         if command == "lista":
             return self._lista()
         if command == "disponiveis":
@@ -86,7 +89,7 @@ class WhatsappRouterAgent:
             return self._atrasados()
         return "Comando nao reconhecido. Envie 'novo' para registar um aluguer."
 
-    def _resumo_operacional(self) -> str:
+    def _resumo_operacional(self, perfil: PerfilOperador = PerfilOperador.GESTOR) -> str:
         contentores = self.contentor_service.listar_contentores()
         alugueres_ativos = self._active_alugueres()
         vencendo_amanha = self.aluguer_service.listar_vencendo_amanha()
@@ -99,33 +102,36 @@ class WhatsappRouterAgent:
         tomorrow = today + timedelta(days=1)
         retiradas_hoje = self._alugueres_por_data_retirada(today)
         retiradas_amanha = self._alugueres_por_data_retirada(tomorrow)
-        faturado_total, recebido_total = self._faturamento_mes_corrente()
-
-        return "\n".join(
-            [
-                "Resumo dos contentores",
-                f"Total: {len(contentores)}",
-                f"Disponiveis: {counts[StatusContentor.DISPONIVEL]}",
-                f"Alugados: {counts[StatusContentor.ALUGADO]}",
-                f"Aguardando recolha: {counts[StatusContentor.AGUARDANDO_RECOLHA]}",
-                f"Manutencao: {counts[StatusContentor.MANUTENCAO]}",
-                f"Alugueres ativos: {len(alugueres_ativos)}",
-                f"Vencem amanha: {len(vencendo_amanha)}",
-                f"Em atraso: {len(atrasados)}",
-                f"Quantidade de contentores alugados: {counts[StatusContentor.ALUGADO]}",
-                "",
-                "Retiradas hoje:",
-                self._format_retiradas(retiradas_hoje),
-                "",
-                "Retiradas amanha:",
-                self._format_retiradas(retiradas_amanha),
-                "",
-                "Faturamento do mes corrente:",
-                f"Faturado total do mes: {faturado_total:.2f}",
-                f"Recebido/pago no mes: {recebido_total:.2f}",
-                "Obs.: faturado total soma todos os alugueres do mes; recebido soma apenas registros pagos.",
-            ]
-        )
+        linhas = [
+            "Resumo dos contentores",
+            f"Total: {len(contentores)}",
+            f"Disponiveis: {counts[StatusContentor.DISPONIVEL]}",
+            f"Alugados: {counts[StatusContentor.ALUGADO]}",
+            f"Aguardando recolha: {counts[StatusContentor.AGUARDANDO_RECOLHA]}",
+            f"Manutencao: {counts[StatusContentor.MANUTENCAO]}",
+            f"Alugueres ativos: {len(alugueres_ativos)}",
+            f"Vencem amanha: {len(vencendo_amanha)}",
+            f"Em atraso: {len(atrasados)}",
+            f"Quantidade de contentores alugados: {counts[StatusContentor.ALUGADO]}",
+            "",
+            "Retiradas hoje:",
+            self._format_retiradas(retiradas_hoje),
+            "",
+            "Retiradas amanha:",
+            self._format_retiradas(retiradas_amanha),
+        ]
+        if perfil == PerfilOperador.GESTOR:
+            faturado_total, recebido_total = self._faturamento_mes_corrente()
+            linhas.extend(
+                [
+                    "",
+                    "Faturamento do mes corrente:",
+                    f"Faturado total do mes: {faturado_total:.2f}",
+                    f"Recebido/pago no mes: {recebido_total:.2f}",
+                    "Obs.: faturado total soma todos os alugueres do mes; recebido soma apenas registros pagos.",
+                ]
+            )
+        return "\n".join(linhas)
 
     def _resumo(self) -> str:
         contentores = self.contentor_service.listar_contentores()
@@ -187,6 +193,7 @@ class WhatsappRouterAgent:
     def _active_alugueres(self) -> list[AluguerContentor]:
         return (
             self.db.query(AluguerContentor)
+            .filter(AluguerContentor.is_deleted.is_(False))
             .filter(AluguerContentor.status.in_(ACTIVE_ALUGUER_STATUSES))
             .order_by(AluguerContentor.data_vencimento, AluguerContentor.id)
             .all()
@@ -203,7 +210,7 @@ class WhatsappRouterAgent:
         local_now = self._to_local_datetime(utcnow())
         faturado_total = Decimal("0")
         recebido_total = Decimal("0")
-        for aluguer in self.db.query(AluguerContentor).all():
+        for aluguer in self.db.query(AluguerContentor).filter(AluguerContentor.is_deleted.is_(False)).all():
             entrega = self._to_local_datetime(aluguer.data_entrega)
             if entrega.year == local_now.year and entrega.month == local_now.month:
                 valor = Decimal(str(aluguer.valor or 0))
@@ -283,15 +290,4 @@ class WhatsappRouterAgent:
         return conversa
 
     def _is_authorized(self, telefone: str) -> bool:
-        authorized_phones = self._authorized_phones()
-        return not authorized_phones or normalize_phone(telefone) in authorized_phones
-
-    def _authorized_phones(self) -> set[str]:
-        settings = get_settings()
-        raw_values = [
-            settings.authorized_operator_phone,
-            settings.whatsapp_owner_phone,
-            settings.owner_whatsapp,
-        ]
-        raw_values.extend(settings.authorized_operator_phones.split(","))
-        return {normalized for value in raw_values if (normalized := normalize_phone(value))}
+        return self.operador_service.verificar_autorizacao(telefone)

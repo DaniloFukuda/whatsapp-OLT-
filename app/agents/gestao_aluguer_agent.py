@@ -20,6 +20,7 @@ class GestaoAluguerAgent:
         "alteracao_aguardando_valor",
         "exclusao_aguardando_item",
         "exclusao_aguardando_confirmacao",
+        "exclusao_aguardando_justificativa",
     }
     EDITABLE_FIELDS = [
         ("quantidade_contentores", "quantidade de contentores"),
@@ -92,6 +93,7 @@ class GestaoAluguerAgent:
             error = self._apply_field(aluguer, context["field"], message)
             if error:
                 return error
+            aluguer.alterado_por_operador = normalize_portugal_phone(message.telefone)
             self.aluguer_service.salvar(aluguer)
             conversa.estado_atual = "confirmado"
             conversa.contexto_json = {"aluguer_id": aluguer.id, "ultima_operacao": "alteracao"}
@@ -108,20 +110,36 @@ class GestaoAluguerAgent:
             self.db.commit()
             return (
                 self._format_details(aluguer)
-                + "\n\nTem certeza que deseja apagar este registro? Responda SIM para confirmar."
+                + "\n\nTem certeza que deseja excluir este registro? Responda SIM para confirmar."
             )
 
         if state == "exclusao_aguardando_confirmacao":
             aluguer_id = context["aluguer_id"]
             confirmation = (message.texto or "").strip().lower()
-            conversa.estado_atual = "confirmado"
-            conversa.contexto_json = {"aluguer_id": aluguer_id, "ultima_operacao": "exclusao"}
             if confirmation in {"sim", "confirmar", "apagar"}:
-                self.aluguer_service.excluir(aluguer_id)
+                conversa.estado_atual = "exclusao_aguardando_justificativa"
+                conversa.contexto_json = context
                 self.db.commit()
-                return f"Registro #{aluguer_id} excluido."
+                return "Informe a justificativa da exclusao com pelo menos 10 caracteres."
+            conversa.estado_atual = "confirmado"
+            conversa.contexto_json = {"aluguer_id": aluguer_id, "ultima_operacao": "exclusao_cancelada"}
             self.db.commit()
             return "Exclusao cancelada. Nenhum registro foi apagado."
+
+        if state == "exclusao_aguardando_justificativa":
+            justificativa = (message.texto or "").strip()
+            if len(justificativa) < 10:
+                return "A justificativa deve ter pelo menos 10 caracteres."
+            aluguer_id = context["aluguer_id"]
+            self.aluguer_service.excluir(
+                aluguer_id,
+                operador_telefone=normalize_portugal_phone(message.telefone),
+                justificativa=justificativa,
+            )
+            conversa.estado_atual = "confirmado"
+            conversa.contexto_json = {"aluguer_id": aluguer_id, "ultima_operacao": "exclusao"}
+            self.db.commit()
+            return f"Registro #{aluguer_id} excluido."
 
         return "Comando nao reconhecido. Envie 'alterar' ou 'excluir' para iniciar."
 
