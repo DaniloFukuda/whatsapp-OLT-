@@ -46,7 +46,7 @@ class RenovacaoAgent:
         conversa.estado_atual = self.START_STATE
         conversa.contexto_json = {"aluguer_ids": [aluguer.id for aluguer in alugueres], "ajustes": {}}
         self.db.commit()
-        return "Escolha o registro para renovar:\n" + self._format_list(alugueres)
+        return "Escolha o registro para renovar:\n" + self._format_list(alugueres) + "\n0 - Cancelar"
 
     def handle(self, conversa: ConversaWhatsApp, message: NormalizedWhatsAppMessage) -> str:
         state = conversa.estado_atual
@@ -63,7 +63,7 @@ class RenovacaoAgent:
             self.db.commit()
             return (
                 self._format_details(aluguer)
-                + "\n\nDeseja alterar alguma informacao antes de renovar?\n\n1 - Sim\n2 - Nao, prosseguir"
+                + "\n\nDeseja alterar alguma informacao antes de renovar?\n\n1 - Sim\n2 - Nao, prosseguir\n0 - Cancelar"
             )
 
         if state == "renovacao_aguardando_decisao_alterar":
@@ -72,7 +72,7 @@ class RenovacaoAgent:
                 conversa.estado_atual = "renovacao_aguardando_campo"
                 conversa.contexto_json = context
                 self.db.commit()
-                return "Campos alteraveis antes de renovar:\n" + self._format_fields()
+                return "Campos alteraveis antes de renovar:\n" + self._format_fields() + "\n0 - Cancelar"
             if decision is False:
                 return self._finish(conversa, context, message.telefone)
             return "Opcao invalida. Responda 1 para Sim ou 2 para Nao."
@@ -97,7 +97,7 @@ class RenovacaoAgent:
             conversa.estado_atual = "renovacao_aguardando_decisao_alterar"
             conversa.contexto_json = context
             self.db.commit()
-            return "Alteracao registrada. Deseja alterar mais alguma coisa?\n\n1 - Sim\n2 - Nao, prosseguir"
+            return "Alteracao registrada. Deseja alterar mais alguma coisa?\n\n1 - Sim\n2 - Nao, prosseguir\n0 - Cancelar"
 
         return "Comando nao reconhecido. Envie 'renovar' ou 'prorrogar' para iniciar."
 
@@ -215,9 +215,9 @@ class RenovacaoAgent:
     def _prompt_for_field(self, field: str) -> str:
         labels = dict(self.EDITABLE_FIELDS)
         if field == "tipo_residuo":
-            return "Envie o novo tipo do residuo:\n\n1 - Entulho limpo\n2 - Entulho misto"
+            return "Envie o novo tipo do residuo:\n\n1 - Entulho limpo\n2 - Entulho misto\n0 - Cancelar"
         if field == "pago":
-            return "Envie o novo status de pagamento:\n\n1 - Pago\n2 - Pendente"
+            return "Envie o novo status de pagamento:\n\n1 - Pago\n2 - Pendente\n0 - Cancelar"
         if field == "localizacao":
             return "Envie a nova localizacao pelo WhatsApp."
         return f"Envie o novo valor para {labels[field]}."

@@ -112,7 +112,7 @@ class AluguerAgent:
                 conversa,
                 "aguardando_confirmacao_data_entrega",
                 context,
-                f"Confirma a data de entrega como hoje ({entrega:%d/%m/%Y})?\n\n1 - Sim\n2 - Nao",
+                f"Confirma a data de entrega como hoje ({entrega:%d/%m/%Y})?\n\n1 - Sim\n2 - Nao\n0 - Cancelar",
             )
 
         if state == "aguardando_confirmacao_data_entrega":
@@ -123,7 +123,7 @@ class AluguerAgent:
                 conversa,
                 "aguardando_tipo_residuo",
                 context,
-                "Qual e o tipo do residuo?\n\n1 - Entulho limpo\n2 - Entulho misto",
+                "Qual e o tipo do residuo?\n\n1 - Entulho limpo\n2 - Entulho misto\n0 - Cancelar",
             )
 
         if state == "aguardando_tipo_residuo":
@@ -144,7 +144,7 @@ class AluguerAgent:
             if not message.texto:
                 return "Envie a forma de pagamento."
             context["forma_pagamento"] = message.texto.strip()
-            return self._advance(conversa, "aguardando_pago", context, "Esta pago?\n\n1 - Sim\n2 - Nao")
+            return self._advance(conversa, "aguardando_pago", context, "Esta pago?\n\n1 - Sim\n2 - Nao\n0 - Cancelar")
 
         if state == "aguardando_pago":
             pago = self._parse_pagamento_opcao(message.texto)

@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 from app.agents.aluguer_agent import AluguerAgent
 from app.agents.recolha_agent import RecolhaAgent
-from app.agents.whatsapp_router_agent import WhatsappRouterAgent
+from app.agents.whatsapp_router_agent import CANCELLED_MENU_MESSAGE, WhatsappRouterAgent
 from app.core.config import get_settings
 from app.core.phone import normalize_phone, normalize_portugal_phone, whatsapp_link
 from app.core.time import utcnow
@@ -424,6 +424,72 @@ def test_cadastro_continua_aceitando_texto_antigo_nas_opcoes(db_session, monkeyp
     assert response_nao == "Opcao invalida. Responda 1 para Sim ou 2 para Nao."
 
 
+def test_cancelamento_global_no_cadastro_aguardando_foto_limpa_sessao_sem_salvar(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("novo", telefone="351900001020"))
+    router.handle(text_message("1", telefone="351900001020"))
+    response = router.handle(text_message("cancelar", telefone="351900001020"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900001020").one()
+
+    assert response == CANCELLED_MENU_MESSAGE
+    assert conversa.estado_atual == "idle"
+    assert conversa.contexto_json == {}
+    assert db_session.query(AluguerContentor).count() == 0
+
+
+def test_cancelamento_global_no_cadastro_aguardando_localizacao_limpa_sessao_sem_salvar(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("novo", telefone="351900001021"))
+    router.handle(text_message("1", telefone="351900001021"))
+    router.handle(
+        NormalizedWhatsAppMessage(
+            telefone="351900001021",
+            tipo="image",
+            message_id="foto-cancelar",
+            media_id="foto-cancelar",
+            mime_type="image/jpeg",
+        )
+    )
+    response = router.handle(text_message("cancelar", telefone="351900001021"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900001021").one()
+
+    assert response == CANCELLED_MENU_MESSAGE
+    assert conversa.estado_atual == "idle"
+    assert conversa.contexto_json == {}
+    assert db_session.query(AluguerContentor).count() == 0
+
+
+def test_cancelamento_global_com_zero_no_cadastro_aguardando_localizacao(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("novo", telefone="351900001022"))
+    router.handle(text_message("1", telefone="351900001022"))
+    router.handle(
+        NormalizedWhatsAppMessage(
+            telefone="351900001022",
+            tipo="image",
+            message_id="foto-zero",
+            media_id="foto-zero",
+            mime_type="image/jpeg",
+        )
+    )
+    response = router.handle(text_message("0", telefone="351900001022"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900001022").one()
+
+    assert response == CANCELLED_MENU_MESSAGE
+    assert conversa.estado_atual == "idle"
+    assert conversa.contexto_json == {}
+    assert db_session.query(AluguerContentor).count() == 0
+
+
 def test_alterar_e_modificar_iniciam_fluxo(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     SeedService(db_session).seed_contentores_iniciais()
@@ -489,6 +555,25 @@ def test_alteracao_de_nome_do_cliente(db_session, monkeypatch):
     assert aluguer.nome_cliente == "Cliente Depois"
     assert aluguer.cliente.nome == "Cliente Depois"
     assert aluguer.alterado_por_operador == "351900000000"
+
+
+def test_cancelamento_global_na_alteracao_nao_altera_registro(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    aluguer = preparar_aluguer_gestao(db_session, "Cliente Sem Alteracao", "351912345699")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("alterar"))
+    router.handle(text_message("1"))
+    response = router.handle(text_message("cancelar"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one()
+    db_session.refresh(aluguer)
+
+    assert response == CANCELLED_MENU_MESSAGE
+    assert conversa.estado_atual == "idle"
+    assert conversa.contexto_json == {}
+    assert aluguer.nome_cliente == "Cliente Sem Alteracao"
+    assert aluguer.alterado_por_operador is None
 
 
 def test_alteracao_de_telefone_normaliza_portugal_e_atualiza_link(db_session, monkeypatch):
@@ -651,6 +736,32 @@ def test_exclusao_com_opcao_2_cancela_sem_apagar(db_session, monkeypatch):
     assert AluguerService(db_session)._get_or_raise(aluguer.id).id == aluguer.id
 
 
+def test_cancelamento_global_na_exclusao_nao_marca_registro_como_excluido(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    aluguer_cancelar = preparar_aluguer_gestao(db_session, "Cliente Excluir Cancelar", "351912345700")
+    aluguer_zero = preparar_aluguer_gestao(db_session, "Cliente Excluir Zero", "351912345701")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("excluir"))
+    router.handle(text_message("2"))
+    response_cancelar = router.handle(text_message("cancelar"))
+
+    router.handle(text_message("excluir"))
+    router.handle(text_message("1"))
+    response_zero = router.handle(text_message("0"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one()
+    db_session.refresh(aluguer_cancelar)
+    db_session.refresh(aluguer_zero)
+
+    assert response_cancelar == CANCELLED_MENU_MESSAGE
+    assert response_zero == CANCELLED_MENU_MESSAGE
+    assert conversa.estado_atual == "idle"
+    assert conversa.contexto_json == {}
+    assert aluguer_cancelar.is_deleted is False
+    assert aluguer_zero.is_deleted is False
+
+
 def test_exclusao_com_opcao_1_pede_justificativa(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     SeedService(db_session).seed_contentores_iniciais()
@@ -781,6 +892,24 @@ def test_renovacao_sem_alteracoes_cria_novo_registro(db_session, monkeypatch):
     assert novo.telefone_cliente == origem.telefone_cliente
     assert novo.contentor_id == origem.contentor_id
     assert novo.criado_por_operador == "351900000000"
+
+
+def test_cancelamento_global_na_renovacao_nao_cria_novo_registro(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    origem = preparar_aluguer_gestao(db_session, "Cliente Renovacao Cancelada", "351912345702")
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("renovar"))
+    router.handle(text_message("1"))
+    response = router.handle(text_message("cancelar"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one()
+    alugueres = db_session.query(AluguerContentor).order_by(AluguerContentor.id).all()
+
+    assert response == CANCELLED_MENU_MESSAGE
+    assert conversa.estado_atual == "idle"
+    assert conversa.contexto_json == {}
+    assert [aluguer.id for aluguer in alugueres] == [origem.id]
 
 
 def test_renovacao_aceita_opcao_2_para_prosseguir(db_session, monkeypatch):
@@ -1025,6 +1154,17 @@ def test_mensagem_novo_de_operador_autorizado_inicia_fluxo(db_session, monkeypat
     assert conversa.estado_atual == "aguardando_quantidade_contentores"
 
 
+def test_cancelar_sem_fluxo_ativo_informa_que_nao_ha_operacao(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("cancelar"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one()
+
+    assert response == "Nenhuma operação em andamento para cancelar."
+    assert conversa.estado_atual == "idle"
+    assert conversa.contexto_json == {}
+
+
 def test_comando_resumo_mostra_contadores_operacionais(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     preparar_operacao_demo(db_session)
@@ -1056,6 +1196,24 @@ def test_comando_resumo_mostra_contadores_operacionais(db_session, monkeypatch):
             "Em atraso: 1",
         ]
     )
+
+
+def test_comandos_operacionais_continuam_funcionando(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    preparar_operacao_demo(db_session)
+    router = WhatsappRouterAgent(db_session)
+
+    responses = {
+        command: router.handle(text_message(command, telefone=f"35190000200{index}"))
+        for index, command in enumerate(["resumo", "lista", "disponiveis", "alugados", "vencendo", "atrasados"], start=1)
+    }
+
+    assert "Resumo dos contentores" in responses["resumo"]
+    assert "C01 - alugado" in responses["lista"]
+    assert responses["disponiveis"].startswith("Contentores dispon")
+    assert "Contentores alugados:" in responses["alugados"]
+    assert "Alugueres que vencem" in responses["vencendo"]
+    assert "Alugueres em atraso:" in responses["atrasados"]
 
 
 def test_resumo_lista_retirada_de_hoje_com_cliente_e_localizacao(db_session, monkeypatch):

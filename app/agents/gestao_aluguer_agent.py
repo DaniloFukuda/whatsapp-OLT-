@@ -51,7 +51,7 @@ class GestaoAluguerAgent:
         conversa.estado_atual = self.ALTER_START_STATE
         conversa.contexto_json = {"aluguer_ids": [aluguer.id for aluguer in alugueres]}
         self.db.commit()
-        return "Escolha o registro para alterar:\n" + self._format_list(alugueres)
+        return "Escolha o registro para alterar:\n" + self._format_list(alugueres) + "\n0 - Cancelar"
 
     def start_exclusao(self, conversa: ConversaWhatsApp) -> str:
         alugueres = self.aluguer_service.listar_cadastrados_nos_ultimos_dias(7)
@@ -63,7 +63,7 @@ class GestaoAluguerAgent:
         conversa.estado_atual = self.DELETE_START_STATE
         conversa.contexto_json = {"aluguer_ids": [aluguer.id for aluguer in alugueres]}
         self.db.commit()
-        return "Escolha o registro para excluir:\n" + self._format_list(alugueres)
+        return "Escolha o registro para excluir:\n" + self._format_list(alugueres) + "\n0 - Cancelar"
 
     def handle(self, conversa: ConversaWhatsApp, message: NormalizedWhatsAppMessage) -> str:
         state = conversa.estado_atual
@@ -77,7 +77,7 @@ class GestaoAluguerAgent:
             conversa.estado_atual = "alteracao_aguardando_campo"
             conversa.contexto_json = context
             self.db.commit()
-            return self._format_details(aluguer) + "\n\nCampos alteraveis:\n" + self._format_fields()
+            return self._format_details(aluguer) + "\n\nCampos alteraveis:\n" + self._format_fields() + "\n0 - Cancelar"
 
         if state == "alteracao_aguardando_campo":
             field = self._select_field(message.texto)
@@ -111,7 +111,7 @@ class GestaoAluguerAgent:
             self.db.commit()
             return (
                 self._format_details(aluguer)
-                + "\n\nTem certeza que deseja apagar este registro?\n\n1 - Sim, continuar\n2 - Nao, cancelar"
+                + "\n\nTem certeza que deseja apagar este registro?\n\n1 - Sim, continuar\n2 - Nao, cancelar\n0 - Cancelar"
             )
 
         if state == "exclusao_aguardando_confirmacao":
@@ -231,9 +231,9 @@ class GestaoAluguerAgent:
     def _prompt_for_field(self, field: str) -> str:
         labels = dict(self.EDITABLE_FIELDS)
         if field == "tipo_residuo":
-            return "Envie o novo tipo do residuo:\n\n1 - Entulho limpo\n2 - Entulho misto"
+            return "Envie o novo tipo do residuo:\n\n1 - Entulho limpo\n2 - Entulho misto\n0 - Cancelar"
         if field == "pago":
-            return "Envie o novo status de pagamento:\n\n1 - Pago\n2 - Pendente"
+            return "Envie o novo status de pagamento:\n\n1 - Pago\n2 - Pendente\n0 - Cancelar"
         if field == "localizacao":
             return "Envie a nova localizacao pelo WhatsApp."
         if field == "data_vencimento":

@@ -27,6 +27,16 @@ START_COMMANDS = {"iniciar", "cadastrar", "comecar", "começar", "novo"}
 ALTER_COMMANDS = {"alterar", "modificar"}
 DELETE_COMMANDS = {"excluir", "deletar"}
 RENEW_COMMANDS = {"renovar", "prorrogar"}
+CANCEL_COMMANDS = {"cancelar", "cancela", "sair", "parar", "voltar", "menu", "0"}
+CANCELLED_MENU_MESSAGE = (
+    "Operação cancelada. Nenhuma alteração foi salva.\n\n"
+    "Digite:\n"
+    "1 - Novo cadastro\n"
+    "2 - Alterar registro\n"
+    "3 - Excluir registro\n"
+    "4 - Renovar registro\n"
+    "5 - Ver resumo"
+)
 
 
 class WhatsappRouterAgent:
@@ -43,6 +53,14 @@ class WhatsappRouterAgent:
     def handle(self, message: NormalizedWhatsAppMessage) -> str:
         conversa = self._get_or_create_conversa(message.telefone)
         text = (message.texto or "").strip().lower()
+
+        if text in CANCEL_COMMANDS:
+            if self._has_active_flow(conversa):
+                conversa.estado_atual = "idle"
+                conversa.contexto_json = {}
+                self.db.commit()
+                return CANCELLED_MENU_MESSAGE
+            return "Nenhuma operação em andamento para cancelar."
 
         if text in COMMANDS:
             if text == "resumo" and not self._is_authorized(message.telefone):
@@ -288,6 +306,13 @@ class WhatsappRouterAgent:
         self.db.commit()
         self.db.refresh(conversa)
         return conversa
+
+    def _has_active_flow(self, conversa: ConversaWhatsApp) -> bool:
+        return (
+            conversa.estado_atual in AluguerAgent.ACTIVE_STATES
+            or conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES
+            or conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES
+        )
 
     def _is_authorized(self, telefone: str) -> bool:
         return self.operador_service.verificar_autorizacao(telefone)
