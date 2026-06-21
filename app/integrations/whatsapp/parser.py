@@ -13,6 +13,7 @@ class NormalizedWhatsAppMessage:
     media_id: str | None = None
     mime_type: str | None = None
     filename: str | None = None
+    contact_phone: str | None = None
     raw: dict[str, Any] | None = None
 
 
@@ -52,5 +53,11 @@ def _parse_message(message: dict[str, Any]) -> NormalizedWhatsAppMessage | None:
         data["media_id"] = media.get("id")
         data["mime_type"] = media.get("mime_type")
         data["filename"] = media.get("filename")
+    elif tipo == "contacts":
+        contacts = message.get("contacts", [])
+        if contacts:
+            phones = contacts[0].get("phones", [])
+            if phones:
+                data["contact_phone"] = phones[0].get("phone") or phones[0].get("wa_id")
 
     return NormalizedWhatsAppMessage(**data)

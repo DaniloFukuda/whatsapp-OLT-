@@ -25,7 +25,7 @@ class AluguerContentor(Base):
     telefone_cliente: Mapped[str] = mapped_column(String(50), nullable=False)
     nome_cliente: Mapped[str] = mapped_column(String(255), nullable=False)
     email_cliente: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    quantidade_contentores: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    numero_contentor: Mapped[str] = mapped_column(String(20), nullable=False)
     data_entrega: Mapped[DateTime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     data_vencimento: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
     tipo_residuo: Mapped[str | None] = mapped_column(String(80), nullable=True)

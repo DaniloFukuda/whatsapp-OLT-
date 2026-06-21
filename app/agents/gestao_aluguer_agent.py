@@ -24,7 +24,6 @@ class GestaoAluguerAgent:
         "exclusao_aguardando_justificativa",
     }
     EDITABLE_FIELDS = [
-        ("quantidade_contentores", "quantidade de contentores"),
         ("nome_cliente", "nome do cliente"),
         ("telefone_cliente", "telefone do cliente"),
         ("email_cliente", "e-mail"),
@@ -161,12 +160,7 @@ class GestaoAluguerAgent:
 
     def _apply_field(self, aluguer: AluguerContentor, field: str, message: NormalizedWhatsAppMessage) -> str | None:
         value = (message.texto or "").strip()
-        if field == "quantidade_contentores":
-            parsed = self._parse_positive_int(value)
-            if parsed is None:
-                return "Envie uma quantidade valida, por exemplo 1."
-            aluguer.quantidade_contentores = parsed
-        elif field == "nome_cliente":
+        if field == "nome_cliente":
             if not value:
                 return "Envie o nome do cliente."
             aluguer.nome_cliente = value
@@ -247,7 +241,6 @@ class GestaoAluguerAgent:
             [
                 f"ID/referencia: #{aluguer.id}",
                 f"Contentor: {contentor}",
-                f"Quantidade: {aluguer.quantidade_contentores}",
                 f"Cliente: {aluguer.nome_cliente}",
                 f"Telefone: {aluguer.telefone_cliente}",
                 f"WhatsApp cliente: {whatsapp_link(aluguer.telefone_cliente)}",

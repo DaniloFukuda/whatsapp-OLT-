@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 
+import pytest
+
 from app.models.aluguer import StatusAluguer
 from app.models.contentor import StatusContentor
 from app.models.operador import Operador, PerfilOperador
@@ -28,6 +30,20 @@ def test_criacao_de_cliente_contentor_e_aluguer(db_session):
     assert aluguer.contentor_id == contentor.id
     assert aluguer.status == StatusAluguer.ATIVO
     assert aluguer.contentor.status == StatusContentor.ALUGADO
+
+
+def test_numero_contentor_do_service_e_obrigatorio_e_limitado(db_session):
+    SeedService(db_session).seed_contentores_iniciais()
+
+    with pytest.raises(ValueError, match="Numero do contentor"):
+        AluguerService(db_session).registrar_novo_aluguer(
+            nome_cliente="Cliente Numero",
+            telefone_cliente="351900000020",
+            valor="120",
+            forma_pagamento="mbway",
+            pago=True,
+            numero_contentor="X" * 21,
+        )
 
 
 def test_vencimento_calculado_em_5_dias(db_session):

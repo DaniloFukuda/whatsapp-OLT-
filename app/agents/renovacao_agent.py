@@ -20,7 +20,6 @@ class RenovacaoAgent:
         "renovacao_aguardando_valor",
     }
     EDITABLE_FIELDS = [
-        ("quantidade_contentores", "quantidade de contentores"),
         ("nome_cliente", "nome do cliente"),
         ("telefone_cliente", "telefone do cliente"),
         ("email_cliente", "e-mail"),
@@ -132,12 +131,7 @@ class RenovacaoAgent:
 
     def _apply_adjustment(self, ajustes: dict, field: str, message: NormalizedWhatsAppMessage) -> str | None:
         value = (message.texto or "").strip()
-        if field == "quantidade_contentores":
-            parsed = self._parse_positive_int(value)
-            if parsed is None:
-                return "Envie uma quantidade valida, por exemplo 1."
-            ajustes["quantidade_contentores"] = parsed
-        elif field == "nome_cliente":
+        if field == "nome_cliente":
             if not value:
                 return "Envie o nome do cliente."
             ajustes["nome_cliente"] = value

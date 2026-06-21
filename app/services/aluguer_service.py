@@ -26,7 +26,7 @@ class AluguerService:
         forma_pagamento: str | None,
         pago: bool,
         contentor_id: int | None = None,
-        quantidade_contentores: int = 1,
+        numero_contentor: str | None = None,
         email_cliente: str | None = None,
         tipo_residuo: str | None = None,
         operador_telefone: str | None = None,
@@ -41,6 +41,9 @@ class AluguerService:
         contentor = self.contentores.get(contentor_id) if contentor_id else self.contentores.first_available()
         if contentor is None:
             raise ValueError("Nenhum contentor disponivel")
+        numero_contentor = (numero_contentor or contentor.codigo).strip()
+        if not 1 <= len(numero_contentor) <= 20:
+            raise ValueError("Numero do contentor deve ter entre 1 e 20 caracteres")
 
         aluguer = self.alugueres.create(
             contentor_id=contentor.id,
@@ -48,7 +51,7 @@ class AluguerService:
             telefone_cliente=telefone_cliente,
             nome_cliente=nome_cliente,
             email_cliente=email_cliente,
-            quantidade_contentores=quantidade_contentores,
+            numero_contentor=numero_contentor,
             data_entrega=entrega,
             data_vencimento=entrega + timedelta(days=5),
             tipo_residuo=tipo_residuo,
@@ -93,7 +96,7 @@ class AluguerService:
         nova_entrega = origem.data_vencimento + timedelta(days=1)
         novo = self.registrar_novo_aluguer(
             contentor_id=origem.contentor_id,
-            quantidade_contentores=ajustes.get("quantidade_contentores", origem.quantidade_contentores),
+            numero_contentor=ajustes.get("numero_contentor", origem.numero_contentor),
             nome_cliente=ajustes.get("nome_cliente", origem.nome_cliente),
             telefone_cliente=ajustes.get("telefone_cliente", origem.telefone_cliente),
             email_cliente=ajustes.get("email_cliente", origem.email_cliente),

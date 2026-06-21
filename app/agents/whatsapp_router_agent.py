@@ -62,11 +62,50 @@ class WhatsappRouterAgent:
                 return CANCELLED_MENU_MESSAGE
             return "Nenhuma operação em andamento para cancelar."
 
+        if conversa.estado_atual == "cadastro_expirado":
+            if text in {"1", "sim", "continuar"}:
+                context = dict(conversa.contexto_json or {})
+                previous_state = context.get("estado_anterior") or AluguerAgent.START_STATE
+                conversa.estado_atual = previous_state
+                context["updated_at"] = utcnow().isoformat()
+                context.pop("estado_anterior", None)
+                conversa.contexto_json = context
+                self.db.commit()
+                return "Vamos continuar de onde parou. " + self._prompt_for_state(previous_state)
+            if text in {"2", "nao", "recomecar", "recomeçar"}:
+                conversa.estado_atual = "idle"
+                conversa.contexto_json = {}
+                self.db.commit()
+                return self.aluguer_agent.start(conversa)
+            return "Opcao invalida. Responda 1 para continuar ou 2 para recomecar."
+
+        if conversa.estado_atual in AluguerAgent.ACTIVE_STATES and self._is_expired(conversa):
+            context = dict(conversa.contexto_json or {})
+            context["estado_anterior"] = conversa.estado_atual
+            conversa.contexto_json = context
+            return self.aluguer_agent.timeout_prompt(conversa)
+
         if text in COMMANDS:
             if text == "resumo" and not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
             return self._handle_operational_command(text, message.telefone)
+
+        if conversa.estado_atual in AluguerAgent.ACTIVE_STATES:
+            return self.aluguer_agent.handle(conversa, message)
+        if conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES:
+            return self.gestao_aluguer_agent.handle(conversa, message)
+        if conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES:
+            return self.renovacao_agent.handle(conversa, message)
+
+        if text == "4":
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
+            return self._handle_operational_command("resumo", message.telefone)
         if text in START_COMMANDS:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
+            return self.aluguer_agent.start(conversa)
+        if text == "1":
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
             return self.aluguer_agent.start(conversa)
@@ -74,7 +113,15 @@ class WhatsappRouterAgent:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para alterar registros. Contacte o administrador do sistema."
             return self.gestao_aluguer_agent.start_alteracao(conversa)
+        if text == "2":
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para alterar registros. Contacte o administrador do sistema."
+            return self.gestao_aluguer_agent.start_alteracao(conversa)
         if text in DELETE_COMMANDS:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
+            return self.gestao_aluguer_agent.start_exclusao(conversa)
+        if text == "3":
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
             return self.gestao_aluguer_agent.start_exclusao(conversa)
@@ -82,14 +129,10 @@ class WhatsappRouterAgent:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para renovar registros. Contacte o administrador do sistema."
             return self.renovacao_agent.start(conversa)
-        if conversa.estado_atual in AluguerAgent.ACTIVE_STATES:
-            return self.aluguer_agent.handle(conversa, message)
-        if conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES:
-            return self.gestao_aluguer_agent.handle(conversa, message)
-        if conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES:
-            return self.renovacao_agent.handle(conversa, message)
         if text in {"contentores", "status"}:
             return self.contentor_agent.listar_status()
+        if self._is_authorized(message.telefone):
+            return AluguerAgent.initial_menu()
         return "Comando nao reconhecido. Envie 'novo' para registar um aluguer."
 
     def _handle_operational_command(self, command: str, telefone: str | None = None) -> str:
@@ -130,7 +173,7 @@ class WhatsappRouterAgent:
             f"Alugueres ativos: {len(alugueres_ativos)}",
             f"Vencem amanha: {len(vencendo_amanha)}",
             f"Em atraso: {len(atrasados)}",
-            f"Quantidade de contentores alugados: {counts[StatusContentor.ALUGADO]}",
+            f"Contentores com status alugado: {counts[StatusContentor.ALUGADO]}",
             "",
             "Retiradas hoje:",
             self._format_retiradas(retiradas_hoje),
@@ -313,6 +356,36 @@ class WhatsappRouterAgent:
             or conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES
             or conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES
         )
+
+    def _is_expired(self, conversa: ConversaWhatsApp) -> bool:
+        context = conversa.contexto_json or {}
+        raw_updated_at = context.get("updated_at")
+        if not raw_updated_at:
+            return False
+        try:
+            updated_at = datetime.fromisoformat(raw_updated_at)
+        except ValueError:
+            return False
+        return utcnow() - updated_at > timedelta(minutes=30)
+
+    def _prompt_for_state(self, state: str) -> str:
+        prompts = {
+            "aguardando_numero_contentor": "🚛 Qual o numero do contentor?",
+            "aguardando_foto_entrega": "📷 Por favor, envie a foto do contentor no local.",
+            "aguardando_localizacao": "📍 Agora, envie a localizacao GPS do local.",
+            "aguardando_nome_cliente": "👤 Qual o nome do cliente?",
+            "aguardando_telefone_cliente": "📞 Envie o telefone do cliente.",
+            "aguardando_email_cliente": "✉️ Qual o e-mail do cliente? Voce tambem pode responder Pular.",
+            "aguardando_confirmacao_data_entrega": "📅 Confirma a entrega para hoje?\n\n1. Sim\n2. Outra data",
+            "aguardando_data_entrega_manual": "📅 Envie a data de entrega no formato DD/MM ou DD/MM/AAAA.",
+            "aguardando_tipo_residuo": "🧱 Qual o tipo de residuo?\n\n1. Entulho Limpo\n2. Entulho Misto",
+            "aguardando_valor": "💰 Qual o valor do servico?",
+            "aguardando_forma_pagamento": "💳 Qual a forma de pagamento?\n\n1. MBWay\n2. Transferencia\n3. Dinheiro\n4. Outro",
+            "aguardando_forma_pagamento_outro": "💳 Por favor, digite textualmente a forma de pagamento.",
+            "aguardando_pago": "✅ O servico ja esta pago?\n\n1. Pago\n2. Pendente",
+            "aguardando_confirmacao_final": "✅ Confira os dados e escolha 1 para confirmar, 2 para corrigir ou 3 para cancelar.",
+        }
+        return prompts.get(state, "Envie a proxima informacao do cadastro.")
 
     def _is_authorized(self, telefone: str) -> bool:
         return self.operador_service.verificar_autorizacao(telefone)

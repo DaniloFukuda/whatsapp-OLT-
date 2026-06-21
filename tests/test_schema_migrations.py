@@ -15,6 +15,7 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
                     cliente_id INTEGER NOT NULL,
                     telefone_cliente VARCHAR(50) NOT NULL,
                     nome_cliente VARCHAR(255) NOT NULL,
+                    quantidade_contentores INTEGER DEFAULT 1,
                     data_entrega DATETIME NOT NULL,
                     data_vencimento DATETIME NOT NULL,
                     valor NUMERIC(10, 2) NOT NULL,
@@ -57,9 +58,6 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
             for row in connection.execute(text("PRAGMA table_info(alugueres_contentor)")).mappings()
         }
         row_count = connection.execute(text("SELECT COUNT(*) FROM alugueres_contentor")).scalar_one()
-        quantidade = connection.execute(
-            text("SELECT quantidade_contentores FROM alugueres_contentor WHERE id = 1")
-        ).scalar_one()
 
     operadores_columns = set()
     with engine.connect() as connection:
@@ -70,7 +68,7 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
 
     assert {
         "email_cliente",
-        "quantidade_contentores",
+        "numero_contentor",
         "tipo_residuo",
         "operador_telefone",
         "criado_por_operador",
@@ -84,5 +82,5 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
         "status_ciclo_cliente",
     } <= columns
     assert {"telefone_whatsapp", "nome_operador", "perfil", "ativo"} <= operadores_columns
+    assert "quantidade_contentores" not in columns
     assert row_count == 1
-    assert quantidade == 1

@@ -3,7 +3,7 @@ from sqlalchemy import Engine, text
 
 ALUGUERES_CONTENTOR_COLUMNS = {
     "email_cliente": "TEXT",
-    "quantidade_contentores": "INTEGER DEFAULT 1",
+    "numero_contentor": "TEXT DEFAULT '' NOT NULL",
     "tipo_residuo": "TEXT",
     "operador_telefone": "TEXT",
     "criado_por_operador": "TEXT",
@@ -41,6 +41,10 @@ def ensure_alugueres_contentor_schema(engine: Engine) -> None:
         }
         if not columns:
             return
+
+        if "quantidade_contentores" in columns:
+            connection.execute(text("ALTER TABLE alugueres_contentor DROP COLUMN quantidade_contentores"))
+            columns.remove("quantidade_contentores")
 
         for column_name, column_definition in ALUGUERES_CONTENTOR_COLUMNS.items():
             if column_name not in columns:
