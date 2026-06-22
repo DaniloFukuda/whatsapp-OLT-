@@ -20,8 +20,14 @@ class ContentorRepository:
     def get(self, contentor_id: int) -> Contentor | None:
         return self._active_query().filter(Contentor.id == contentor_id).first()
 
+    def get_including_deleted(self, contentor_id: int) -> Contentor | None:
+        return self.db.get(Contentor, contentor_id)
+
     def get_by_codigo(self, codigo: str) -> Contentor | None:
         return self._active_query().filter(Contentor.codigo == codigo).first()
+
+    def get_by_codigo_including_deleted(self, codigo: str) -> Contentor | None:
+        return self.db.query(Contentor).filter(Contentor.codigo == codigo).first()
 
     def first_available(self) -> Contentor | None:
         return (
@@ -36,6 +42,11 @@ class ContentorRepository:
 
     def update_status(self, contentor: Contentor, status: StatusContentor) -> Contentor:
         contentor.status = status
+        self.db.commit()
+        self.db.refresh(contentor)
+        return contentor
+
+    def save(self, contentor: Contentor) -> Contentor:
         self.db.commit()
         self.db.refresh(contentor)
         return contentor

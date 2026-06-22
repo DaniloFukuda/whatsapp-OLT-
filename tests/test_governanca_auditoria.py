@@ -73,3 +73,67 @@ def test_campos_de_auditoria_de_contentores_podem_ser_preenchidos(db_session):
     assert contentor.excluido_por_operador == "351900000022"
     assert contentor.is_deleted is True
     assert contentor.justificativa_exclusao == "Cadastro duplicado identificado"
+
+
+def test_exclusao_segura_de_contentor_marca_auditoria_sem_delete_fisico(db_session):
+    service = ContentorService(db_session)
+    contentor = service.criar_contentor("C-DELETE")
+
+    excluido = service.excluir_com_auditoria(
+        contentor_id=contentor.id,
+        operador_telefone="351900000030",
+        justificativa="Contentor cadastrado em duplicidade",
+    )
+
+    assert excluido.id == contentor.id
+    assert excluido.is_deleted is True
+    assert excluido.excluido_por_operador == "351900000030"
+    assert excluido.justificativa_exclusao == "Contentor cadastrado em duplicidade"
+    assert db_session.get(Contentor, contentor.id) is not None
+    assert service.listar_contentores() == []
+
+
+def test_exclusao_segura_de_contentor_aceita_codigo(db_session):
+    service = ContentorService(db_session)
+    service.criar_contentor("C-CODIGO")
+
+    excluido = service.excluir_com_auditoria(
+        codigo="C-CODIGO",
+        operador_telefone="351900000031",
+        justificativa="Contentor fora de operacao",
+    )
+
+    assert excluido.codigo == "C-CODIGO"
+    assert excluido.is_deleted is True
+
+
+def test_exclusao_segura_rejeita_justificativa_curta(db_session):
+    service = ContentorService(db_session)
+    contentor = service.criar_contentor("C-CURTA")
+
+    with pytest.raises(ValueError, match="Justificativa"):
+        service.excluir_com_auditoria(
+            contentor_id=contentor.id,
+            operador_telefone="351900000032",
+            justificativa="curta",
+        )
+
+    db_session.refresh(contentor)
+    assert contentor.is_deleted is False
+
+
+def test_exclusao_segura_nao_exclui_contentor_ja_excluido(db_session):
+    service = ContentorService(db_session)
+    contentor = service.criar_contentor("C-REPETIDO")
+    service.excluir_com_auditoria(
+        contentor_id=contentor.id,
+        operador_telefone="351900000033",
+        justificativa="Primeira exclusao segura",
+    )
+
+    with pytest.raises(ValueError, match="ja excluido"):
+        service.excluir_com_auditoria(
+            contentor_id=contentor.id,
+            operador_telefone="351900000034",
+            justificativa="Segunda exclusao segura",
+        )
