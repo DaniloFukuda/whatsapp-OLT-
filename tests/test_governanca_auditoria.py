@@ -137,3 +137,77 @@ def test_exclusao_segura_nao_exclui_contentor_ja_excluido(db_session):
             operador_telefone="351900000034",
             justificativa="Segunda exclusao segura",
         )
+
+
+def test_alteracao_auditada_de_contentor_altera_status_e_grava_operador(db_session):
+    service = ContentorService(db_session)
+    contentor = service.criar_contentor("C-ALT")
+
+    alterado = service.alterar_com_auditoria(
+        contentor_id=contentor.id,
+        operador_telefone="351900000040",
+        campo="status",
+        novo_valor="manutencao",
+    )
+
+    assert alterado.status == StatusContentor.MANUTENCAO
+    assert alterado.alterado_por_operador == "351900000040"
+
+
+def test_alteracao_auditada_de_contentor_aceita_codigo(db_session):
+    service = ContentorService(db_session)
+    service.criar_contentor("C-ALT-CODIGO")
+
+    alterado = service.alterar_com_auditoria(
+        codigo="C-ALT-CODIGO",
+        operador_telefone="351900000041",
+        campo="status",
+        novo_valor=StatusContentor.AGUARDANDO_RECOLHA,
+    )
+
+    assert alterado.codigo == "C-ALT-CODIGO"
+    assert alterado.status == StatusContentor.AGUARDANDO_RECOLHA
+    assert alterado.alterado_por_operador == "351900000041"
+
+
+def test_alteracao_auditada_rejeita_campo_nao_permitido(db_session):
+    service = ContentorService(db_session)
+    contentor = service.criar_contentor("C-CAMPO")
+
+    with pytest.raises(ValueError, match="Campo nao permitido"):
+        service.alterar_com_auditoria(
+            contentor_id=contentor.id,
+            operador_telefone="351900000042",
+            campo="valor",
+            novo_valor="100",
+        )
+
+
+def test_alteracao_auditada_bloqueia_contentor_excluido(db_session):
+    service = ContentorService(db_session)
+    contentor = service.criar_contentor("C-ALT-DEL")
+    service.excluir_com_auditoria(
+        contentor_id=contentor.id,
+        operador_telefone="351900000043",
+        justificativa="Contentor removido da operacao",
+    )
+
+    with pytest.raises(ValueError, match="excluido"):
+        service.alterar_com_auditoria(
+            contentor_id=contentor.id,
+            operador_telefone="351900000044",
+            campo="status",
+            novo_valor="manutencao",
+        )
+
+
+def test_alteracao_auditada_rejeita_contentor_inexistente(db_session):
+    service = ContentorService(db_session)
+
+    with pytest.raises(ValueError, match="Contentor nao encontrado"):
+        service.alterar_com_auditoria(
+            contentor_id=999,
+            operador_telefone="351900000045",
+            campo="status",
+            novo_valor="manutencao",
+        )
