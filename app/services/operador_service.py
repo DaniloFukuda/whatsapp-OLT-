@@ -40,8 +40,10 @@ class OperadorService:
             return None
 
         telefones_fallback = self._telefones_fallback()
-        if not telefones_fallback or telefone_normalizado in telefones_fallback:
+        if telefone_normalizado in telefones_fallback:
             return PerfilOperador.GESTOR
+        if not telefones_fallback:
+            return PerfilOperador.FUNCIONARIO
         return None
 
     def _tem_operadores(self) -> bool:

@@ -137,7 +137,7 @@ class WhatsappRouterAgent:
 
     def _handle_operational_command(self, command: str, telefone: str | None = None) -> str:
         if command == "resumo":
-            return self._resumo_operacional(self.operador_service.obter_perfil(telefone) or PerfilOperador.GESTOR)
+            return self._resumo_operacional(self.operador_service.obter_perfil(telefone) or PerfilOperador.FUNCIONARIO)
         if command == "lista":
             return self._lista()
         if command == "disponiveis":

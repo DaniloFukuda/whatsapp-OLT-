@@ -1320,8 +1320,17 @@ def test_resumo_lida_com_ausencia_de_localizacao(db_session, monkeypatch):
 def test_resumo_calcula_faturado_total_e_recebido_no_mes(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     preparar_resumo_paulo(db_session)
+    db_session.add(
+        Operador(
+            telefone_whatsapp="351900000012",
+            nome_operador="Gestor Financeiro",
+            perfil=PerfilOperador.GESTOR,
+            ativo=True,
+        )
+    )
+    db_session.commit()
 
-    response = WhatsappRouterAgent(db_session).handle(text_message("resumo"))
+    response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000012"))
 
     assert "Faturamento do mes corrente:" in response
     assert "Faturado total do mes: 300.00" in response
@@ -1368,6 +1377,22 @@ def test_resumo_funcionario_nao_mostra_financeiro(db_session, monkeypatch):
     assert "Faturamento do mes corrente:" not in response
     assert "Faturado total do mes" not in response
     assert "Recebido/pago no mes" not in response
+    assert "valor" not in response.lower()
+    assert "€" not in response
+    assert "R$" not in response
+
+
+def test_resumo_sem_perfil_explicito_nao_mostra_financeiro(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    preparar_resumo_paulo(db_session)
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000099"))
+
+    assert "Retiradas hoje:" in response
+    assert "Cliente Retirada Hoje" in response
+    assert "Faturamento do mes corrente:" not in response
+    assert "Faturado total do mes" not in response
+    assert "Recebido/pago no mes" not in response
 
 
 def test_registros_deletados_nao_aparecem_em_listas_e_resumo(db_session, monkeypatch):
@@ -1376,6 +1401,9 @@ def test_registros_deletados_nao_aparecem_em_listas_e_resumo(db_session, monkeyp
     deletado = preparar_aluguer_gestao(db_session, "Cliente Deletado", "351912345690")
     ativo = preparar_aluguer_gestao(db_session, "Cliente Ativo", "351912345691")
     AluguerService(db_session).excluir(deletado.id, "351900000000", "Duplicidade operacional")
+    contentor_deletado = db_session.query(Contentor).filter_by(codigo="C20").one()
+    contentor_deletado.is_deleted = True
+    db_session.commit()
 
     router = WhatsappRouterAgent(db_session)
     alterar = router.handle(text_message("alterar"))
@@ -1387,6 +1415,7 @@ def test_registros_deletados_nao_aparecem_em_listas_e_resumo(db_session, monkeyp
     assert "Cliente Deletado" not in resumo
     assert f"#{ativo.id}" in alterar
     assert "Cliente Ativo" in alugados
+    assert "Total: 19" in resumo
 
 
 def test_renovacao_ignora_registros_deletados(db_session, monkeypatch):
