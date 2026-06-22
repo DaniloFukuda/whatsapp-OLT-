@@ -1159,6 +1159,59 @@ def test_mensagem_novo_de_operador_autorizado_inicia_fluxo(db_session, monkeypat
     assert conversa.estado_atual == AluguerAgent.START_STATE
 
 
+def test_operador_ativo_no_banco_consegue_usar_bot(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    db_session.add(
+        Operador(
+            telefone_whatsapp="351900000020",
+            nome_operador="Operador Ativo",
+            perfil=PerfilOperador.FUNCIONARIO,
+            ativo=True,
+        )
+    )
+    db_session.commit()
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("novo", telefone="351900000020"))
+
+    assert "Cadastro unitario iniciado para o contentor C01" in response
+    assert "foto do contentor" in response
+
+
+def test_operador_inativo_no_banco_e_bloqueado(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    db_session.add(
+        Operador(
+            telefone_whatsapp="351900000021",
+            nome_operador="Operador Inativo",
+            perfil=PerfilOperador.GESTOR,
+            ativo=False,
+        )
+    )
+    db_session.commit()
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("novo", telefone="351900000021"))
+
+    assert response == "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
+
+
+def test_telefone_desconhecido_e_bloqueado_quando_existir_operador_no_banco(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    db_session.add(
+        Operador(
+            telefone_whatsapp="351900000022",
+            nome_operador="Operador Cadastrado",
+            perfil=PerfilOperador.GESTOR,
+            ativo=True,
+        )
+    )
+    db_session.commit()
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("novo", telefone="351900000023"))
+
+    assert response == "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
+
+
 def test_cancelar_sem_fluxo_ativo_informa_que_nao_ha_operacao(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
 
