@@ -1,6 +1,6 @@
 from enum import StrEnum
 
-from sqlalchemy import Boolean, Enum, String
+from sqlalchemy import Boolean, CheckConstraint, Enum, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -13,6 +13,9 @@ class PerfilOperador(StrEnum):
 
 class Operador(Base):
     __tablename__ = "operadores"
+    __table_args__ = (
+        CheckConstraint("perfil IN ('FUNCIONARIO', 'GESTOR')", name="ck_operadores_perfil"),
+    )
 
     telefone_whatsapp: Mapped[str] = mapped_column(String(50), primary_key=True)
     nome_operador: Mapped[str] = mapped_column(String(255), nullable=False)

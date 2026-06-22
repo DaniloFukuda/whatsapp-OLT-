@@ -1,6 +1,6 @@
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum, Integer, String
+from sqlalchemy import Boolean, DateTime, Enum, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -31,5 +31,10 @@ class Contentor(Base):
         onupdate=utcnow,
         nullable=False,
     )
+    criado_por_operador: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    alterado_por_operador: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    excluido_por_operador: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    justificativa_exclusao: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     alugueres = relationship("AluguerContentor", back_populates="contentor")

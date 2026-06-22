@@ -18,6 +18,15 @@ ALUGUERES_CONTENTOR_COLUMNS = {
 }
 
 
+CONTENTORES_COLUMNS = {
+    "criado_por_operador": "TEXT",
+    "alterado_por_operador": "TEXT",
+    "excluido_por_operador": "TEXT",
+    "is_deleted": "BOOLEAN DEFAULT 0 NOT NULL",
+    "justificativa_exclusao": "TEXT",
+}
+
+
 def ensure_alugueres_contentor_schema(engine: Engine) -> None:
     if engine.dialect.name != "sqlite":
         return
@@ -29,12 +38,22 @@ def ensure_alugueres_contentor_schema(engine: Engine) -> None:
                 CREATE TABLE IF NOT EXISTS operadores (
                     telefone_whatsapp VARCHAR(50) PRIMARY KEY,
                     nome_operador VARCHAR(255) NOT NULL,
-                    perfil VARCHAR(11) NOT NULL,
+                    perfil VARCHAR(11) NOT NULL CHECK (perfil IN ('FUNCIONARIO', 'GESTOR')),
                     ativo BOOLEAN DEFAULT 1 NOT NULL
                 )
                 """
             )
         )
+        contentores_columns = {
+            row["name"]
+            for row in connection.execute(text("PRAGMA table_info(contentores)")).mappings()
+        }
+        for column_name, column_definition in CONTENTORES_COLUMNS.items():
+            if contentores_columns and column_name not in contentores_columns:
+                connection.execute(
+                    text(f"ALTER TABLE contentores ADD COLUMN {column_name} {column_definition}")
+                )
+
         columns = {
             row["name"]
             for row in connection.execute(text("PRAGMA table_info(alugueres_contentor)")).mappings()

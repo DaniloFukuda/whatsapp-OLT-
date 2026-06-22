@@ -48,6 +48,31 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
                 """
             )
         )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE contentores (
+                    id INTEGER PRIMARY KEY,
+                    codigo VARCHAR(80) NOT NULL,
+                    status VARCHAR(19) NOT NULL,
+                    criado_em DATETIME NOT NULL,
+                    atualizado_em DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO contentores (
+                    id, codigo, status, criado_em, atualizado_em
+                )
+                VALUES (
+                    1, 'C01', 'DISPONIVEL', '2026-01-01 10:00:00', '2026-01-01 10:00:00'
+                )
+                """
+            )
+        )
 
     ensure_alugueres_contentor_schema(engine)
     ensure_alugueres_contentor_schema(engine)
@@ -65,6 +90,13 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
             row["name"]
             for row in connection.execute(text("PRAGMA table_info(operadores)")).mappings()
         }
+        contentores_columns = {
+            row["name"]
+            for row in connection.execute(text("PRAGMA table_info(contentores)")).mappings()
+        }
+        contentor_row = connection.execute(
+            text("SELECT is_deleted, justificativa_exclusao FROM contentores WHERE id = 1")
+        ).mappings().one()
 
     assert {
         "email_cliente",
@@ -82,5 +114,14 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
         "status_ciclo_cliente",
     } <= columns
     assert {"telefone_whatsapp", "nome_operador", "perfil", "ativo"} <= operadores_columns
+    assert {
+        "criado_por_operador",
+        "alterado_por_operador",
+        "excluido_por_operador",
+        "is_deleted",
+        "justificativa_exclusao",
+    } <= contentores_columns
+    assert contentor_row["is_deleted"] == 0
+    assert contentor_row["justificativa_exclusao"] is None
     assert "quantidade_contentores" not in columns
     assert row_count == 1

@@ -15,22 +15,30 @@ class ContentorRepository:
         return contentor
 
     def list(self) -> list[Contentor]:
-        return self.db.query(Contentor).order_by(Contentor.codigo).all()
+        return self._active_query().order_by(Contentor.codigo).all()
 
     def get(self, contentor_id: int) -> Contentor | None:
-        return self.db.get(Contentor, contentor_id)
+        return self._active_query().filter(Contentor.id == contentor_id).first()
 
     def get_by_codigo(self, codigo: str) -> Contentor | None:
-        return self.db.query(Contentor).filter(Contentor.codigo == codigo).first()
+        return self._active_query().filter(Contentor.codigo == codigo).first()
 
     def first_available(self) -> Contentor | None:
-        return self.db.query(Contentor).filter(Contentor.status == StatusContentor.DISPONIVEL).order_by(Contentor.id).first()
+        return (
+            self._active_query()
+            .filter(Contentor.status == StatusContentor.DISPONIVEL)
+            .order_by(Contentor.id)
+            .first()
+        )
 
     def count(self) -> int:
-        return self.db.query(Contentor).count()
+        return self._active_query().count()
 
     def update_status(self, contentor: Contentor, status: StatusContentor) -> Contentor:
         contentor.status = status
         self.db.commit()
         self.db.refresh(contentor)
         return contentor
+
+    def _active_query(self):
+        return self.db.query(Contentor).filter(Contentor.is_deleted.is_(False))
