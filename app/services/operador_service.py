@@ -3,17 +3,18 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.phone import normalize_phone
 from app.models.operador import Operador, PerfilOperador
+from app.repositories.operador_repository import OperadorRepository
 
 
 class OperadorService:
     def __init__(self, db: Session):
-        self.db = db
+        self.repository = OperadorRepository(db)
 
     def buscar_por_telefone(self, telefone: str | None) -> Operador | None:
         telefone_normalizado = normalize_phone(telefone)
         if not telefone_normalizado:
             return None
-        return self.db.get(Operador, telefone_normalizado)
+        return self.repository.get_by_telefone(telefone_normalizado)
 
     def verificar_autorizacao(self, telefone: str | None) -> bool:
         telefone_normalizado = normalize_phone(telefone)
@@ -44,7 +45,7 @@ class OperadorService:
         return None
 
     def _tem_operadores(self) -> bool:
-        return self.db.query(Operador).first() is not None
+        return self.repository.has_any()
 
     def _telefones_fallback(self) -> set[str]:
         settings = get_settings()
