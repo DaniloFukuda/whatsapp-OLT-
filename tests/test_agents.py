@@ -809,6 +809,57 @@ def test_exclusao_com_confirmacao_clara_exclui(db_session, monkeypatch):
     )
 
 
+def test_exclusao_de_contentor_inicia_fluxo_quando_nao_ha_registros_recentes(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    response = router.handle(text_message("excluir", telefone="351900000040"))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000040").one()
+
+    assert "Escolha o contentor para excluir:" in response
+    assert "1. C01 - disponivel" in response
+    assert conversa.estado_atual == "contentor_exclusao_aguardando_item"
+
+
+def test_remover_contentor_rejeita_justificativa_curta_e_exclui_com_auditoria(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    start = router.handle(text_message("remover", telefone="351900000041"))
+    confirmacao = router.handle(text_message("C01", telefone="351900000041"))
+    pedido_justificativa = router.handle(text_message("1", telefone="351900000041"))
+    curta = router.handle(text_message("curta", telefone="351900000041"))
+    response = router.handle(text_message("Contentor duplicado no patio", telefone="351900000041"))
+    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+
+    assert "Escolha o contentor para excluir:" in start
+    assert "Contentor selecionado: C01" in confirmacao
+    assert pedido_justificativa == "Informe a justificativa da exclusao com pelo menos 10 caracteres."
+    assert curta == "A justificativa deve ter pelo menos 10 caracteres."
+    assert response == "Contentor C01 excluido com seguranca."
+    assert contentor.is_deleted is True
+    assert contentor.excluido_por_operador == "351900000041"
+    assert contentor.justificativa_exclusao == "Contentor duplicado no patio"
+    assert db_session.get(Contentor, contentor.id) is not None
+    assert "C01" not in router.handle(text_message("lista", telefone="351900000041"))
+    assert "Total: 19" in router.handle(text_message("resumo", telefone="351900000041"))
+
+
+def test_exclusao_de_contentor_nao_lista_contentor_ja_excluido(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+    contentor.is_deleted = True
+    db_session.commit()
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("apagar"))
+
+    assert "C01" not in response
+    assert "C02" in response
+
+
 def test_numero_nao_autorizado_nao_altera_nem_exclui(db_session, monkeypatch):
     monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONE", "351999999999")
     monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONES", "")

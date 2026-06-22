@@ -26,6 +26,7 @@ COMMANDS = {"resumo", "lista", "disponiveis", "alugados", "vencendo", "atrasados
 START_COMMANDS = {"iniciar", "cadastrar", "comecar", "começar", "novo"}
 ALTER_COMMANDS = {"alterar", "modificar"}
 DELETE_COMMANDS = {"excluir", "deletar"}
+CONTENTOR_DELETE_COMMANDS = {"apagar", "remover", "excluir contentor", "excluir contentores"}
 RENEW_COMMANDS = {"renovar", "prorrogar"}
 CANCEL_COMMANDS = {"cancelar", "cancela", "sair", "parar", "voltar", "menu", "0"}
 CANCELLED_MENU_MESSAGE = (
@@ -96,6 +97,8 @@ class WhatsappRouterAgent:
             return self.gestao_aluguer_agent.handle(conversa, message)
         if conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES:
             return self.renovacao_agent.handle(conversa, message)
+        if conversa.estado_atual in ContentorAgent.ACTIVE_STATES:
+            return self.contentor_agent.handle(conversa, message)
 
         if text == "4":
             if not self._is_authorized(message.telefone):
@@ -120,7 +123,13 @@ class WhatsappRouterAgent:
         if text in DELETE_COMMANDS:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
+            if text == "excluir" and not self.aluguer_service.listar_cadastrados_nos_ultimos_dias(7):
+                return self.contentor_agent.start_exclusao(conversa)
             return self.gestao_aluguer_agent.start_exclusao(conversa)
+        if text in CONTENTOR_DELETE_COMMANDS:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
+            return self.contentor_agent.start_exclusao(conversa)
         if text == "3":
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
@@ -355,6 +364,7 @@ class WhatsappRouterAgent:
             conversa.estado_atual in AluguerAgent.ACTIVE_STATES
             or conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES
             or conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES
+            or conversa.estado_atual in ContentorAgent.ACTIVE_STATES
         )
 
     def _is_expired(self, conversa: ConversaWhatsApp) -> bool:
