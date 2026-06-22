@@ -16,7 +16,7 @@ from app.services.contentor_service import ContentorService
 
 
 class AluguerAgent:
-    START_STATE = "aguardando_numero_contentor"
+    START_STATE = "aguardando_foto_entrega"
     CONFIRMED_STATE = "idle"
     ACTIVE_STATES = {
         "aguardando_numero_contentor",
@@ -72,11 +72,15 @@ class AluguerAgent:
         conversa.contexto_json = {
             "contentor_id": contentor.id,
             "contentor_codigo": contentor.codigo,
+            "numero_contentor": contentor.codigo,
             "operador_telefone": normalize_portugal_phone(conversa.telefone),
             "updated_at": utcnow().isoformat(),
         }
         self.db.commit()
-        return "🚛 Qual o numero do contentor?"
+        return (
+            f"Cadastro unitario iniciado para o contentor {contentor.codigo}.\n"
+            "Envie a foto do contentor no local."
+        )
 
     def handle(self, conversa: ConversaWhatsApp, message: NormalizedWhatsAppMessage) -> str:
         state = conversa.estado_atual

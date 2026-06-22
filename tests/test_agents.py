@@ -106,7 +106,6 @@ def preparar_resumo_paulo(db_session):
 
 def avancar_cadastro_ate_confirmacao_data(router, db_session, telefone: str = "351900001000"):
     router.handle(text_message("novo", telefone=telefone))
-    router.handle(text_message("C12", telefone=telefone))
     router.handle(
         NormalizedWhatsAppMessage(
             telefone=telefone,
@@ -155,9 +154,11 @@ def test_router_chama_aluguer_agent_quando_mensagem_for_novo(db_session, monkeyp
     response = WhatsappRouterAgent(db_session).handle(text_message("novo"))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").first()
 
-    assert "numero do contentor" in response
+    assert "Cadastro unitario iniciado para o contentor C01" in response
+    assert "foto do contentor" in response
     assert conversa.estado_atual == AluguerAgent.START_STATE
     assert conversa.contexto_json["contentor_codigo"] == "C01"
+    assert conversa.contexto_json["numero_contentor"] == "C01"
 
 
 def test_comandos_de_inicio_disparam_cadastro(db_session, monkeypatch):
@@ -173,7 +174,8 @@ def test_comandos_de_inicio_disparam_cadastro(db_session, monkeypatch):
         response = WhatsappRouterAgent(db_session).handle(text_message(command, telefone=telefone))
         conversa = db_session.query(ConversaWhatsApp).filter_by(telefone=telefone).one()
 
-        assert "numero do contentor" in response
+        assert "Cadastro unitario iniciado para o contentor" in response
+        assert "foto do contentor" in response
         assert conversa.estado_atual == AluguerAgent.START_STATE
 
 
@@ -186,7 +188,6 @@ def test_aluguer_agent_avanca_estado_da_conversa(db_session):
 
     agent = AluguerAgent(db_session)
     agent.start(conversa)
-    agent.handle(conversa, text_message("C12", telefone=conversa.telefone))
     response = agent.handle(
         conversa,
         NormalizedWhatsAppMessage(
@@ -232,8 +233,6 @@ def test_fluxo_completo_de_novo_aluguer(db_session, monkeypatch):
     responses = []
 
     responses.append(router.handle(text_message("novo")))
-    states.append(db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one().estado_atual)
-    responses.append(router.handle(text_message("OLT-12")))
     states.append(db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one().estado_atual)
     responses.append(
         router.handle(
@@ -282,7 +281,6 @@ def test_fluxo_completo_de_novo_aluguer(db_session, monkeypatch):
     aluguer = db_session.query(AluguerContentor).order_by(AluguerContentor.id.desc()).one()
 
     assert states == [
-        "aguardando_numero_contentor",
         "aguardando_foto_entrega",
         "aguardando_localizacao",
         "aguardando_nome_cliente",
@@ -306,7 +304,7 @@ def test_fluxo_completo_de_novo_aluguer(db_session, monkeypatch):
     assert aluguer.nome_cliente == "Cliente Final"
     assert aluguer.telefone_cliente == "351911111111"
     assert aluguer.email_cliente is None
-    assert aluguer.numero_contentor == "OLT-12"
+    assert aluguer.numero_contentor == "C01"
     assert aluguer.tipo_residuo == "Entulho Misto"
     assert aluguer.forma_pagamento == "MBWay"
     assert aluguer.pago is True
@@ -1156,7 +1154,8 @@ def test_mensagem_novo_de_operador_autorizado_inicia_fluxo(db_session, monkeypat
     response = WhatsappRouterAgent(db_session).handle(text_message("Novo", telefone="556198266551"))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="556198266551").one()
 
-    assert "numero do contentor" in response
+    assert "Cadastro unitario iniciado para o contentor C01" in response
+    assert "foto do contentor" in response
     assert conversa.estado_atual == AluguerAgent.START_STATE
 
 

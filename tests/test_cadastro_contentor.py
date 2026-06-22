@@ -51,7 +51,6 @@ def setup_router(db_session, monkeypatch) -> WhatsappRouterAgent:
 
 def advance_to_confirmation(router: WhatsappRouterAgent, telefone: str = "351955000000") -> str:
     router.handle(text_message("1", telefone))
-    router.handle(text_message(" OLT-12 ", telefone))
     router.handle(image_message(telefone))
     router.handle(location_message(telefone))
     router.handle(text_message("Cliente Confirmacao", telefone))
@@ -82,14 +81,12 @@ def test_opcao_1_inicia_cadastro_e_texto_na_foto_nao_avanca(db_session, monkeypa
     router = setup_router(db_session, monkeypatch)
 
     start = router.handle(text_message("1"))
-    invalid = router.handle(text_message(""))
-    photo_prompt = router.handle(text_message(" CNT-001 "))
     response = router.handle(text_message("texto qualquer"))
 
-    assert start == "🚛 Qual o numero do contentor?"
-    assert "Informe o numero do contentor" in invalid
-    assert "foto do contentor" in photo_prompt
-    assert conversa(db_session).contexto_json["numero_contentor"] == "CNT-001"
+    assert "Cadastro unitario iniciado para o contentor C01" in start
+    assert "foto do contentor" in start
+    assert "quantidade" not in start.lower()
+    assert conversa(db_session).contexto_json["numero_contentor"] == "C01"
     assert "Ainda nao recebi a imagem" in response
     assert conversa(db_session).estado_atual == "aguardando_foto_entrega"
 
@@ -98,7 +95,6 @@ def test_imagem_avanca_e_texto_na_localizacao_nao_avanca(db_session, monkeypatch
     router = setup_router(db_session, monkeypatch)
 
     router.handle(text_message("1"))
-    router.handle(text_message("12"))
     image_response = router.handle(image_message())
     text_response = router.handle(text_message("Rua sem pin"))
 
@@ -111,7 +107,6 @@ def test_localizacao_nome_telefone_e_email_validam_antes_de_avancar(db_session, 
     router = setup_router(db_session, monkeypatch)
 
     router.handle(text_message("1"))
-    router.handle(text_message("C12"))
     router.handle(image_message())
     loc_response = router.handle(location_message())
     invalid_name = router.handle(text_message("Al"))
@@ -136,7 +131,6 @@ def test_telefone_por_contato_nativo_e_aceito(db_session, monkeypatch):
     router = setup_router(db_session, monkeypatch)
 
     router.handle(text_message("1"))
-    router.handle(text_message("C12"))
     router.handle(image_message())
     router.handle(location_message())
     router.handle(text_message("Cliente Contato"))
@@ -157,7 +151,6 @@ def test_data_hoje_calcula_retirada_tipo_e_valor_sao_controlados(db_session, mon
     router = setup_router(db_session, monkeypatch)
 
     router.handle(text_message("1"))
-    router.handle(text_message("C12"))
     router.handle(image_message())
     router.handle(location_message())
     router.handle(text_message("Cliente Valores"))
@@ -190,7 +183,7 @@ def test_confirmacao_corrige_numero_contentor_salva_e_limpa_sessao(db_session, m
     aluguer = db_session.query(AluguerContentor).one()
 
     assert "✅ Confirmacao dos Dados" in confirmation
-    assert "🚛 Contentor: OLT-12" in confirmation
+    assert "Contentor: C01" in confirmation
     assert "Numero do contentor" in correction_menu
     assert "numero do contentor" in correction_prompt
     assert "🚛 Contentor: CNT-999" in confirmation_after_correction
@@ -217,6 +210,7 @@ def test_cadastro_via_whatsapp_salva_operador_no_contentor(db_session, monkeypat
     assert contentor.criado_por_operador == telefone_operador
     assert aluguer.criado_por_operador == telefone_operador
 
+
 def test_cancelar_tudo_na_confirmacao_limpa_sessao_sem_salvar(db_session, monkeypatch):
     router = setup_router(db_session, monkeypatch)
 
@@ -232,7 +226,6 @@ def test_timeout_de_30_minutos_pergunta_se_deseja_continuar(db_session, monkeypa
     router = setup_router(db_session, monkeypatch)
 
     router.handle(text_message("1"))
-    router.handle(text_message("C12"))
     router.handle(image_message())
     current = conversa(db_session)
     context = dict(current.contexto_json)
@@ -251,7 +244,6 @@ def test_timeout_de_30_minutos_permite_recomecar(db_session, monkeypatch):
     router = setup_router(db_session, monkeypatch)
 
     router.handle(text_message("1"))
-    router.handle(text_message("C12"))
     current = conversa(db_session)
     context = dict(current.contexto_json)
     context["updated_at"] = (utcnow() - timedelta(minutes=31)).isoformat()
@@ -262,6 +254,6 @@ def test_timeout_de_30_minutos_permite_recomecar(db_session, monkeypatch):
     response = router.handle(text_message("2"))
     current = conversa(db_session)
 
-    assert response == "🚛 Qual o numero do contentor?"
-    assert current.estado_atual == "aguardando_numero_contentor"
-    assert "numero_contentor" not in current.contexto_json
+    assert "Cadastro unitario iniciado para o contentor C01" in response
+    assert current.estado_atual == "aguardando_foto_entrega"
+    assert current.contexto_json["numero_contentor"] == "C01"
