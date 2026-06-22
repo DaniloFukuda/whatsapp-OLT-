@@ -5,6 +5,7 @@ from app.core.config import get_settings
 from app.core.time import utcnow
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.aluguer import AluguerContentor
+from app.models.contentor import Contentor
 from app.models.conversa import ConversaWhatsApp
 from app.services.seed_service import SeedService
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
@@ -202,6 +203,19 @@ def test_confirmacao_corrige_numero_contentor_salva_e_limpa_sessao(db_session, m
     assert conversa(db_session).estado_atual == "idle"
     assert conversa(db_session).contexto_json == {}
 
+
+def test_cadastro_via_whatsapp_salva_operador_no_contentor(db_session, monkeypatch):
+    telefone_operador = "351966000123"
+    router = setup_router(db_session, monkeypatch)
+
+    advance_to_confirmation(router, telefone=telefone_operador)
+    router.handle(text_message("1", telefone_operador))
+
+    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+    aluguer = db_session.query(AluguerContentor).one()
+
+    assert contentor.criado_por_operador == telefone_operador
+    assert aluguer.criado_por_operador == telefone_operador
 
 def test_cancelar_tudo_na_confirmacao_limpa_sessao_sem_salvar(db_session, monkeypatch):
     router = setup_router(db_session, monkeypatch)

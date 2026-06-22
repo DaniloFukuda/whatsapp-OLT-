@@ -67,6 +67,8 @@ class AluguerService:
             observacoes=observacoes,
         )
         contentor.status = StatusContentor.ALUGADO
+        if operador_telefone and not contentor.criado_por_operador:
+            contentor.criado_por_operador = operador_telefone
         self.alugueres.add_event(aluguer.id, "entrega", "Contentor entregue no local indicado")
         self.alugueres.add_event(
             aluguer.id,
