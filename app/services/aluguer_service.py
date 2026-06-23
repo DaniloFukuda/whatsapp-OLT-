@@ -4,7 +4,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.core.time import utcnow
-from app.models.aluguer import AluguerContentor, StatusAluguer
+from app.models.aluguer import AluguerContentor, StatusAluguer, StatusEntrega
 from app.models.contentor import StatusContentor
 from app.repositories.aluguer_repository import AluguerRepository
 from app.repositories.cliente_repository import ClienteRepository
@@ -35,6 +35,17 @@ class AluguerService:
         longitude: float | None = None,
         observacoes: str | None = None,
         data_entrega: datetime | None = None,
+        status_entrega: str = StatusEntrega.ENTREGUE.value,
+        pedido_feito_por: str | None = None,
+        entrega_feita_por: str | None = None,
+        pedido_endereco_tipo: str | None = None,
+        pedido_endereco_texto: str | None = None,
+        pedido_latitude: float | None = None,
+        pedido_longitude: float | None = None,
+        pedido_ponto_referencia: str | None = None,
+        entrega_latitude: float | None = None,
+        entrega_longitude: float | None = None,
+        entrega_ponto_referencia: str | None = None,
     ) -> AluguerContentor:
         entrega = data_entrega or utcnow()
         cliente = self.clientes.get_or_create(nome=nome_cliente, telefone=telefone_cliente)
@@ -44,6 +55,13 @@ class AluguerService:
         numero_contentor = (numero_contentor or contentor.codigo).strip()
         if not 1 <= len(numero_contentor) <= 20:
             raise ValueError("Numero do contentor deve ter entre 1 e 20 caracteres")
+
+        status_entrega = status_entrega or StatusEntrega.ENTREGUE.value
+        pedido_feito_por = pedido_feito_por or operador_telefone
+        if status_entrega == StatusEntrega.ENTREGUE.value:
+            entrega_feita_por = entrega_feita_por or operador_telefone
+            entrega_latitude = entrega_latitude if entrega_latitude is not None else latitude
+            entrega_longitude = entrega_longitude if entrega_longitude is not None else longitude
 
         aluguer = self.alugueres.create(
             contentor_id=contentor.id,
@@ -60,16 +78,30 @@ class AluguerService:
             pago=pago,
             operador_telefone=operador_telefone,
             criado_por_operador=operador_telefone,
+            pedido_feito_por=pedido_feito_por,
+            entrega_feita_por=entrega_feita_por,
+            status_entrega=status_entrega,
             status=StatusAluguer.ATIVO,
             foto_entrega_path=foto_entrega_path,
             latitude=latitude,
             longitude=longitude,
+            pedido_endereco_tipo=pedido_endereco_tipo,
+            pedido_endereco_texto=pedido_endereco_texto,
+            pedido_latitude=pedido_latitude,
+            pedido_longitude=pedido_longitude,
+            pedido_ponto_referencia=pedido_ponto_referencia,
+            entrega_latitude=entrega_latitude,
+            entrega_longitude=entrega_longitude,
+            entrega_ponto_referencia=entrega_ponto_referencia,
             observacoes=observacoes,
         )
         contentor.status = StatusContentor.ALUGADO
         if operador_telefone and not contentor.criado_por_operador:
             contentor.criado_por_operador = operador_telefone
-        self.alugueres.add_event(aluguer.id, "entrega", "Contentor entregue no local indicado")
+        if status_entrega == StatusEntrega.PENDENTE.value:
+            self.alugueres.add_event(aluguer.id, "pedido_criado", "Pedido cadastrado pelo escritorio; entrega pendente")
+        else:
+            self.alugueres.add_event(aluguer.id, "entrega", "Contentor entregue no local indicado")
         self.alugueres.add_event(
             aluguer.id,
             "pagamento_informado",
@@ -112,6 +144,11 @@ class AluguerService:
             foto_entrega_path=origem.foto_entrega_path,
             observacoes=origem.observacoes,
             data_entrega=nova_entrega,
+            pedido_endereco_tipo=ajustes.get("pedido_endereco_tipo", origem.pedido_endereco_tipo),
+            pedido_endereco_texto=ajustes.get("pedido_endereco_texto", origem.pedido_endereco_texto),
+            pedido_latitude=ajustes.get("pedido_latitude", origem.pedido_latitude),
+            pedido_longitude=ajustes.get("pedido_longitude", origem.pedido_longitude),
+            pedido_ponto_referencia=ajustes.get("pedido_ponto_referencia", origem.pedido_ponto_referencia),
         )
         self.alugueres.add_event(novo.id, "renovado_de", f"Renovacao criada a partir do aluguer #{origem.id}")
         return self.alugueres.save(novo)
@@ -122,6 +159,15 @@ class AluguerService:
         aluguer.contentor.status = StatusContentor.AGUARDANDO_RECOLHA
         self.alugueres.add_event(aluguer.id, "aguardando_recolha", "Aluguer marcado para recolha")
         return self.alugueres.save(aluguer)
+
+    def listar_pendentes_entrega(self) -> list[AluguerContentor]:
+        return (
+            self.db.query(AluguerContentor)
+            .filter(AluguerContentor.status_entrega == StatusEntrega.PENDENTE.value)
+            .filter(AluguerContentor.is_deleted.is_(False))
+            .order_by(AluguerContentor.data_entrega, AluguerContentor.id)
+            .all()
+        )
 
     def listar_vencendo_amanha(self, now: datetime | None = None) -> list[AluguerContentor]:
         base = now or utcnow()
