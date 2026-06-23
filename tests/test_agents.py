@@ -860,6 +860,71 @@ def test_exclusao_de_contentor_nao_lista_contentor_ja_excluido(db_session, monke
     assert "C02" in response
 
 
+def test_alteracao_status_contentor_inicia_fluxo_e_lista_ativos(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+    contentor.is_deleted = True
+    db_session.commit()
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("alterar status"))
+
+    assert "Escolha o contentor para alterar o status:" in response
+    assert "C01" not in response
+    assert "1. C02 - disponivel" in response
+
+
+def test_alteracao_status_contentor_confirma_e_grava_operador(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    start = router.handle(text_message("status contentor", telefone="351900000050"))
+    status_prompt = router.handle(text_message("C01", telefone="351900000050"))
+    confirmacao = router.handle(text_message("4", telefone="351900000050"))
+    response = router.handle(text_message("1", telefone="351900000050"))
+    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+
+    assert "Escolha o contentor para alterar o status:" in start
+    assert "Status atual: disponivel" in status_prompt
+    assert "Novo status: manutencao" in confirmacao
+    assert response == "Status do contentor C01 alterado para manutencao."
+    assert contentor.status == StatusContentor.MANUTENCAO
+    assert contentor.alterado_por_operador == "351900000050"
+
+
+def test_alteracao_status_contentor_bloqueia_contentor_excluido_por_codigo(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+    contentor.is_deleted = True
+    db_session.commit()
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("alterar contentor"))
+    response = router.handle(text_message("C01"))
+    db_session.refresh(contentor)
+
+    assert response == "Informe um numero da lista ou codigo de contentor valido."
+    assert contentor.status == StatusContentor.DISPONIVEL
+    assert contentor.alterado_por_operador is None
+
+
+def test_cancelamento_global_na_alteracao_status_contentor_nao_altera(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(text_message("alterar contentor"))
+    router.handle(text_message("C01"))
+    response = router.handle(text_message("cancelar"))
+    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+
+    assert response == CANCELLED_MENU_MESSAGE
+    assert contentor.status == StatusContentor.DISPONIVEL
+    assert contentor.alterado_por_operador is None
+
+
 def test_numero_nao_autorizado_nao_altera_nem_exclui(db_session, monkeypatch):
     monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONE", "351999999999")
     monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONES", "")

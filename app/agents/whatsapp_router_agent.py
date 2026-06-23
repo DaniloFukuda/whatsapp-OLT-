@@ -25,6 +25,7 @@ ACTIVE_ALUGUER_STATUSES = {StatusAluguer.ATIVO, StatusAluguer.VENCENDO, StatusAl
 COMMANDS = {"resumo", "lista", "disponiveis", "alugados", "vencendo", "atrasados"}
 START_COMMANDS = {"iniciar", "cadastrar", "comecar", "começar", "novo"}
 ALTER_COMMANDS = {"alterar", "modificar"}
+CONTENTOR_STATUS_COMMANDS = {"alterar contentor", "alterar status", "status contentor"}
 DELETE_COMMANDS = {"excluir", "deletar"}
 CONTENTOR_DELETE_COMMANDS = {"apagar", "remover", "excluir contentor", "excluir contentores"}
 RENEW_COMMANDS = {"renovar", "prorrogar"}
@@ -112,6 +113,10 @@ class WhatsappRouterAgent:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
             return self.aluguer_agent.start(conversa)
+        if text in CONTENTOR_STATUS_COMMANDS:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para alterar registros. Contacte o administrador do sistema."
+            return self.contentor_agent.start_alteracao_status(conversa)
         if text in ALTER_COMMANDS:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para alterar registros. Contacte o administrador do sistema."
