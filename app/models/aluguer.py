@@ -16,6 +16,11 @@ class StatusAluguer(StrEnum):
     CANCELADO = "cancelado"
 
 
+class StatusEntrega(StrEnum):
+    PENDENTE = "PENDENTE"
+    ENTREGUE = "ENTREGUE"
+
+
 class AluguerContentor(Base):
     __tablename__ = "alugueres_contentor"
 
@@ -34,6 +39,8 @@ class AluguerContentor(Base):
     pago: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     operador_telefone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     criado_por_operador: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    pedido_feito_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    entrega_feita_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
     alterado_por_operador: Mapped[str | None] = mapped_column(String(50), nullable=True)
     excluido_por_operador: Mapped[str | None] = mapped_column(String(50), nullable=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -42,10 +49,19 @@ class AluguerContentor(Base):
     google_event_entrega_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     google_event_retirada_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status_ciclo_cliente: Mapped[str] = mapped_column(String(80), default="EM_ANDAMENTO", nullable=False)
+    status_entrega: Mapped[str] = mapped_column(String(20), default=StatusEntrega.ENTREGUE.value, nullable=False)
     status: Mapped[StatusAluguer] = mapped_column(Enum(StatusAluguer), default=StatusAluguer.ATIVO, nullable=False)
     foto_entrega_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pedido_endereco_tipo: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    pedido_endereco_texto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pedido_latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pedido_longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pedido_ponto_referencia: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    entrega_latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entrega_longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entrega_ponto_referencia: Mapped[str | None] = mapped_column(String(50), nullable=True)
     observacoes: Mapped[str | None] = mapped_column(Text, nullable=True)
     criado_em: Mapped[DateTime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     atualizado_em: Mapped[DateTime] = mapped_column(
@@ -58,6 +74,7 @@ class AluguerContentor(Base):
     cliente = relationship("Cliente", back_populates="alugueres")
     contentor = relationship("Contentor", back_populates="alugueres")
     eventos = relationship("EventoAluguer", back_populates="aluguer")
+    fotos = relationship("ContentorFoto", back_populates="aluguer")
 
 
 class EventoAluguer(Base):
@@ -70,3 +87,15 @@ class EventoAluguer(Base):
     criado_em: Mapped[DateTime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     aluguer = relationship("AluguerContentor", back_populates="eventos")
+
+
+class ContentorFoto(Base):
+    __tablename__ = "contentor_fotos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    aluguer_id: Mapped[int] = mapped_column(ForeignKey("alugueres_contentor.id"), nullable=False)
+    url_foto: Mapped[str] = mapped_column(String(500), nullable=False)
+    tipo: Mapped[str] = mapped_column(String(30), default="entrega", nullable=False)
+    criado_em: Mapped[DateTime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    aluguer = relationship("AluguerContentor", back_populates="fotos")
