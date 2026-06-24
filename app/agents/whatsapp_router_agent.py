@@ -33,7 +33,8 @@ CONTENTOR_DELETE_COMMANDS = {"apagar", "remover", "excluir contentor", "excluir 
 RENEW_COMMANDS = {"renovar", "prorrogar"}
 ENTREGA_COMMANDS = {"entrega", "entregar", "entrega de contentor", "confirmar entrega"}
 RECOLHA_COMMANDS = {"recolha", "recolher", "confirmar recolha", "confirmar recolha de contentor"}
-CANCEL_COMMANDS = {"cancelar", "cancela", "sair", "parar", "voltar", "menu", "0"}
+MENU_COMMANDS = {"menu", "inicio", "início"}
+CANCEL_COMMANDS = {"cancelar", "cancela", "sair", "parar", "voltar", "0"}
 MAIN_MENU = (
     "🤖 Menu principal - OLT Entulhos\n\n"
     "1️⃣ 📝 Novo pedido\n"
@@ -66,13 +67,20 @@ class WhatsappRouterAgent:
         conversa = self._get_or_create_conversa(message.telefone)
         text = (message.texto or "").strip().lower()
 
+        if text in MENU_COMMANDS:
+            if self._has_active_flow(conversa):
+                conversa.estado_atual = "idle"
+                conversa.contexto_json = {}
+                self.db.commit()
+            return self._initial_menu(message.telefone)
+
         if text in CANCEL_COMMANDS:
             if self._has_active_flow(conversa):
                 conversa.estado_atual = "idle"
                 conversa.contexto_json = {}
                 self.db.commit()
                 return CANCELLED_MENU_MESSAGE
-            return "Nenhuma operação em andamento para cancelar."
+            return "Nenhuma operacao em andamento para cancelar.\n\n" + self._initial_menu(message.telefone)
 
         if conversa.estado_atual == "cadastro_expirado":
             if text in {"1", "sim", "continuar"}:

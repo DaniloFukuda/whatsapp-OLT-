@@ -1362,9 +1362,23 @@ def test_cancelar_sem_fluxo_ativo_informa_que_nao_ha_operacao(db_session, monkey
     response = WhatsappRouterAgent(db_session).handle(text_message("cancelar"))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one()
 
-    assert response == "Nenhuma operação em andamento para cancelar."
+    assert "Nenhuma operacao em andamento para cancelar." in response
+    assert "Menu principal - OLT Entulhos" in response
     assert conversa.estado_atual == "idle"
     assert conversa.contexto_json == {}
+
+
+def test_menu_global_mostra_menu_principal_sem_cancelamento(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    for texto in ("Menu", "menu", "MENU"):
+        response = router.handle(text_message(texto, telefone=f"3519000007{len(texto)}"))
+
+        assert "Menu principal - OLT Entulhos" in response
+        assert "Novo pedido" in response
+        assert "Nenhuma operacao em andamento para cancelar" not in response
+        assert "Nenhuma operação em andamento para cancelar" not in response
 
 
 def test_comando_resumo_mostra_contadores_operacionais(db_session, monkeypatch):
