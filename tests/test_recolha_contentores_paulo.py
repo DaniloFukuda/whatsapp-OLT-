@@ -66,6 +66,7 @@ def test_recolha_registra_fotos_triagem_pendencias_e_libera_contentor(db_session
     selecao = router.handle(text_message("1", telefone=telefone))
     foto = router.handle(image_message("media-recolha-1", telefone=telefone))
     triagem_carga = router.handle(text_message("2", telefone=telefone))
+    relato_carga_prompt = router.handle(text_message("2", telefone=telefone))
     relato_carga = router.handle(text_message("Tinha sacos de lixo domestico e gesso", telefone=telefone))
     relato_avaria_prompt = router.handle(text_message("2", telefone=telefone))
     final = router.handle(text_message("Lateral direita amassada por retroescavadeira", telefone=telefone))
@@ -75,6 +76,7 @@ def test_recolha_registra_fotos_triagem_pendencias_e_libera_contentor(db_session
     assert "Envie a foto" in selecao
     assert "Deseja adicionar mais uma foto" in foto
     assert "contratado" in triagem_carga
+    assert "material incorreto" in relato_carga_prompt
     assert "estrago ou avaria" in relato_carga
     assert "Descreva o estrago" in relato_avaria_prompt
     assert "Recolha do contentor registrada" in final
