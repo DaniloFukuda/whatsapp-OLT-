@@ -4,7 +4,14 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.core.time import utcnow
-from app.models.aluguer import AluguerContentor, StatusAluguer, StatusEntrega
+from app.models.aluguer import (
+    AluguerContentor,
+    ContentorFotoRecolha,
+    StatusAluguer,
+    StatusCiclo,
+    StatusEntrega,
+    StatusResolucao,
+)
 from app.models.contentor import StatusContentor
 from app.repositories.aluguer_repository import AluguerRepository
 from app.repositories.cliente_repository import ClienteRepository
@@ -81,6 +88,7 @@ class AluguerService:
             pedido_feito_por=pedido_feito_por,
             entrega_feita_por=entrega_feita_por,
             status_entrega=status_entrega,
+            status_ciclo=StatusCiclo.EM_ANDAMENTO.value,
             status=StatusAluguer.ATIVO,
             foto_entrega_path=foto_entrega_path,
             latitude=latitude,
@@ -168,6 +176,104 @@ class AluguerService:
             .order_by(AluguerContentor.data_entrega, AluguerContentor.id)
             .all()
         )
+
+    def listar_para_recolha(self) -> list[AluguerContentor]:
+        return (
+            self.db.query(AluguerContentor)
+            .filter(AluguerContentor.status_entrega == StatusEntrega.ENTREGUE.value)
+            .filter(AluguerContentor.status_ciclo == StatusCiclo.EM_ANDAMENTO.value)
+            .filter(AluguerContentor.is_deleted.is_(False))
+            .order_by(AluguerContentor.data_vencimento, AluguerContentor.id)
+            .all()
+        )
+
+    def listar_pendencias_carga(self) -> list[AluguerContentor]:
+        return (
+            self.db.query(AluguerContentor)
+            .filter(AluguerContentor.status_resolucao_carga == StatusResolucao.PENDENTE.value)
+            .filter(AluguerContentor.is_deleted.is_(False))
+            .order_by(AluguerContentor.recolha_data_hora.desc(), AluguerContentor.id.desc())
+            .all()
+        )
+
+    def listar_pendencias_avaria(self) -> list[AluguerContentor]:
+        return (
+            self.db.query(AluguerContentor)
+            .filter(AluguerContentor.status_resolucao_avaria == StatusResolucao.PENDENTE.value)
+            .filter(AluguerContentor.is_deleted.is_(False))
+            .order_by(AluguerContentor.recolha_data_hora.desc(), AluguerContentor.id.desc())
+            .all()
+        )
+
+    def confirmar_recolha(
+        self,
+        aluguer_id: int,
+        operador_telefone: str | None,
+        fotos_recolha: list[str] | None = None,
+        carga_errada: bool = False,
+        relato_carga: str | None = None,
+        contentor_avariado: bool = False,
+        relato_avaria: str | None = None,
+    ) -> AluguerContentor:
+        aluguer = self._get_or_raise(aluguer_id)
+        fotos_recolha = [foto for foto in (fotos_recolha or []) if foto]
+        if not fotos_recolha:
+            raise ValueError("Envie pelo menos uma foto da recolha")
+        if carga_errada and len((relato_carga or "").strip()) < 10:
+            raise ValueError("Relato de carga deve ter pelo menos 10 caracteres")
+        if contentor_avariado and len((relato_avaria or "").strip()) < 10:
+            raise ValueError("Relato de avaria deve ter pelo menos 10 caracteres")
+        if aluguer.status_entrega != StatusEntrega.ENTREGUE.value:
+            raise ValueError("Apenas contentores entregues podem ser recolhidos")
+        if aluguer.status_ciclo == StatusCiclo.RECOLHIDO.value:
+            raise ValueError("Contentor ja recolhido")
+
+        aluguer.status_ciclo = StatusCiclo.RECOLHIDO.value
+        aluguer.status = StatusAluguer.RECOLHIDO
+        aluguer.recolha_feita_por = operador_telefone
+        aluguer.recolha_data_hora = utcnow()
+        aluguer.carga_errada = bool(carga_errada)
+        aluguer.relato_carga = relato_carga.strip() if carga_errada and relato_carga else None
+        aluguer.status_resolucao_carga = (
+            StatusResolucao.PENDENTE.value if carga_errada else StatusResolucao.NAO_APLICA.value
+        )
+        aluguer.contentor_avariado = bool(contentor_avariado)
+        aluguer.relato_avaria = relato_avaria.strip() if contentor_avariado and relato_avaria else None
+        aluguer.status_resolucao_avaria = (
+            StatusResolucao.PENDENTE.value if contentor_avariado else StatusResolucao.NAO_APLICA.value
+        )
+        if aluguer.contentor:
+            aluguer.contentor.status = StatusContentor.DISPONIVEL
+
+        for foto in fotos_recolha:
+            self.db.add(ContentorFotoRecolha(aluguer_id=aluguer.id, url_foto_recolha=foto))
+
+        self.alugueres.add_event(aluguer.id, "recolha", "Contentor recolhido e ciclo encerrado")
+        if carga_errada:
+            self.alugueres.add_event(aluguer.id, "pendencia_carga", aluguer.relato_carga or "Carga incorreta")
+        if contentor_avariado:
+            self.alugueres.add_event(aluguer.id, "pendencia_avaria", aluguer.relato_avaria or "Contentor avariado")
+        return self.alugueres.save(aluguer)
+
+    def resolver_pendencia_carga(self, aluguer_id: int, operador_telefone: str | None = None) -> AluguerContentor:
+        aluguer = self._get_or_raise(aluguer_id)
+        aluguer.status_resolucao_carga = StatusResolucao.RESOLVIDO.value
+        self.alugueres.add_event(
+            aluguer.id,
+            "pendencia_carga_resolvida",
+            f"Pendencia de carga resolvida por {operador_telefone or 'operador nao identificado'}",
+        )
+        return self.alugueres.save(aluguer)
+
+    def resolver_pendencia_avaria(self, aluguer_id: int, operador_telefone: str | None = None) -> AluguerContentor:
+        aluguer = self._get_or_raise(aluguer_id)
+        aluguer.status_resolucao_avaria = StatusResolucao.RESOLVIDO.value
+        self.alugueres.add_event(
+            aluguer.id,
+            "pendencia_avaria_resolvida",
+            f"Pendencia de avaria resolvida por {operador_telefone or 'operador nao identificado'}",
+        )
+        return self.alugueres.save(aluguer)
 
     def listar_vencendo_amanha(self, now: datetime | None = None) -> list[AluguerContentor]:
         base = now or utcnow()
