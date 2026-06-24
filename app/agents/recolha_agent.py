@@ -25,6 +25,12 @@ class RecolhaAgent:
         self.db = db
         self.aluguer_service = AluguerService(db)
 
+    def marcar_recolha(self, aluguer_id: int) -> str:
+        """Compatibilidade com testes/fluxos antigos que marcavam recolha manualmente."""
+        aluguer = self.aluguer_service.marcar_recolha(aluguer_id)
+        codigo = aluguer.contentor.codigo if aluguer.contentor else aluguer.numero_contentor
+        return f"Contentor {codigo} marcado como aguardando recolha."
+
     def start(self, conversa: ConversaWhatsApp) -> str:
         candidatos = self.aluguer_service.listar_para_recolha()
         if not candidatos:
