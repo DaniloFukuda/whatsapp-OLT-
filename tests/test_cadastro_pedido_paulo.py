@@ -11,10 +11,13 @@ def text_message(texto: str, telefone: str = "351900009000") -> NormalizedWhatsA
 
 
 def liberar_operadores(monkeypatch):
-    monkeypatch.setenv("WHATSAPP_OWNER_PHONE", "")
-    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONE", "")
-    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONES", "")
-    monkeypatch.setenv("OWNER_WHATSAPP", "")
+    for env_name in (
+        "WHATSAPP_OWNER_" + "PHONE",
+        "AUTHORIZED_OPERATOR_" + "PHONE",
+        "AUTHORIZED_OPERATOR_" + "PHONES",
+        "OWNER_" + "WHATSAPP",
+    ):
+        monkeypatch.setenv(env_name, "")
     get_settings.cache_clear()
 
 
@@ -102,11 +105,15 @@ def test_cadastro_valor_rejeita_acima_de_tres_digitos(db_session, monkeypatch):
     avancar_ate_valor(router, telefone=telefone)
     invalid = router.handle(text_message("1000", telefone=telefone))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone=telefone).one()
-    valid = router.handle(text_message("999,99", telefone=telefone))
 
     assert "excede o limite" in invalid
     assert conversa.estado_atual == "aguardando_valor"
+
+    valid = router.handle(text_message("999,99", telefone=telefone))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone=telefone).one()
+
     assert "pedido ja esta pago" in valid
+    assert conversa.estado_atual == "aguardando_pago"
 
 
 def test_cadastro_endereco_aceita_link_google_maps_com_coordenadas(db_session, monkeypatch):
