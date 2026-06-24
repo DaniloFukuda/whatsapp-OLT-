@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.agents.aluguer_agent import AluguerAgent
 from app.agents.contentor_agent import ContentorAgent
 from app.agents.gestao_aluguer_agent import GestaoAluguerAgent
+from app.agents.recolha_agent import RecolhaAgent
 from app.agents.renovacao_agent import RenovacaoAgent
 from app.core.config import get_settings
 from app.core.phone import normalize_phone, whatsapp_link
@@ -29,15 +30,16 @@ CONTENTOR_STATUS_COMMANDS = {"alterar contentor", "alterar status", "status cont
 DELETE_COMMANDS = {"excluir", "deletar"}
 CONTENTOR_DELETE_COMMANDS = {"apagar", "remover", "excluir contentor", "excluir contentores"}
 RENEW_COMMANDS = {"renovar", "prorrogar"}
+RECOLHA_COMMANDS = {"recolha", "recolher", "confirmar recolha", "confirmar recolha de contentor"}
 CANCEL_COMMANDS = {"cancelar", "cancela", "sair", "parar", "voltar", "menu", "0"}
 CANCELLED_MENU_MESSAGE = (
     "Operação cancelada. Nenhuma alteração foi salva.\n\n"
     "Digite:\n"
-    "1 - Novo cadastro\n"
+    "1 - Novo pedido\n"
     "2 - Alterar registro\n"
     "3 - Excluir registro\n"
-    "4 - Renovar registro\n"
-    "5 - Ver resumo"
+    "4 - Ver resumo\n"
+    "5 - Confirmar recolha de contentor"
 )
 
 
@@ -48,6 +50,7 @@ class WhatsappRouterAgent:
         self.gestao_aluguer_agent = GestaoAluguerAgent(db)
         self.renovacao_agent = RenovacaoAgent(db)
         self.contentor_agent = ContentorAgent(db)
+        self.recolha_agent = RecolhaAgent(db)
         self.aluguer_service = AluguerService(db)
         self.contentor_service = ContentorService(db)
         self.operador_service = OperadorService(db)
@@ -87,6 +90,11 @@ class WhatsappRouterAgent:
             conversa.contexto_json = context
             return self.aluguer_agent.timeout_prompt(conversa)
 
+        if text.startswith("resolver carga"):
+            return self._resolver_pendencia("carga", text, message.telefone)
+        if text.startswith("resolver avaria"):
+            return self._resolver_pendencia("avaria", text, message.telefone)
+
         if text in COMMANDS:
             if text == "resumo" and not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
@@ -98,6 +106,8 @@ class WhatsappRouterAgent:
             return self.gestao_aluguer_agent.handle(conversa, message)
         if conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES:
             return self.renovacao_agent.handle(conversa, message)
+        if conversa.estado_atual in RecolhaAgent.ACTIVE_STATES:
+            return self.recolha_agent.handle(conversa, message)
         if conversa.estado_atual in ContentorAgent.ACTIVE_STATES:
             return self.contentor_agent.handle(conversa, message)
 
@@ -105,13 +115,21 @@ class WhatsappRouterAgent:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
             return self._handle_operational_command("resumo", message.telefone)
+        if text in RECOLHA_COMMANDS or text == "5" or (text == "1" and self._is_funcionario(message.telefone)):
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para confirmar recolhas. Contacte o administrador do sistema."
+            return self.recolha_agent.start(conversa)
         if text in START_COMMANDS:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
+            if not self._can_create_pedido(message.telefone):
+                return "Seu perfil de motorista nao possui permissao para cadastrar pedidos. Use a opcao de recolha."
             return self.aluguer_agent.start(conversa)
         if text == "1":
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
+            if not self._can_create_pedido(message.telefone):
+                return self.recolha_agent.start(conversa)
             return self.aluguer_agent.start(conversa)
         if text in CONTENTOR_STATUS_COMMANDS:
             if not self._is_authorized(message.telefone):
@@ -146,7 +164,7 @@ class WhatsappRouterAgent:
         if text in {"contentores", "status"}:
             return self.contentor_agent.listar_status()
         if self._is_authorized(message.telefone):
-            return AluguerAgent.initial_menu()
+            return self._initial_menu(message.telefone)
         return "Comando nao reconhecido. Envie 'novo' para registar um aluguer."
 
     def _handle_operational_command(self, command: str, telefone: str | None = None) -> str:
@@ -206,6 +224,7 @@ class WhatsappRouterAgent:
                     "Obs.: faturado total soma todos os alugueres do mes; recebido soma apenas registros pagos.",
                 ]
             )
+            linhas.extend(self._pendencias_operacionais())
         return "\n".join(linhas)
 
     def _resumo(self) -> str:
@@ -294,6 +313,72 @@ class WhatsappRouterAgent:
                     recebido_total += valor
         return faturado_total, recebido_total
 
+    def _pendencias_operacionais(self) -> list[str]:
+        pendencias_financeiras = [
+            aluguer
+            for aluguer in self.db.query(AluguerContentor).filter(AluguerContentor.is_deleted.is_(False)).all()
+            if not aluguer.pago
+        ]
+        pendencias_carga = self.aluguer_service.listar_pendencias_carga()
+        pendencias_avaria = self.aluguer_service.listar_pendencias_avaria()
+
+        linhas = ["", "PENDENCIAS OPERACIONAIS CRITICAS"]
+        total_pendente = sum(Decimal(str(aluguer.valor or 0)) for aluguer in pendencias_financeiras)
+        linhas.append(f"Pendencias financeiras: {total_pendente:.2f}")
+        if pendencias_financeiras:
+            linhas.extend(self._format_pendencia_financeira(aluguer) for aluguer in pendencias_financeiras)
+        else:
+            linhas.append("- Nenhuma pendencia financeira ativa.")
+
+        linhas.append("")
+        linhas.append("Pendencias de carga:")
+        if pendencias_carga:
+            linhas.extend(self._format_pendencia_carga(aluguer) for aluguer in pendencias_carga)
+        else:
+            linhas.append("- Nenhuma pendencia de carga.")
+
+        linhas.append("")
+        linhas.append("Pendencias de avarias:")
+        if pendencias_avaria:
+            linhas.extend(self._format_pendencia_avaria(aluguer) for aluguer in pendencias_avaria)
+        else:
+            linhas.append("- Nenhuma pendencia de avaria.")
+        return linhas
+
+    def _format_pendencia_financeira(self, aluguer: AluguerContentor) -> str:
+        return (
+            f"- #{aluguer.id} {aluguer.nome_cliente}: {Decimal(str(aluguer.valor or 0)):.2f} "
+            f"| Cobrar: {whatsapp_link(aluguer.telefone_cliente)}"
+        )
+
+    def _format_pendencia_carga(self, aluguer: AluguerContentor) -> str:
+        return (
+            f"- #{aluguer.id} {aluguer.nome_cliente}: {aluguer.relato_carga or 'sem relato'} "
+            f"| Resolver: resolver carga {aluguer.id}"
+        )
+
+    def _format_pendencia_avaria(self, aluguer: AluguerContentor) -> str:
+        return (
+            f"- #{aluguer.id} {aluguer.nome_cliente}: {aluguer.relato_avaria or 'sem relato'} "
+            f"| Resolver: resolver avaria {aluguer.id}"
+        )
+
+    def _resolver_pendencia(self, tipo: str, text: str, telefone: str) -> str:
+        if not self._is_authorized(telefone):
+            return "Telefone nao autorizado para resolver pendencias."
+        raw_id = text.split()[-1]
+        if not raw_id.isdigit():
+            return "Informe o ID do aluguer. Ex: resolver carga 12"
+        aluguer_id = int(raw_id)
+        try:
+            if tipo == "carga":
+                self.aluguer_service.resolver_pendencia_carga(aluguer_id, telefone)
+                return f"Pendencia de carga do aluguer #{aluguer_id} resolvida."
+            self.aluguer_service.resolver_pendencia_avaria(aluguer_id, telefone)
+            return f"Pendencia de avaria do aluguer #{aluguer_id} resolvida."
+        except ValueError as exc:
+            return f"⚠️ {exc}"
+
     def _format_retiradas(self, alugueres: list[AluguerContentor]) -> str:
         if not alugueres:
             return "Nenhum contentor para retirar."
@@ -305,8 +390,10 @@ class WhatsappRouterAgent:
         if aluguer.telefone_cliente:
             telefone_info = f"{normalize_phone(aluguer.telefone_cliente)} / {whatsapp_link(aluguer.telefone_cliente)}"
         localizacao = "localizacao nao informada"
-        if aluguer.latitude is not None and aluguer.longitude is not None:
-            localizacao = f"https://www.google.com/maps?q={aluguer.latitude},{aluguer.longitude}"
+        latitude = aluguer.entrega_latitude if aluguer.entrega_latitude is not None else aluguer.latitude
+        longitude = aluguer.entrega_longitude if aluguer.entrega_longitude is not None else aluguer.longitude
+        if latitude is not None and longitude is not None:
+            localizacao = f"https://www.google.com/maps?q={latitude},{longitude}"
         return (
             f"- {aluguer.nome_cliente} - #{aluguer.id} / {contentor} - "
             f"telefone: {telefone_info} - localizacao: {localizacao} - "
@@ -369,6 +456,7 @@ class WhatsappRouterAgent:
             conversa.estado_atual in AluguerAgent.ACTIVE_STATES
             or conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES
             or conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES
+            or conversa.estado_atual in RecolhaAgent.ACTIVE_STATES
             or conversa.estado_atual in ContentorAgent.ACTIVE_STATES
         )
 
@@ -399,8 +487,32 @@ class WhatsappRouterAgent:
             "aguardando_forma_pagamento_outro": "💳 Por favor, digite textualmente a forma de pagamento.",
             "aguardando_pago": "✅ O servico ja esta pago?\n\n1. Pago\n2. Pendente",
             "aguardando_confirmacao_final": "✅ Confira os dados e escolha 1 para confirmar, 2 para corrigir ou 3 para cancelar.",
+            "recolha_aguardando_selecao": "Escolha o pedido para recolha.",
+            "recolha_aguardando_foto": "📷 Envie a foto do contentor para recolha.",
         }
         return prompts.get(state, "Envie a proxima informacao do cadastro.")
 
     def _is_authorized(self, telefone: str) -> bool:
         return self.operador_service.verificar_autorizacao(telefone)
+
+    def _is_funcionario(self, telefone: str) -> bool:
+        return self.operador_service.obter_perfil(telefone) == PerfilOperador.FUNCIONARIO
+
+    def _can_create_pedido(self, telefone: str) -> bool:
+        return self.operador_service.obter_perfil(telefone) != PerfilOperador.FUNCIONARIO
+
+    def _initial_menu(self, telefone: str) -> str:
+        if self._is_funcionario(telefone):
+            return (
+                "Ola, sou o Robo de Gestao de Contentores da OLT. O que vamos fazer agora?\n\n"
+                "1. Confirmar recolha de contentor\n"
+                "Digite recolha para abrir a lista."
+            )
+        return (
+            "Ola, sou o Robo de Gestao de Contentores da OLT. O que vamos fazer agora?\n\n"
+            "1. Cadastrar pedido de contentor\n"
+            "2. Alterar informacoes\n"
+            "3. Excluir pedidos\n"
+            "4. Ver resumo\n"
+            "5. Confirmar recolha de contentor"
+        )
