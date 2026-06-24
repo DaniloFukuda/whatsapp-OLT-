@@ -721,8 +721,9 @@ def test_exclusao_exige_confirmacao(db_session, monkeypatch):
     response = router.handle(text_message("1"))
 
     assert f"ID/referencia: #{aluguer.id}" in response
-    assert "1 - Sim, continuar" in response
-    assert "2 - Nao, cancelar" in response
+    assert "Sim, apagar registro" in response
+    assert "Nao, cancelar" not in response
+    assert "Cancelar" in response
     assert AluguerService(db_session)._get_or_raise(aluguer.id)
 
 
@@ -736,7 +737,8 @@ def test_exclusao_com_opcao_2_cancela_sem_apagar(db_session, monkeypatch):
     router.handle(text_message("1"))
     response = router.handle(text_message("2"))
 
-    assert response == "Exclusao cancelada. Nenhum registro foi apagado."
+    assert "Exclusao cancelada. Nenhum registro foi apagado." in response
+    assert "Menu principal - OLT Entulhos" in response
     assert AluguerService(db_session)._get_or_raise(aluguer.id).id == aluguer.id
 
 
@@ -795,7 +797,8 @@ def test_exclusao_com_confirmacao_clara_exclui(db_session, monkeypatch):
     db_session.refresh(aluguer)
     assert pedido_justificativa == "Informe a justificativa da exclusao com pelo menos 10 caracteres."
     assert curta == "A justificativa deve ter pelo menos 10 caracteres."
-    assert response == f"Registro #{aluguer_id} excluido."
+    assert f"Registro #{aluguer_id} excluido." in response
+    assert "Menu principal - OLT Entulhos" in response
     assert db_session.get(type(aluguer), aluguer_id) is not None
     assert aluguer.is_deleted is True
     assert aluguer.justificativa_exclusao == "Cliente pediu cancelamento"
@@ -838,7 +841,8 @@ def test_remover_contentor_rejeita_justificativa_curta_e_exclui_com_auditoria(db
     assert "Contentor selecionado: C01" in confirmacao
     assert pedido_justificativa == "Informe a justificativa da exclusao com pelo menos 10 caracteres."
     assert curta == "A justificativa deve ter pelo menos 10 caracteres."
-    assert response == "Contentor C01 excluido com seguranca."
+    assert "Contentor C01 excluido com seguranca." in response
+    assert "Menu principal - OLT Entulhos" in response
     assert contentor.is_deleted is True
     assert contentor.excluido_por_operador == "351900000041"
     assert contentor.justificativa_exclusao == "Contentor duplicado no patio"
@@ -888,7 +892,8 @@ def test_alteracao_status_contentor_confirma_e_grava_operador(db_session, monkey
     assert "Escolha o contentor para alterar o status:" in start
     assert "Status atual: disponivel" in status_prompt
     assert "Novo status: manutencao" in confirmacao
-    assert response == "Status do contentor C01 alterado para manutencao."
+    assert "Status do contentor C01 alterado para manutencao." in response
+    assert "Menu principal - OLT Entulhos" in response
     assert contentor.status == StatusContentor.MANUTENCAO
     assert contentor.alterado_por_operador == "351900000050"
 
@@ -1201,6 +1206,29 @@ def test_numero_nao_autorizado_nao_renova_nem_prorroga(db_session, monkeypatch):
 
     assert renovar == "Telefone nao autorizado para renovar registros. Contacte o administrador do sistema."
     assert prorrogar == "Telefone nao autorizado para renovar registros. Contacte o administrador do sistema."
+
+
+def test_gestor_ve_menu_completo_e_acessa_entrega(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    telefone = "351900000050"
+    db_session.add(
+        Operador(
+            telefone_whatsapp=telefone,
+            nome_operador="Gestor Entrega",
+            perfil=PerfilOperador.GESTOR,
+            ativo=True,
+        )
+    )
+    db_session.commit()
+    router = WhatsappRouterAgent(db_session)
+
+    menu = router.handle(text_message("ola", telefone=telefone))
+    entrega = router.handle(text_message("2", telefone=telefone))
+
+    assert "Menu principal - OLT Entulhos" in menu
+    assert "Entrega de contentor" in menu
+    assert "Entrega de contentor" in entrega or "Nao existem pedidos pendentes de entrega" in entrega
 
 
 def test_whatsapp_client_mock_retorna_mensagem_enviada(monkeypatch):

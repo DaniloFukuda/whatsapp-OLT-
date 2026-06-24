@@ -7,6 +7,20 @@ from app.models.contentor import Contentor, StatusContentor
 from app.services.contentor_service import ContentorService
 
 
+MAIN_MENU = (
+    "🤖 Menu principal - OLT Entulhos\n\n"
+    "1️⃣ 📝 Novo pedido\n"
+    "2️⃣ 🚛 Entrega de contentor\n"
+    "3️⃣ 📦 Recolha de contentor\n"
+    "4️⃣ ✏️ Alterar registro\n"
+    "5️⃣ 🗑️ Apagar registro\n"
+    "6️⃣ 📊 Resumo dos contentores\n"
+    "7️⃣ 🛠️ Manutencao / avarias\n"
+    "0️⃣ ❌ Sair\n\n"
+    "Digite o numero da opcao desejada."
+)
+
+
 class ContentorAgent:
     ALTER_START_STATE = "contentor_alteracao_aguardando_item"
     DELETE_START_STATE = "contentor_exclusao_aguardando_item"
@@ -101,13 +115,13 @@ class ContentorAgent:
                 conversa.estado_atual = "idle"
                 conversa.contexto_json = {"contentor_id": contentor.id, "ultima_operacao": "alteracao_status_contentor"}
                 self.db.commit()
-                return f"Status do contentor {contentor.codigo} alterado para {contentor.status.value}."
+                return f"Status do contentor {contentor.codigo} alterado para {contentor.status.value}.\n\n" + MAIN_MENU
             if confirmation is None:
                 return "Opcao invalida. Responda 1 para Sim ou 2 para Nao."
             conversa.estado_atual = "idle"
             conversa.contexto_json = {}
             self.db.commit()
-            return "Alteracao cancelada. Nenhum contentor foi alterado."
+            return "Alteracao cancelada. Nenhum contentor foi alterado.\n\n" + MAIN_MENU
 
         if state == "contentor_exclusao_aguardando_item":
             contentor = self._select_contentor(context, message.texto)
@@ -136,7 +150,7 @@ class ContentorAgent:
             conversa.estado_atual = "idle"
             conversa.contexto_json = {}
             self.db.commit()
-            return "Exclusao cancelada. Nenhum contentor foi excluido."
+            return "Exclusao cancelada. Nenhum contentor foi excluido.\n\n" + MAIN_MENU
 
         if state == "contentor_exclusao_aguardando_justificativa":
             justificativa = (message.texto or "").strip()
@@ -150,7 +164,7 @@ class ContentorAgent:
             conversa.estado_atual = "idle"
             conversa.contexto_json = {"contentor_id": contentor.id, "ultima_operacao": "exclusao_contentor"}
             self.db.commit()
-            return f"Contentor {contentor.codigo} excluido com seguranca."
+            return f"Contentor {contentor.codigo} excluido com seguranca.\n\n" + MAIN_MENU
 
         return "Comando nao reconhecido. Envie 'excluir contentor' para iniciar."
 

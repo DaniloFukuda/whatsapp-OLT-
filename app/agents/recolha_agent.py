@@ -9,6 +9,20 @@ from app.models.conversa import ConversaWhatsApp
 from app.services.aluguer_service import AluguerService
 
 
+MAIN_MENU = (
+    "🤖 Menu principal - OLT Entulhos\n\n"
+    "1️⃣ 📝 Novo pedido\n"
+    "2️⃣ 🚛 Entrega de contentor\n"
+    "3️⃣ 📦 Recolha de contentor\n"
+    "4️⃣ ✏️ Alterar registro\n"
+    "5️⃣ 🗑️ Apagar registro\n"
+    "6️⃣ 📊 Resumo dos contentores\n"
+    "7️⃣ 🛠️ Manutencao / avarias\n"
+    "0️⃣ ❌ Sair\n\n"
+    "Digite o numero da opcao desejada."
+)
+
+
 class RecolhaAgent:
     START_STATE = "recolha_aguardando_selecao"
     ACTIVE_STATES = {
@@ -165,7 +179,7 @@ class RecolhaAgent:
         complemento = ""
         if pendencias:
             complemento = "\n\nPendencia criada para o gestor: " + ", ".join(pendencias) + "."
-        return "✅ Recolha do contentor registrada com sucesso! Contentor liberado para novo pedido." + complemento
+        return "✅ Recolha do contentor registrada com sucesso! Contentor liberado para novo pedido." + complemento + "\n\n" + MAIN_MENU
 
     def _format_selection_prompt(self, candidatos: list[AluguerContentor]) -> str:
         linhas = ["Confirmar recolha de contentor. Escolha o pedido:"]

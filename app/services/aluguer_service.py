@@ -19,6 +19,8 @@ from app.repositories.contentor_repository import ContentorRepository
 
 
 class AluguerService:
+    VALOR_MAXIMO = Decimal("100000.00")
+
     def __init__(self, db: Session):
         self.db = db
         self.alugueres = AluguerRepository(db)
@@ -56,6 +58,7 @@ class AluguerService:
     ) -> AluguerContentor:
         entrega = data_entrega or utcnow()
         cliente = self.clientes.get_or_create(nome=nome_cliente, telefone=telefone_cliente)
+        valor_decimal = self._validar_valor(valor)
         contentor = self.contentores.get(contentor_id) if contentor_id else self.contentores.first_available()
         if contentor is None:
             raise ValueError("Nenhum contentor disponivel")
@@ -80,7 +83,7 @@ class AluguerService:
             data_entrega=entrega,
             data_vencimento=entrega + timedelta(days=5),
             tipo_residuo=tipo_residuo,
-            valor=Decimal(str(valor)),
+            valor=valor_decimal,
             forma_pagamento=forma_pagamento,
             pago=pago,
             operador_telefone=operador_telefone,
@@ -103,9 +106,10 @@ class AluguerService:
             entrega_ponto_referencia=entrega_ponto_referencia,
             observacoes=observacoes,
         )
-        contentor.status = StatusContentor.ALUGADO
-        if operador_telefone and not contentor.criado_por_operador:
-            contentor.criado_por_operador = operador_telefone
+        if status_entrega == StatusEntrega.ENTREGUE.value:
+            contentor.status = StatusContentor.ALUGADO
+            if operador_telefone and not contentor.criado_por_operador:
+                contentor.criado_por_operador = operador_telefone
         if status_entrega == StatusEntrega.PENDENTE.value:
             self.alugueres.add_event(aluguer.id, "pedido_criado", "Pedido cadastrado pelo escritorio; entrega pendente")
         else:
@@ -119,6 +123,38 @@ class AluguerService:
         self.db.commit()
         self.db.refresh(aluguer)
         return aluguer
+
+    def confirmar_entrega(
+        self,
+        aluguer_id: int,
+        contentor_codigo: str,
+        operador_telefone: str | None,
+        entrega_latitude: float | None = None,
+        entrega_longitude: float | None = None,
+        entrega_ponto_referencia: str | None = None,
+    ) -> AluguerContentor:
+        aluguer = self._get_or_raise(aluguer_id)
+        if aluguer.status_entrega == StatusEntrega.ENTREGUE.value:
+            raise ValueError("Pedido ja esta marcado como entregue")
+        contentor = self.contentores.get_by_codigo(contentor_codigo)
+        if not contentor:
+            raise ValueError("Contentor nao encontrado")
+        if contentor.status != StatusContentor.DISPONIVEL:
+            raise ValueError("Contentor informado nao esta disponivel")
+
+        entrega = utcnow()
+        aluguer.contentor_id = contentor.id
+        aluguer.numero_contentor = contentor.codigo
+        aluguer.status_entrega = StatusEntrega.ENTREGUE.value
+        aluguer.entrega_feita_por = operador_telefone
+        aluguer.data_entrega = entrega
+        aluguer.data_vencimento = entrega + timedelta(days=5)
+        aluguer.entrega_latitude = entrega_latitude
+        aluguer.entrega_longitude = entrega_longitude
+        aluguer.entrega_ponto_referencia = entrega_ponto_referencia
+        contentor.status = StatusContentor.ALUGADO
+        self.alugueres.add_event(aluguer.id, "entrega", f"Contentor {contentor.codigo} entregue no local indicado")
+        return self.alugueres.save(aluguer)
 
     def renovar_por_mais_5_dias(self, aluguer_id: int) -> AluguerContentor:
         aluguer = self._get_or_raise(aluguer_id)
@@ -301,6 +337,7 @@ class AluguerService:
         )
 
     def salvar(self, aluguer: AluguerContentor) -> AluguerContentor:
+        aluguer.valor = self._validar_valor(aluguer.valor)
         return self.alugueres.save(aluguer)
 
     def excluir(self, aluguer_id: int, operador_telefone: str | None, justificativa: str) -> AluguerContentor:
@@ -320,3 +357,9 @@ class AluguerService:
         if not aluguer:
             raise ValueError("Aluguer nao encontrado")
         return aluguer
+
+    def _validar_valor(self, valor: Decimal | float | str) -> Decimal:
+        valor_decimal = Decimal(str(valor)).quantize(Decimal("0.01"))
+        if valor_decimal <= 0 or valor_decimal > self.VALOR_MAXIMO:
+            raise ValueError("Valor invalido")
+        return valor_decimal

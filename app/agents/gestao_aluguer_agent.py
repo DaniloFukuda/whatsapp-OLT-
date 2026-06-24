@@ -12,6 +12,27 @@ from app.models.conversa import ConversaWhatsApp
 from app.services.aluguer_service import AluguerService
 
 
+MAIN_MENU = (
+    "🤖 Menu principal - OLT Entulhos\n\n"
+    "1️⃣ 📝 Novo pedido\n"
+    "2️⃣ 🚛 Entrega de contentor\n"
+    "3️⃣ 📦 Recolha de contentor\n"
+    "4️⃣ ✏️ Alterar registro\n"
+    "5️⃣ 🗑️ Apagar registro\n"
+    "6️⃣ 📊 Resumo dos contentores\n"
+    "7️⃣ 🛠️ Manutencao / avarias\n"
+    "0️⃣ ❌ Sair\n\n"
+    "Digite o numero da opcao desejada."
+)
+INVALID_VALUE_MESSAGE = (
+    "⚠️ Valor invalido.\n\n"
+    "Envie um valor realista, por exemplo:\n"
+    "120\n"
+    "120,50\n"
+    "120.50"
+)
+
+
 class GestaoAluguerAgent:
     ALTER_START_STATE = "alteracao_aguardando_item"
     DELETE_START_STATE = "exclusao_aguardando_item"
@@ -86,7 +107,8 @@ class GestaoAluguerAgent:
             conversa.estado_atual = "alteracao_aguardando_valor"
             conversa.contexto_json = context
             self.db.commit()
-            return self._prompt_for_field(field)
+            aluguer = self.aluguer_service._get_or_raise(context["aluguer_id"])
+            return self._prompt_for_field(field, aluguer)
 
         if state == "alteracao_aguardando_valor":
             aluguer = self.aluguer_service._get_or_raise(context["aluguer_id"])
@@ -95,10 +117,10 @@ class GestaoAluguerAgent:
                 return error
             aluguer.alterado_por_operador = normalize_portugal_phone(message.telefone)
             self.aluguer_service.salvar(aluguer)
-            conversa.estado_atual = "confirmado"
-            conversa.contexto_json = {"aluguer_id": aluguer.id, "ultima_operacao": "alteracao"}
+            conversa.estado_atual = "idle"
+            conversa.contexto_json = {}
             self.db.commit()
-            return "Registro alterado.\n" + self._format_summary(aluguer)
+            return "✅ Registro alterado.\n" + self._format_summary(aluguer) + "\n\n" + MAIN_MENU
 
         if state == "exclusao_aguardando_item":
             aluguer = self._select_aluguer(context, message.texto)
@@ -110,7 +132,7 @@ class GestaoAluguerAgent:
             self.db.commit()
             return (
                 self._format_details(aluguer)
-                + "\n\nTem certeza que deseja apagar este registro?\n\n1 - Sim, continuar\n2 - Nao, cancelar\n0 - Cancelar"
+                + "\n\n🗑️ Tem certeza que deseja apagar este registro?\n\n1️⃣ Sim, apagar registro\n0️⃣ Cancelar"
             )
 
         if state == "exclusao_aguardando_confirmacao":
@@ -122,11 +144,11 @@ class GestaoAluguerAgent:
                 self.db.commit()
                 return "Informe a justificativa da exclusao com pelo menos 10 caracteres."
             if confirmation is None:
-                return "Opcao invalida. Responda 1 para Sim ou 2 para Nao."
-            conversa.estado_atual = "confirmado"
-            conversa.contexto_json = {"aluguer_id": aluguer_id, "ultima_operacao": "exclusao_cancelada"}
+                return "Opcao invalida. Responda 1 para apagar ou 0 para cancelar."
+            conversa.estado_atual = "idle"
+            conversa.contexto_json = {}
             self.db.commit()
-            return "Exclusao cancelada. Nenhum registro foi apagado."
+            return "Exclusao cancelada. Nenhum registro foi apagado.\n\n" + MAIN_MENU
 
         if state == "exclusao_aguardando_justificativa":
             justificativa = (message.texto or "").strip()
@@ -138,10 +160,10 @@ class GestaoAluguerAgent:
                 operador_telefone=normalize_portugal_phone(message.telefone),
                 justificativa=justificativa,
             )
-            conversa.estado_atual = "confirmado"
-            conversa.contexto_json = {"aluguer_id": aluguer_id, "ultima_operacao": "exclusao"}
+            conversa.estado_atual = "idle"
+            conversa.contexto_json = {}
             self.db.commit()
-            return f"Registro #{aluguer_id} excluido."
+            return f"✅ Registro #{aluguer_id} excluido.\n\n" + MAIN_MENU
 
         return "Comando nao reconhecido. Envie 'alterar' ou 'excluir' para iniciar."
 
@@ -187,7 +209,7 @@ class GestaoAluguerAgent:
         elif field == "valor":
             valor = self._parse_money(value)
             if valor is None:
-                return "Envie um valor valido, por exemplo 150, 150.00, 150,00 ou EUR 150."
+                return INVALID_VALUE_MESSAGE
             aluguer.valor = valor
         elif field == "forma_pagamento":
             if not value:
@@ -222,17 +244,50 @@ class GestaoAluguerAgent:
     def _format_fields(self) -> str:
         return "\n".join(f"{index}. {label}" for index, (_, label) in enumerate(self.EDITABLE_FIELDS, start=1))
 
-    def _prompt_for_field(self, field: str) -> str:
+    def _prompt_for_field(self, field: str, aluguer: AluguerContentor) -> str:
         labels = dict(self.EDITABLE_FIELDS)
+        atual = self._current_field_value(field, aluguer)
         if field == "tipo_residuo":
-            return "Envie o novo tipo do residuo:\n\n1 - Entulho limpo\n2 - Entulho misto\n0 - Cancelar"
+            return f"🧱 Residuo atual: {atual}\n\nEnvie o novo tipo do residuo:\n\n1 - Entulho limpo\n2 - Entulho misto\n0 - Cancelar"
         if field == "pago":
-            return "Envie o novo status de pagamento:\n\n1 - Pago\n2 - Pendente\n0 - Cancelar"
+            return f"✅ Status de pagamento atual: {atual}\n\nEnvie o novo status de pagamento:\n\n1 - Pago\n2 - Pendente\n0 - Cancelar"
         if field == "localizacao":
-            return "Envie a nova localizacao pelo WhatsApp."
+            return f"📍 Localizacao atual: {atual}\n\nEnvie a nova localizacao pelo WhatsApp."
         if field == "data_vencimento":
-            return "Envie a nova data de retirada no formato DD/MM/AAAA."
-        return f"Envie o novo valor para {labels[field]}."
+            return f"📅 Data de retirada atual: {atual}\n\nEnvie a nova data de retirada no formato DD/MM/AAAA."
+        return f"{self._field_icon(field)} {labels[field].capitalize()} atual: {atual}\n\nEnvie o novo valor:"
+
+    def _current_field_value(self, field: str, aluguer: AluguerContentor) -> str:
+        if field == "nome_cliente":
+            return aluguer.nome_cliente
+        if field == "telefone_cliente":
+            return aluguer.telefone_cliente
+        if field == "email_cliente":
+            return aluguer.email_cliente or "nao informado"
+        if field == "localizacao":
+            if aluguer.latitude is not None and aluguer.longitude is not None:
+                return f"{aluguer.latitude},{aluguer.longitude}"
+            return "nao informada"
+        if field == "tipo_residuo":
+            return aluguer.tipo_residuo or "nao informado"
+        if field == "valor":
+            return f"{Decimal(str(aluguer.valor or 0)):.2f} EUR"
+        if field == "forma_pagamento":
+            return aluguer.forma_pagamento or "nao informada"
+        if field == "pago":
+            return "pago" if aluguer.pago else "pendente"
+        if field == "data_vencimento":
+            return f"{aluguer.data_vencimento:%d/%m/%Y}"
+        return "nao informado"
+
+    def _field_icon(self, field: str) -> str:
+        return {
+            "nome_cliente": "👤",
+            "telefone_cliente": "📞",
+            "email_cliente": "✉️",
+            "valor": "💰",
+            "forma_pagamento": "💳",
+        }.get(field, "✏️")
 
     def _format_summary(self, aluguer: AluguerContentor) -> str:
         pagamento = "pago" if aluguer.pago else "pendente"
@@ -275,9 +330,12 @@ class GestaoAluguerAgent:
             return None
         normalized = value.replace("€", "").replace("EUR", "").replace("eur", "").replace(",", ".").strip()
         try:
-            return Decimal(normalized)
+            valor = Decimal(normalized).quantize(Decimal("0.01"))
         except (InvalidOperation, AttributeError):
             return None
+        if valor <= 0 or valor > Decimal("100000.00"):
+            return None
+        return valor
 
     def _parse_payment_status(self, value: str | None) -> bool | None:
         normalized = (value or "").strip().lower()
@@ -299,7 +357,7 @@ class GestaoAluguerAgent:
         normalized = self._normalize_option(value)
         if normalized in {"1", "sim", "s", "confirmar", "apagar"}:
             return True
-        if normalized in {"2", "nao", "n", "cancelar"}:
+        if normalized in {"0", "2", "nao", "n", "cancelar", "sair", "menu"}:
             return False
         return None
 

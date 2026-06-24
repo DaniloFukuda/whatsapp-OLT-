@@ -2,6 +2,7 @@ from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.core.config import get_settings
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.aluguer import AluguerContentor, StatusEntrega
+from app.models.contentor import Contentor, StatusContentor
 from app.models.conversa import ConversaWhatsApp
 from app.services.seed_service import SeedService
 
@@ -84,6 +85,8 @@ def test_cadastro_pedido_atendente_salva_entrega_pendente_sem_foto_ou_gps_real(d
     assert aluguer.pago is False
     assert aluguer.forma_pagamento is None
     assert aluguer.status_entrega == StatusEntrega.PENDENTE.value
+    assert aluguer.numero_contentor == "A definir"
+    assert db_session.query(Contentor).filter_by(codigo="C01").one().status == StatusContentor.DISPONIVEL
     assert aluguer.pedido_feito_por == telefone
     assert aluguer.entrega_feita_por is None
     assert aluguer.pedido_endereco_tipo == "TEXTO"
@@ -96,20 +99,55 @@ def test_cadastro_pedido_atendente_salva_entrega_pendente_sem_foto_ou_gps_real(d
     assert "entrega" not in {evento.tipo for evento in aluguer.eventos}
 
 
-def test_cadastro_valor_rejeita_acima_de_tres_digitos(db_session, monkeypatch):
+def test_entrega_vincula_contentor_somente_na_entrega(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+    telefone = "351900009010"
+
+    avancar_ate_valor(router, telefone=telefone)
+    router.handle(text_message("120", telefone=telefone))
+    router.handle(text_message("2", telefone=telefone))
+    router.handle(text_message("2", telefone=telefone))
+    router.handle(text_message("Rua da Entrega", telefone=telefone))
+    router.handle(text_message("2", telefone=telefone))
+    router.handle(text_message("1", telefone=telefone))
+    aluguer = db_session.query(AluguerContentor).order_by(AluguerContentor.id.desc()).one()
+
+    assert aluguer.status_entrega == StatusEntrega.PENDENTE.value
+    assert aluguer.numero_contentor == "A definir"
+    assert db_session.query(Contentor).filter_by(codigo="C02").one().status == StatusContentor.DISPONIVEL
+
+    start = router.handle(text_message("2", telefone=telefone))
+    prompt_contentor = router.handle(text_message("1", telefone=telefone))
+    confirmacao = router.handle(text_message("C02", telefone=telefone))
+    final = router.handle(text_message("1", telefone=telefone))
+    db_session.refresh(aluguer)
+
+    assert "Entrega de contentor" in start
+    assert "Informe o contentor entregue" in prompt_contentor
+    assert "Confirmar entrega do contentor C02" in confirmacao
+    assert "Entrega registrada" in final
+    assert aluguer.status_entrega == StatusEntrega.ENTREGUE.value
+    assert aluguer.numero_contentor == "C02"
+    assert aluguer.contentor.codigo == "C02"
+    assert db_session.query(Contentor).filter_by(codigo="C02").one().status == StatusContentor.ALUGADO
+
+
+def test_cadastro_valor_rejeita_valor_absurdo(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     SeedService(db_session).seed_contentores_iniciais()
     router = WhatsappRouterAgent(db_session)
     telefone = "351900009001"
 
     avancar_ate_valor(router, telefone=telefone)
-    invalid = router.handle(text_message("1000", telefone=telefone))
+    invalid = router.handle(text_message("80000000000000000.00", telefone=telefone))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone=telefone).one()
 
-    assert "excede o limite" in invalid
+    assert "Valor invalido" in invalid
     assert conversa.estado_atual == "aguardando_valor"
 
-    valid = router.handle(text_message("999,99", telefone=telefone))
+    valid = router.handle(text_message("1000", telefone=telefone))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone=telefone).one()
 
     assert "pedido ja esta pago" in valid

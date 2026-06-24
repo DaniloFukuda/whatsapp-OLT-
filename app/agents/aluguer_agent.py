@@ -16,6 +16,14 @@ from app.services.contentor_service import ContentorService
 
 
 class AluguerAgent:
+    INVALID_VALUE_MESSAGE = (
+        "⚠️ Valor invalido.\n\n"
+        "Envie um valor realista, por exemplo:\n"
+        "120\n"
+        "120,50\n"
+        "120.50"
+    )
+
     START_STATE = "aguardando_nome_cliente"
     CONFIRMED_STATE = "idle"
     ACTIVE_STATES = {
@@ -141,7 +149,7 @@ class AluguerAgent:
         if state == "aguardando_valor":
             valor = self._parse_money(message.texto)
             if valor is None:
-                return "⚠️ O valor inserido excede o limite permitido por unidade. Por favor, insira um valor valido (Ex: 75 ou 120.50)."
+                return self.INVALID_VALUE_MESSAGE
             context["valor"] = str(valor)
             return self._advance(conversa, "aguardando_pago", context, self._status_pagamento_prompt())
 
@@ -252,10 +260,15 @@ class AluguerAgent:
     def initial_menu(cls) -> str:
         return (
             "Ola, sou o Robo de Gestao de Contentores da OLT. O que vamos fazer agora?\n\n"
-            "1. Cadastrar pedido de contentor\n"
-            "2. Alterar informacoes\n"
-            "3. Excluir pedidos\n"
-            "4. Ver resumo"
+            "1️⃣ 📝 Novo pedido\n"
+            "2️⃣ 🚛 Entrega de contentor\n"
+            "3️⃣ 📦 Recolha de contentor\n"
+            "4️⃣ ✏️ Alterar registro\n"
+            "5️⃣ 🗑️ Apagar registro\n"
+            "6️⃣ 📊 Resumo dos contentores\n"
+            "7️⃣ 🛠️ Manutencao / avarias\n"
+            "0️⃣ ❌ Sair\n\n"
+            "Digite o numero da opcao desejada."
         )
 
     def timeout_prompt(self, conversa: ConversaWhatsApp) -> str:
@@ -294,7 +307,7 @@ class AluguerAgent:
         elif field == "valor":
             value = self._parse_money(message.texto)
             if value is None:
-                return "⚠️ O valor inserido excede o limite permitido por unidade. Por favor, insira um valor valido (Ex: 75 ou 120.50)."
+                return self.INVALID_VALUE_MESSAGE
             context[field] = str(value)
         elif field == "pago":
             value = self._parse_pagamento_opcao(message.texto)
@@ -365,7 +378,7 @@ class AluguerAgent:
     def _save(self, conversa: ConversaWhatsApp, context: dict) -> str:
         service_context = {
             "contentor_id": context["contentor_id"],
-            "numero_contentor": context["numero_contentor"],
+            "numero_contentor": "A definir",
             "nome_cliente": context["nome_cliente"],
             "telefone_cliente": context["telefone_cliente"],
             "tipo_residuo": context["tipo_residuo"],
@@ -386,7 +399,7 @@ class AluguerAgent:
         conversa.estado_atual = "idle"
         conversa.contexto_json = {}
         self.db.commit()
-        return self._format_summary(aluguer)
+        return self._format_summary(aluguer) + "\n\n" + self.initial_menu()
 
     def _advance(self, conversa: ConversaWhatsApp, next_state: str, context: dict, response: str) -> str:
         conversa.estado_atual = next_state
@@ -448,14 +461,11 @@ class AluguerAgent:
                 text = text.replace(",", "")
         else:
             text = text.replace(",", ".")
-        integer_part = text.split(".", 1)[0]
-        if len(integer_part.lstrip("0") or "0") > 3:
-            return None
         try:
             valor = Decimal(text).quantize(Decimal("0.01"))
         except (InvalidOperation, ValueError):
             return None
-        if valor < 0 or valor > Decimal("999.99"):
+        if valor <= 0 or valor > Decimal("100000.00"):
             return None
         return valor
 
@@ -593,7 +603,7 @@ class AluguerAgent:
         return "\n".join(
             [
                 f"✅ Pedido salvo com sucesso. ID/referencia: #{aluguer.id}",
-                f"🚛 Contentor reservado: {aluguer.numero_contentor}",
+                "📦 Contentor: A definir na entrega",
                 f"👤 Cliente: {aluguer.nome_cliente}",
                 f"📞 Telefone: {aluguer.telefone_cliente}",
                 f"WhatsApp cliente: {whatsapp_link(aluguer.telefone_cliente)}",

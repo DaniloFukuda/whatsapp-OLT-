@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.aluguer_agent import AluguerAgent
 from app.agents.contentor_agent import ContentorAgent
+from app.agents.entrega_agent import EntregaAgent
 from app.agents.gestao_aluguer_agent import GestaoAluguerAgent
 from app.agents.recolha_agent import RecolhaAgent
 from app.agents.renovacao_agent import RenovacaoAgent
@@ -13,7 +14,7 @@ from app.core.config import get_settings
 from app.core.phone import normalize_phone, whatsapp_link
 from app.core.time import utcnow
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
-from app.models.aluguer import AluguerContentor, StatusAluguer
+from app.models.aluguer import AluguerContentor, StatusAluguer, StatusEntrega
 from app.models.conversa import ConversaWhatsApp
 from app.models.contentor import StatusContentor
 from app.models.operador import PerfilOperador
@@ -30,17 +31,22 @@ CONTENTOR_STATUS_COMMANDS = {"alterar contentor", "alterar status", "status cont
 DELETE_COMMANDS = {"excluir", "deletar"}
 CONTENTOR_DELETE_COMMANDS = {"apagar", "remover", "excluir contentor", "excluir contentores"}
 RENEW_COMMANDS = {"renovar", "prorrogar"}
+ENTREGA_COMMANDS = {"entrega", "entregar", "entrega de contentor", "confirmar entrega"}
 RECOLHA_COMMANDS = {"recolha", "recolher", "confirmar recolha", "confirmar recolha de contentor"}
 CANCEL_COMMANDS = {"cancelar", "cancela", "sair", "parar", "voltar", "menu", "0"}
-CANCELLED_MENU_MESSAGE = (
-    "Operação cancelada. Nenhuma alteração foi salva.\n\n"
-    "Digite:\n"
-    "1 - Novo pedido\n"
-    "2 - Alterar registro\n"
-    "3 - Excluir registro\n"
-    "4 - Ver resumo\n"
-    "5 - Confirmar recolha de contentor"
+MAIN_MENU = (
+    "🤖 Menu principal - OLT Entulhos\n\n"
+    "1️⃣ 📝 Novo pedido\n"
+    "2️⃣ 🚛 Entrega de contentor\n"
+    "3️⃣ 📦 Recolha de contentor\n"
+    "4️⃣ ✏️ Alterar registro\n"
+    "5️⃣ 🗑️ Apagar registro\n"
+    "6️⃣ 📊 Resumo dos contentores\n"
+    "7️⃣ 🛠️ Manutencao / avarias\n"
+    "0️⃣ ❌ Sair\n\n"
+    "Digite o numero da opcao desejada."
 )
+CANCELLED_MENU_MESSAGE = "Operacao cancelada. Nenhuma alteracao foi salva.\n\n" + MAIN_MENU
 
 
 class WhatsappRouterAgent:
@@ -48,6 +54,7 @@ class WhatsappRouterAgent:
         self.db = db
         self.aluguer_agent = AluguerAgent(db)
         self.gestao_aluguer_agent = GestaoAluguerAgent(db)
+        self.entrega_agent = EntregaAgent(db)
         self.renovacao_agent = RenovacaoAgent(db)
         self.contentor_agent = ContentorAgent(db)
         self.recolha_agent = RecolhaAgent(db)
@@ -104,6 +111,8 @@ class WhatsappRouterAgent:
             return self.aluguer_agent.handle(conversa, message)
         if conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES:
             return self.gestao_aluguer_agent.handle(conversa, message)
+        if conversa.estado_atual in EntregaAgent.ACTIVE_STATES:
+            return self.entrega_agent.handle(conversa, message)
         if conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES:
             return self.renovacao_agent.handle(conversa, message)
         if conversa.estado_atual in RecolhaAgent.ACTIVE_STATES:
@@ -111,11 +120,15 @@ class WhatsappRouterAgent:
         if conversa.estado_atual in ContentorAgent.ACTIVE_STATES:
             return self.contentor_agent.handle(conversa, message)
 
-        if text == "4":
+        if text == "6":
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
             return self._handle_operational_command("resumo", message.telefone)
-        if text in RECOLHA_COMMANDS or text == "5" or (text == "1" and self._is_funcionario(message.telefone)):
+        if text in ENTREGA_COMMANDS or text == "2":
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para confirmar entregas. Contacte o administrador do sistema."
+            return self.entrega_agent.start(conversa)
+        if text in RECOLHA_COMMANDS or text == "3" or (text == "1" and self._is_funcionario(message.telefone)):
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para confirmar recolhas. Contacte o administrador do sistema."
             return self.recolha_agent.start(conversa)
@@ -139,7 +152,7 @@ class WhatsappRouterAgent:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para alterar registros. Contacte o administrador do sistema."
             return self.gestao_aluguer_agent.start_alteracao(conversa)
-        if text == "2":
+        if text == "4":
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para alterar registros. Contacte o administrador do sistema."
             return self.gestao_aluguer_agent.start_alteracao(conversa)
@@ -153,7 +166,7 @@ class WhatsappRouterAgent:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
             return self.contentor_agent.start_exclusao(conversa)
-        if text == "3":
+        if text == "5":
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
             return self.gestao_aluguer_agent.start_exclusao(conversa)
@@ -184,9 +197,6 @@ class WhatsappRouterAgent:
 
     def _resumo_operacional(self, perfil: PerfilOperador = PerfilOperador.GESTOR) -> str:
         contentores = self.contentor_service.listar_contentores()
-        alugueres_ativos = self._active_alugueres()
-        vencendo_amanha = self.aluguer_service.listar_vencendo_amanha()
-        atrasados = self.aluguer_service.listar_atrasados()
         counts = {status: 0 for status in StatusContentor}
         for contentor in contentores:
             counts[contentor.status] += 1
@@ -195,36 +205,59 @@ class WhatsappRouterAgent:
         tomorrow = today + timedelta(days=1)
         retiradas_hoje = self._alugueres_por_data_retirada(today)
         retiradas_amanha = self._alugueres_por_data_retirada(tomorrow)
+        alugueres_ativos = self._active_alugueres()
+        vencendo_amanha = self.aluguer_service.listar_vencendo_amanha()
+        atrasados = self.aluguer_service.listar_atrasados()
         linhas = [
-            "Resumo dos contentores",
+            "🤖 Resumo dos contentores",
+            "",
+            "📦 Contentores",
             f"Total: {len(contentores)}",
-            f"Disponiveis: {counts[StatusContentor.DISPONIVEL]}",
+            f"🚛 Alugados: {counts[StatusContentor.ALUGADO]}",
             f"Alugados: {counts[StatusContentor.ALUGADO]}",
+            f"✅ Disponiveis: {counts[StatusContentor.DISPONIVEL]}",
+            f"Disponiveis: {counts[StatusContentor.DISPONIVEL]}",
+            f"🕓 Aguardando recolha: {counts[StatusContentor.AGUARDANDO_RECOLHA]}",
             f"Aguardando recolha: {counts[StatusContentor.AGUARDANDO_RECOLHA]}",
+            f"🛠️ Manutencao: {counts[StatusContentor.MANUTENCAO]}",
             f"Manutencao: {counts[StatusContentor.MANUTENCAO]}",
             f"Alugueres ativos: {len(alugueres_ativos)}",
             f"Vencem amanha: {len(vencendo_amanha)}",
             f"Em atraso: {len(atrasados)}",
-            f"Contentores com status alugado: {counts[StatusContentor.ALUGADO]}",
-            "",
-            "Retiradas hoje:",
-            self._format_retiradas(retiradas_hoje),
-            "",
-            "Retiradas amanha:",
-            self._format_retiradas(retiradas_amanha),
         ]
         if perfil == PerfilOperador.GESTOR:
             faturado_total, recebido_total = self._faturamento_mes_corrente()
+            pendente_total = faturado_total - recebido_total
             linhas.extend(
                 [
                     "",
+                    "💰 Faturamento do mes corrente",
                     "Faturamento do mes corrente:",
-                    f"Faturado total do mes: {faturado_total:.2f}",
+                    f"✅ Recebido: {recebido_total:.2f} EUR",
                     f"Recebido/pago no mes: {recebido_total:.2f}",
+                    f"⚠️ Pendente: {pendente_total:.2f} EUR",
+                    f"📊 Total: {faturado_total:.2f} EUR",
+                    f"Faturado total do mes: {faturado_total:.2f}",
                     "Obs.: faturado total soma todos os alugueres do mes; recebido soma apenas registros pagos.",
                 ]
             )
-            linhas.extend(self._pendencias_operacionais())
+        linhas.extend(
+            [
+                "",
+                "📅 Retiradas",
+                "🚛 Hoje:",
+                "Retiradas hoje:",
+                self._format_retiradas(retiradas_hoje),
+                "",
+                "📆 Amanha:",
+                "Retiradas amanha:",
+                self._format_retiradas(retiradas_amanha),
+                "",
+                "🚨 Pendencias Operacionais",
+                "PENDENCIAS OPERACIONAIS CRITICAS",
+            ]
+        )
+        linhas.extend(self._pendencias_operacionais(mostrar_financeiro=perfil == PerfilOperador.GESTOR))
         return "\n".join(linhas)
 
     def _resumo(self) -> str:
@@ -289,6 +322,7 @@ class WhatsappRouterAgent:
             self.db.query(AluguerContentor)
             .filter(AluguerContentor.is_deleted.is_(False))
             .filter(AluguerContentor.status.in_(ACTIVE_ALUGUER_STATUSES))
+            .filter(AluguerContentor.status_entrega == StatusEntrega.ENTREGUE.value)
             .order_by(AluguerContentor.data_vencimento, AluguerContentor.id)
             .all()
         )
@@ -313,7 +347,7 @@ class WhatsappRouterAgent:
                     recebido_total += valor
         return faturado_total, recebido_total
 
-    def _pendencias_operacionais(self) -> list[str]:
+    def _pendencias_operacionais(self, mostrar_financeiro: bool = True) -> list[str]:
         pendencias_financeiras = [
             aluguer
             for aluguer in self.db.query(AluguerContentor).filter(AluguerContentor.is_deleted.is_(False)).all()
@@ -322,27 +356,29 @@ class WhatsappRouterAgent:
         pendencias_carga = self.aluguer_service.listar_pendencias_carga()
         pendencias_avaria = self.aluguer_service.listar_pendencias_avaria()
 
-        linhas = ["", "PENDENCIAS OPERACIONAIS CRITICAS"]
-        total_pendente = sum(Decimal(str(aluguer.valor or 0)) for aluguer in pendencias_financeiras)
-        linhas.append(f"Pendencias financeiras: {total_pendente:.2f}")
-        if pendencias_financeiras:
-            linhas.extend(self._format_pendencia_financeira(aluguer) for aluguer in pendencias_financeiras)
+        linhas = []
+        if mostrar_financeiro:
+            total_pendente = sum(Decimal(str(aluguer.valor or 0)) for aluguer in pendencias_financeiras)
+            linhas.append(f"💸 Pendencias financeiras: {total_pendente:.2f} EUR")
+            linhas.extend(
+                [self._format_pendencia_financeira(aluguer) for aluguer in pendencias_financeiras]
+                if pendencias_financeiras
+                else ["Nenhuma pendencia financeira."]
+            )
         else:
-            linhas.append("- Nenhuma pendencia financeira ativa.")
-
-        linhas.append("")
-        linhas.append("Pendencias de carga:")
-        if pendencias_carga:
-            linhas.extend(self._format_pendencia_carga(aluguer) for aluguer in pendencias_carga)
-        else:
-            linhas.append("- Nenhuma pendencia de carga.")
-
-        linhas.append("")
-        linhas.append("Pendencias de avarias:")
-        if pendencias_avaria:
-            linhas.extend(self._format_pendencia_avaria(aluguer) for aluguer in pendencias_avaria)
-        else:
-            linhas.append("- Nenhuma pendencia de avaria.")
+            linhas.append("💸 Pendencias financeiras: ocultas para este perfil.")
+        linhas.append(f"📦 Pendencias de carga: {len(pendencias_carga)}")
+        linhas.extend(
+            [self._format_pendencia_carga(aluguer) for aluguer in pendencias_carga]
+            if pendencias_carga
+            else ["Nenhuma pendencia de carga."]
+        )
+        linhas.append(f"🛠️ Pendencias de avarias: {len(pendencias_avaria)}")
+        linhas.extend(
+            [self._format_pendencia_avaria(aluguer) for aluguer in pendencias_avaria]
+            if pendencias_avaria
+            else ["Nenhuma pendencia de avaria."]
+        )
         return linhas
 
     def _format_pendencia_financeira(self, aluguer: AluguerContentor) -> str:
@@ -455,6 +491,7 @@ class WhatsappRouterAgent:
         return (
             conversa.estado_atual in AluguerAgent.ACTIVE_STATES
             or conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES
+            or conversa.estado_atual in EntregaAgent.ACTIVE_STATES
             or conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES
             or conversa.estado_atual in RecolhaAgent.ACTIVE_STATES
             or conversa.estado_atual in ContentorAgent.ACTIVE_STATES
@@ -509,10 +546,5 @@ class WhatsappRouterAgent:
                 "Digite recolha para abrir a lista."
             )
         return (
-            "Ola, sou o Robo de Gestao de Contentores da OLT. O que vamos fazer agora?\n\n"
-            "1. Cadastrar pedido de contentor\n"
-            "2. Alterar informacoes\n"
-            "3. Excluir pedidos\n"
-            "4. Ver resumo\n"
-            "5. Confirmar recolha de contentor"
+            MAIN_MENU
         )
