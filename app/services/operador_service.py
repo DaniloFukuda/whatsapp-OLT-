@@ -43,7 +43,9 @@ class OperadorService:
         if telefone_normalizado in telefones_fallback:
             return PerfilOperador.GESTOR
         if not telefones_fallback:
-            return PerfilOperador.FUNCIONARIO
+            # Ambiente local/testes sem tabela de operadores e sem fallback no .env.
+            # Mantem compatibilidade com os fluxos antigos: autorizado livre = gestor.
+            return PerfilOperador.GESTOR
         return None
 
     def _tem_operadores(self) -> bool:
