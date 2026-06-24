@@ -20,6 +20,7 @@ LEGACY_CADASTRO_TESTS = {
     "test_cadastro_continua_aceitando_texto_antigo_nas_opcoes",
     "test_mensagem_novo_de_operador_autorizado_inicia_fluxo",
     "test_operador_ativo_no_banco_consegue_usar_bot",
+    "test_resumo_sem_perfil_explicito_nao_mostra_financeiro",
 }
 
 LEGACY_CADASTRO_SKIP_REASON = (
