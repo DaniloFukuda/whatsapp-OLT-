@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.time import utcnow
 from app.models.aluguer import (
     AluguerContentor,
+    ContentorFoto,
     ContentorFotoRecolha,
     StatusAluguer,
     StatusCiclo,
@@ -19,7 +20,7 @@ from app.repositories.contentor_repository import ContentorRepository
 
 
 class AluguerService:
-    VALOR_MAXIMO = Decimal("100000.00")
+    VALOR_MAXIMO = Decimal("999.99")
 
     def __init__(self, db: Session):
         self.db = db
@@ -132,8 +133,16 @@ class AluguerService:
         entrega_latitude: float | None = None,
         entrega_longitude: float | None = None,
         entrega_ponto_referencia: str | None = None,
+        fotos_entrega: list[str] | None = None,
+        pago_no_ato: bool | None = None,
+        forma_pagamento: str | None = None,
     ) -> AluguerContentor:
         aluguer = self._get_or_raise(aluguer_id)
+        fotos_entrega = [foto for foto in (fotos_entrega or []) if foto]
+        if not fotos_entrega:
+            raise ValueError("Envie pelo menos uma foto da entrega")
+        if entrega_latitude is None or entrega_longitude is None:
+            raise ValueError("Envie a localizacao GPS exata da entrega")
         if aluguer.status_entrega == StatusEntrega.ENTREGUE.value:
             raise ValueError("Pedido ja esta marcado como entregue")
         contentor = self.contentores.get_by_codigo(contentor_codigo)
@@ -141,6 +150,11 @@ class AluguerService:
             raise ValueError("Contentor nao encontrado")
         if contentor.status != StatusContentor.DISPONIVEL:
             raise ValueError("Contentor informado nao esta disponivel")
+        if not aluguer.pago and pago_no_ato is True:
+            if not (forma_pagamento or "").strip():
+                raise ValueError("Informe a forma de pagamento recebida na entrega")
+            aluguer.pago = True
+            aluguer.forma_pagamento = forma_pagamento.strip()[:80]
 
         entrega = utcnow()
         aluguer.contentor_id = contentor.id
@@ -153,7 +167,14 @@ class AluguerService:
         aluguer.entrega_longitude = entrega_longitude
         aluguer.entrega_ponto_referencia = entrega_ponto_referencia
         contentor.status = StatusContentor.ALUGADO
+        aluguer.foto_entrega_path = fotos_entrega[0]
+        aluguer.latitude = entrega_latitude
+        aluguer.longitude = entrega_longitude
+        for foto in fotos_entrega:
+            self.db.add(ContentorFoto(aluguer_id=aluguer.id, url_foto=foto, tipo="entrega"))
         self.alugueres.add_event(aluguer.id, "entrega", f"Contentor {contentor.codigo} entregue no local indicado")
+        if not aluguer.pago and pago_no_ato is False:
+            self.alugueres.add_event(aluguer.id, "pagamento_pendente_entrega", "Cliente nao pagou no ato da entrega")
         return self.alugueres.save(aluguer)
 
     def renovar_por_mais_5_dias(self, aluguer_id: int) -> AluguerContentor:

@@ -7,6 +7,8 @@ ALUGUERES_CONTENTOR_COLUMNS = {
     "tipo_residuo": "TEXT",
     "operador_telefone": "TEXT",
     "criado_por_operador": "TEXT",
+    "pedido_feito_por": "TEXT",
+    "entrega_feita_por": "TEXT",
     "alterado_por_operador": "TEXT",
     "excluido_por_operador": "TEXT",
     "is_deleted": "BOOLEAN DEFAULT 0 NOT NULL",
@@ -15,6 +17,24 @@ ALUGUERES_CONTENTOR_COLUMNS = {
     "google_event_entrega_id": "TEXT",
     "google_event_retirada_id": "TEXT",
     "status_ciclo_cliente": "TEXT DEFAULT 'EM_ANDAMENTO' NOT NULL",
+    "status_entrega": "TEXT DEFAULT 'ENTREGUE' NOT NULL",
+    "status_ciclo": "TEXT DEFAULT 'EM_ANDAMENTO' NOT NULL",
+    "pedido_endereco_tipo": "TEXT",
+    "pedido_endereco_texto": "TEXT",
+    "pedido_latitude": "FLOAT",
+    "pedido_longitude": "FLOAT",
+    "pedido_ponto_referencia": "TEXT",
+    "entrega_latitude": "FLOAT",
+    "entrega_longitude": "FLOAT",
+    "entrega_ponto_referencia": "TEXT",
+    "recolha_feita_por": "TEXT",
+    "recolha_data_hora": "DATETIME",
+    "carga_errada": "BOOLEAN DEFAULT 0 NOT NULL",
+    "relato_carga": "TEXT",
+    "status_resolucao_carga": "TEXT DEFAULT 'N/A' NOT NULL",
+    "contentor_avariado": "BOOLEAN DEFAULT 0 NOT NULL",
+    "relato_avaria": "TEXT",
+    "status_resolucao_avaria": "TEXT DEFAULT 'N/A' NOT NULL",
 }
 
 
@@ -70,3 +90,29 @@ def ensure_alugueres_contentor_schema(engine: Engine) -> None:
                 connection.execute(
                     text(f"ALTER TABLE alugueres_contentor ADD COLUMN {column_name} {column_definition}")
                 )
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS contentor_fotos (
+                    id INTEGER PRIMARY KEY,
+                    aluguer_id INTEGER NOT NULL,
+                    url_foto VARCHAR(500) NOT NULL,
+                    tipo VARCHAR(30) DEFAULT 'entrega' NOT NULL,
+                    criado_em DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS contentor_fotos_recolha (
+                    id INTEGER PRIMARY KEY,
+                    aluguer_id INTEGER NOT NULL,
+                    url_foto_recolha VARCHAR(500) NOT NULL,
+                    criado_em DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+                )
+                """
+            )
+        )

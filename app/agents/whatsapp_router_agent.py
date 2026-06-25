@@ -132,11 +132,13 @@ class WhatsappRouterAgent:
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
             return self._handle_operational_command("resumo", message.telefone)
-        if text in ENTREGA_COMMANDS or text == "2":
+        if text in ENTREGA_COMMANDS or (text == "2" and not self._is_funcionario(message.telefone)) or (
+            text == "1" and self._is_funcionario(message.telefone)
+        ):
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para confirmar entregas. Contacte o administrador do sistema."
             return self.entrega_agent.start(conversa)
-        if text in RECOLHA_COMMANDS or text == "3" or (text == "1" and self._is_funcionario(message.telefone)):
+        if text in RECOLHA_COMMANDS or text == "3" or (text == "2" and self._is_funcionario(message.telefone)):
             if not self._is_authorized(message.telefone):
                 return "Telefone nao autorizado para confirmar recolhas. Contacte o administrador do sistema."
             return self.recolha_agent.start(conversa)
@@ -550,8 +552,9 @@ class WhatsappRouterAgent:
         if self._is_funcionario(telefone):
             return (
                 "Ola, sou o Robo de Gestao de Contentores da OLT. O que vamos fazer agora?\n\n"
-                "1. Confirmar recolha de contentor\n"
-                "Digite recolha para abrir a lista."
+                "1. Confirmar entrega de contentor\n"
+                "2. Confirmar recolha de contentor\n"
+                "Digite o numero da opcao desejada."
             )
         return (
             MAIN_MENU

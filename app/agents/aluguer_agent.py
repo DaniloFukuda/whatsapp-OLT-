@@ -465,7 +465,7 @@ class AluguerAgent:
             valor = Decimal(text).quantize(Decimal("0.01"))
         except (InvalidOperation, ValueError):
             return None
-        if valor <= 0 or valor > Decimal("100000.00"):
+        if valor <= 0 or valor > Decimal("999.99"):
             return None
         return valor
 

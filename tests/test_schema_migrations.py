@@ -83,6 +83,14 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
             for row in connection.execute(text("PRAGMA table_info(alugueres_contentor)")).mappings()
         }
         row_count = connection.execute(text("SELECT COUNT(*) FROM alugueres_contentor")).scalar_one()
+        fotos_columns = {
+            row["name"]
+            for row in connection.execute(text("PRAGMA table_info(contentor_fotos)")).mappings()
+        }
+        fotos_recolha_columns = {
+            row["name"]
+            for row in connection.execute(text("PRAGMA table_info(contentor_fotos_recolha)")).mappings()
+        }
 
     operadores_columns = set()
     with engine.connect() as connection:
@@ -112,7 +120,29 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
         "google_event_entrega_id",
         "google_event_retirada_id",
         "status_ciclo_cliente",
+        "pedido_feito_por",
+        "entrega_feita_por",
+        "status_entrega",
+        "status_ciclo",
+        "pedido_endereco_tipo",
+        "pedido_endereco_texto",
+        "pedido_latitude",
+        "pedido_longitude",
+        "pedido_ponto_referencia",
+        "entrega_latitude",
+        "entrega_longitude",
+        "entrega_ponto_referencia",
+        "recolha_feita_por",
+        "recolha_data_hora",
+        "carga_errada",
+        "relato_carga",
+        "status_resolucao_carga",
+        "contentor_avariado",
+        "relato_avaria",
+        "status_resolucao_avaria",
     } <= columns
+    assert {"id", "aluguer_id", "url_foto", "tipo", "criado_em"} <= fotos_columns
+    assert {"id", "aluguer_id", "url_foto_recolha", "criado_em"} <= fotos_recolha_columns
     assert {"telefone_whatsapp", "nome_operador", "perfil", "ativo"} <= operadores_columns
     assert {
         "criado_por_operador",

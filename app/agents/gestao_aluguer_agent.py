@@ -333,7 +333,7 @@ class GestaoAluguerAgent:
             valor = Decimal(normalized).quantize(Decimal("0.01"))
         except (InvalidOperation, AttributeError):
             return None
-        if valor <= 0 or valor > Decimal("100000.00"):
+        if valor <= 0 or valor > Decimal("999.99"):
             return None
         return valor
 
