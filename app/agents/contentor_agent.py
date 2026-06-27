@@ -171,14 +171,16 @@ class ContentorAgent:
     def _select_contentor(self, context: dict, value: str | None) -> Contentor | None:
         text = (value or "").strip()
         ids = context.get("contentor_ids") or []
+        if text:
+            contentor = self.contentor_service.repository.get_by_codigo(text)
+            if contentor:
+                return contentor
         try:
             index = int(text)
         except ValueError:
             index = None
         if index is not None and 1 <= index <= len(ids):
             return self.contentor_service.repository.get(ids[index - 1])
-        if text:
-            return self.contentor_service.repository.get_by_codigo(text)
         return None
 
     def _format_list(self, contentores: list[Contentor]) -> str:

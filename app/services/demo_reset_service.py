@@ -18,7 +18,7 @@ class DemoResetService:
         SeedService(self.db).seed_contentores_iniciais()
         contentores = (
             self.db.query(Contentor)
-            .filter(Contentor.codigo.in_([f"C{index:02d}" for index in range(1, 21)]))
+            .filter(Contentor.codigo.in_([str(index) for index in range(1, 21)]))
             .all()
         )
         for contentor in contentores:

@@ -53,6 +53,10 @@ def _parse_message(message: dict[str, Any]) -> NormalizedWhatsAppMessage | None:
         data["media_id"] = media.get("id")
         data["mime_type"] = media.get("mime_type")
         data["filename"] = media.get("filename")
+    elif tipo == "interactive":
+        interactive = message.get("interactive", {})
+        reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
+        data["texto"] = reply.get("id") or reply.get("title")
     elif tipo == "contacts":
         contacts = message.get("contacts", [])
         if contacts:

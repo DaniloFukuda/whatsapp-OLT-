@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.core.config import get_settings
 from app.core.db import get_db
-from app.integrations.whatsapp.client import send_text_message
+from app.integrations.whatsapp.client import send_whatsapp_message
 from app.integrations.whatsapp.parser import parse_whatsapp_payload
 
 router = APIRouter(prefix="/webhook", tags=["webhook"])
@@ -34,5 +34,5 @@ def receive_whatsapp_webhook(
     force_mock = (x_olt_mock_whatsapp or "").strip().lower() in {"1", "true", "yes", "sim"}
     for message in parse_whatsapp_payload(payload):
         response = router_agent.handle(message)
-        sent_messages.append(send_text_message(message.telefone, response, force_mock=force_mock))
+        sent_messages.append(send_whatsapp_message(message.telefone, response, force_mock=force_mock))
     return {"status": "ok", "messages": sent_messages}

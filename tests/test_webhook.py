@@ -111,3 +111,36 @@ def test_payload_fake_meta_e_parseado_corretamente():
     assert messages[0].tipo == "location"
     assert messages[0].latitude == 38.7223
     assert messages[0].longitude == -9.1393
+
+
+def test_payload_interactive_button_reply_vira_texto_da_opcao():
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "from": "556198266551",
+                                    "id": "wamid.button",
+                                    "type": "interactive",
+                                    "interactive": {
+                                        "type": "button_reply",
+                                        "button_reply": {"id": "1", "title": "Sim"},
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    messages = parse_whatsapp_payload(payload)
+
+    assert len(messages) == 1
+    assert messages[0].telefone == "556198266551"
+    assert messages[0].tipo == "interactive"
+    assert messages[0].texto == "1"

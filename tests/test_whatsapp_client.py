@@ -3,7 +3,7 @@ import logging
 import httpx
 
 from app.core.config import get_settings
-from app.integrations.whatsapp.client import send_text_message
+from app.integrations.whatsapp.client import send_text_message, send_whatsapp_message
 
 
 def clear_settings(monkeypatch):
@@ -114,3 +114,52 @@ def test_force_mock_impede_envio_real(monkeypatch):
     result = send_text_message("556198266551", "Mensagem", force_mock=True)
 
     assert result == {"to": "556198266551", "body": "Mensagem", "status": "mocked"}
+
+
+def test_send_whatsapp_message_usa_botoes_para_sim_nao_em_mock(monkeypatch):
+    clear_settings(monkeypatch)
+
+    result = send_whatsapp_message("556198266551", "Deseja continuar?\n\n1. Sim\n2. Nao")
+
+    assert result == {
+        "to": "556198266551",
+        "body": "Deseja continuar?\n\n1. Sim\n2. Nao",
+        "status": "mocked",
+        "type": "interactive",
+        "buttons": [{"id": "1", "title": "Sim"}, {"id": "2", "title": "Nao"}],
+    }
+
+
+def test_send_whatsapp_message_envia_payload_interactive_para_sim_nao(monkeypatch):
+    clear_settings(monkeypatch)
+    monkeypatch.setenv("ENV", "development")
+    monkeypatch.setenv("WHATSAPP_ACCESS_TOKEN", "fake-token")
+    monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "1148807428322172")
+    get_settings.cache_clear()
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return httpx.Response(200, json={"messages": [{"id": "wamid.button"}]})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = send_whatsapp_message("556198266551", "Deseja adicionar mais uma foto?\n\n1. Sim\n2. Nao")
+
+    assert result["status"] == "sent"
+    assert result["message_id"] == "wamid.button"
+    assert result["type"] == "interactive"
+    assert calls[0]["json"]["type"] == "interactive"
+    assert calls[0]["json"]["interactive"]["type"] == "button"
+    assert calls[0]["json"]["interactive"]["action"]["buttons"] == [
+        {"type": "reply", "reply": {"id": "1", "title": "Sim"}},
+        {"type": "reply", "reply": {"id": "2", "title": "Nao"}},
+    ]
+
+
+def test_send_whatsapp_message_mantem_texto_quando_nao_for_sim_nao(monkeypatch):
+    clear_settings(monkeypatch)
+
+    result = send_whatsapp_message("556198266551", "Qual a forma?\n\n1. MBWay\n2. Transferencia")
+
+    assert result == {"to": "556198266551", "body": "Qual a forma?\n\n1. MBWay\n2. Transferencia", "status": "mocked"}

@@ -1,3 +1,4 @@
+from sqlalchemy import Integer, cast
 from sqlalchemy.orm import Session
 
 from app.models.contentor import Contentor, StatusContentor
@@ -15,7 +16,7 @@ class ContentorRepository:
         return contentor
 
     def list(self) -> list[Contentor]:
-        return self._active_query().order_by(Contentor.codigo).all()
+        return self._active_query().order_by(cast(Contentor.codigo, Integer)).all()
 
     def get(self, contentor_id: int) -> Contentor | None:
         return self._active_query().filter(Contentor.id == contentor_id).first()

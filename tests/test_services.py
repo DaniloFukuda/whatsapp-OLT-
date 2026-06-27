@@ -14,7 +14,7 @@ from app.services.seed_service import SeedService
 
 def test_criacao_de_cliente_contentor_e_aluguer(db_session):
     cliente = ClienteRepository(db_session).create(nome="Cliente Um", telefone="351900000001")
-    contentor = ContentorService(db_session).criar_contentor("C-001")
+    contentor = ContentorService(db_session).criar_contentor("1")
 
     aluguer = AluguerService(db_session).registrar_novo_aluguer(
         nome_cliente=cliente.nome,
@@ -32,17 +32,18 @@ def test_criacao_de_cliente_contentor_e_aluguer(db_session):
     assert aluguer.contentor.status == StatusContentor.ALUGADO
 
 
-def test_numero_contentor_do_service_e_obrigatorio_e_limitado(db_session):
+@pytest.mark.parametrize("numero", ["CZ01", "C01", "01", "003", "0", "100", "-1", "1.5", ""])
+def test_numero_contentor_do_service_aceita_apenas_inteiro_de_1_a_99(db_session, numero):
     SeedService(db_session).seed_contentores_iniciais()
 
-    with pytest.raises(ValueError, match="Numero do contentor"):
+    with pytest.raises(ValueError, match="inteiro de 1 a 99"):
         AluguerService(db_session).registrar_novo_aluguer(
             nome_cliente="Cliente Numero",
             telefone_cliente="351900000020",
             valor="120",
             forma_pagamento="mbway",
             pago=True,
-            numero_contentor="X" * 21,
+            numero_contentor=numero,
         )
 
 

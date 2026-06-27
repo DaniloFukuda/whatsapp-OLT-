@@ -4,6 +4,12 @@ from app.models.contentor import Contentor, StatusContentor
 from app.repositories.contentor_repository import ContentorRepository
 
 
+NUMERO_CONTENTOR_INVALIDO = (
+    "Numero de contentor invalido. Informe um numero inteiro de 1 a 99, "
+    "sem letras e sem zero a esquerda."
+)
+
+
 class ContentorService:
     CAMPOS_ALTERAVEIS = {"status"}
 
@@ -11,6 +17,7 @@ class ContentorService:
         self.repository = ContentorRepository(db)
 
     def criar_contentor(self, codigo: str) -> Contentor:
+        codigo = self.validar_numero(codigo)
         existing = self.repository.get_by_codigo(codigo)
         if existing:
             return existing
@@ -74,8 +81,41 @@ class ContentorService:
         contentor = self.repository.first_available()
         if contentor:
             return contentor
-        next_number = len(self.repository.list()) + 1
-        return self.repository.create(codigo=f"C-{next_number:03d}")
+        usados = {int(item.codigo) for item in self.repository.list() if item.codigo.isdigit()}
+        next_number = next((numero for numero in range(1, 100) if numero not in usados), None)
+        if next_number is None:
+            raise ValueError("Nao ha numeracao de contentor disponivel entre 1 e 99")
+        return self.repository.create(codigo=str(next_number))
+
+    @staticmethod
+    def validar_numero(value: str | None) -> str:
+        numero = (value or "").strip()
+        if not numero.isascii() or not numero.isdigit() or numero.startswith("0"):
+            raise ValueError(NUMERO_CONTENTOR_INVALIDO)
+        valor = int(numero)
+        if not 1 <= valor <= 99 or numero != str(valor):
+            raise ValueError(NUMERO_CONTENTOR_INVALIDO)
+        return numero
+
+    def buscar_para_entrega(self, value: str | None) -> Contentor:
+        numero = self.validar_numero(value)
+        contentor = self.repository.get_by_codigo(numero)
+        if not contentor:
+            raise ValueError(
+                f"O contentor {numero} nao esta cadastrado e nao pode ser usado nesta entrega. "
+                "Informe outro numero de contentor disponivel."
+            )
+        if contentor.status == StatusContentor.ALUGADO:
+            raise ValueError(
+                f"O contentor {numero} ja esta alugado e nao pode ser usado nesta entrega. "
+                "Informe outro numero de contentor disponivel."
+            )
+        if contentor.status != StatusContentor.DISPONIVEL:
+            raise ValueError(
+                f"O contentor {numero} esta indisponivel e nao pode ser usado nesta entrega. "
+                "Informe outro numero de contentor disponivel."
+            )
+        return contentor
 
     def _buscar_para_exclusao(self, contentor_id: int | None, codigo: str | None) -> Contentor | None:
         return self._buscar_contentor_incluindo_excluidos(contentor_id=contentor_id, codigo=codigo)

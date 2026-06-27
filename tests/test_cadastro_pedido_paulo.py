@@ -107,7 +107,7 @@ def test_cadastro_pedido_atendente_salva_entrega_pendente_sem_foto_ou_gps_real(d
     assert aluguer.forma_pagamento is None
     assert aluguer.status_entrega == StatusEntrega.PENDENTE.value
     assert aluguer.numero_contentor == "A definir"
-    assert db_session.query(Contentor).filter_by(codigo="C01").one().status == StatusContentor.DISPONIVEL
+    assert db_session.query(Contentor).filter_by(codigo="1").one().status == StatusContentor.DISPONIVEL
     assert aluguer.pedido_feito_por == telefone
     assert aluguer.entrega_feita_por is None
     assert aluguer.pedido_endereco_tipo == "TEXTO"
@@ -137,11 +137,11 @@ def test_entrega_vincula_contentor_somente_na_entrega(db_session, monkeypatch):
 
     assert aluguer.status_entrega == StatusEntrega.PENDENTE.value
     assert aluguer.numero_contentor == "A definir"
-    assert db_session.query(Contentor).filter_by(codigo="C02").one().status == StatusContentor.DISPONIVEL
+    assert db_session.query(Contentor).filter_by(codigo="2").one().status == StatusContentor.DISPONIVEL
 
     start = router.handle(text_message("2", telefone=telefone))
     prompt_contentor = router.handle(text_message("1", telefone=telefone))
-    foto_prompt = router.handle(text_message("C02", telefone=telefone))
+    foto_prompt = router.handle(text_message("2", telefone=telefone))
     mais_foto = router.handle(image_message("media-entrega-1", telefone=telefone))
     gps_prompt = router.handle(text_message("2", telefone=telefone))
     referencia_prompt = router.handle(location_message(38.7223, -9.1393, telefone=telefone))
@@ -162,8 +162,8 @@ def test_entrega_vincula_contentor_somente_na_entrega(db_session, monkeypatch):
     assert "forma de pagamento" in forma_prompt
     assert "Entrega do contentor registrada" in final
     assert aluguer.status_entrega == StatusEntrega.ENTREGUE.value
-    assert aluguer.numero_contentor == "C02"
-    assert aluguer.contentor.codigo == "C02"
+    assert aluguer.numero_contentor == "2"
+    assert aluguer.contentor.codigo == "2"
     assert aluguer.entrega_feita_por == telefone
     assert aluguer.entrega_latitude == 38.7223
     assert aluguer.entrega_longitude == -9.1393
@@ -171,7 +171,36 @@ def test_entrega_vincula_contentor_somente_na_entrega(db_session, monkeypatch):
     assert aluguer.pago is True
     assert aluguer.forma_pagamento == "MBWay"
     assert db_session.query(ContentorFoto).filter_by(aluguer_id=aluguer.id).count() == 1
-    assert db_session.query(Contentor).filter_by(codigo="C02").one().status == StatusContentor.ALUGADO
+    assert db_session.query(Contentor).filter_by(codigo="2").one().status == StatusContentor.ALUGADO
+
+
+def test_entrega_explica_numero_invalido_e_bloqueia_contentor_alugado(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    SeedService(db_session).seed_contentores_iniciais()
+    router = WhatsappRouterAgent(db_session)
+    telefone = "351900009099"
+
+    avancar_ate_valor(router, telefone=telefone)
+    for resposta in ("120", "2", "2", "Rua da Entrega", "2", "1"):
+        router.handle(text_message(resposta, telefone=telefone))
+
+    contentor = db_session.query(Contentor).filter_by(codigo="7").one()
+    contentor.status = StatusContentor.ALUGADO
+    db_session.commit()
+
+    router.handle(text_message("2", telefone=telefone))
+    router.handle(text_message("1", telefone=telefone))
+    invalido = router.handle(text_message("07", telefone=telefone))
+    alugado = router.handle(text_message("7", telefone=telefone))
+    conversa = db_session.query(ConversaWhatsApp).filter_by(telefone=telefone).one()
+
+    assert "inteiro de 1 a 99" in invalido
+    assert "sem letras e sem zero a esquerda" in invalido
+    assert alugado == (
+        "O contentor 7 ja esta alugado e nao pode ser usado nesta entrega. "
+        "Informe outro numero de contentor disponivel."
+    )
+    assert conversa.estado_atual == "entrega_aguardando_contentor"
 
 
 def test_cadastro_valor_rejeita_valor_absurdo(db_session, monkeypatch):

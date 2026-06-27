@@ -78,14 +78,15 @@ class EntregaAgent:
                 conversa,
                 "entrega_aguardando_contentor",
                 context,
-                "Informe o contentor entregue. Ex: C02\n\n" + self._format_contentores_disponiveis(),
+                "Informe o contentor entregue: use somente o numero (1 a 99, sem letras e sem zero a esquerda).\n\n"
+                + self._format_contentores_disponiveis(),
             )
 
         if state == "entrega_aguardando_contentor":
-            codigo = (message.texto or "").strip().upper()
-            contentor = self.contentor_service.repository.get_by_codigo(codigo)
-            if not contentor or contentor.status != StatusContentor.DISPONIVEL:
-                return "Contentor invalido ou indisponivel. Informe um contentor disponivel. Ex: C02"
+            try:
+                contentor = self.contentor_service.buscar_para_entrega(message.texto)
+            except ValueError as exc:
+                return str(exc)
             context["contentor_codigo"] = contentor.codigo
             context["fotos_entrega"] = []
             return self._advance(conversa, "entrega_aguardando_foto", context, "Por favor, envie a foto do contentor no local.")

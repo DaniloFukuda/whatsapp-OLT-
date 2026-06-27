@@ -41,8 +41,8 @@ def test_operador_rejeita_perfil_invalido(db_session):
 
 def test_contentores_excluidos_nao_aparecem_em_listagens_operacionais(db_session):
     service = ContentorService(db_session)
-    ativo = service.criar_contentor("C-ATIVO")
-    excluido = service.criar_contentor("C-EXCLUIDO")
+    ativo = service.criar_contentor("21")
+    excluido = service.criar_contentor("22")
     excluido.is_deleted = True
     db_session.commit()
 
@@ -77,7 +77,7 @@ def test_campos_de_auditoria_de_contentores_podem_ser_preenchidos(db_session):
 
 def test_exclusao_segura_de_contentor_marca_auditoria_sem_delete_fisico(db_session):
     service = ContentorService(db_session)
-    contentor = service.criar_contentor("C-DELETE")
+    contentor = service.criar_contentor("23")
 
     excluido = service.excluir_com_auditoria(
         contentor_id=contentor.id,
@@ -95,21 +95,21 @@ def test_exclusao_segura_de_contentor_marca_auditoria_sem_delete_fisico(db_sessi
 
 def test_exclusao_segura_de_contentor_aceita_codigo(db_session):
     service = ContentorService(db_session)
-    service.criar_contentor("C-CODIGO")
+    service.criar_contentor("24")
 
     excluido = service.excluir_com_auditoria(
-        codigo="C-CODIGO",
+        codigo="24",
         operador_telefone="351900000031",
         justificativa="Contentor fora de operacao",
     )
 
-    assert excluido.codigo == "C-CODIGO"
+    assert excluido.codigo == "24"
     assert excluido.is_deleted is True
 
 
 def test_exclusao_segura_rejeita_justificativa_curta(db_session):
     service = ContentorService(db_session)
-    contentor = service.criar_contentor("C-CURTA")
+    contentor = service.criar_contentor("25")
 
     with pytest.raises(ValueError, match="Justificativa"):
         service.excluir_com_auditoria(
@@ -124,7 +124,7 @@ def test_exclusao_segura_rejeita_justificativa_curta(db_session):
 
 def test_exclusao_segura_nao_exclui_contentor_ja_excluido(db_session):
     service = ContentorService(db_session)
-    contentor = service.criar_contentor("C-REPETIDO")
+    contentor = service.criar_contentor("26")
     service.excluir_com_auditoria(
         contentor_id=contentor.id,
         operador_telefone="351900000033",
@@ -141,7 +141,7 @@ def test_exclusao_segura_nao_exclui_contentor_ja_excluido(db_session):
 
 def test_alteracao_auditada_de_contentor_altera_status_e_grava_operador(db_session):
     service = ContentorService(db_session)
-    contentor = service.criar_contentor("C-ALT")
+    contentor = service.criar_contentor("27")
 
     alterado = service.alterar_com_auditoria(
         contentor_id=contentor.id,
@@ -156,23 +156,23 @@ def test_alteracao_auditada_de_contentor_altera_status_e_grava_operador(db_sessi
 
 def test_alteracao_auditada_de_contentor_aceita_codigo(db_session):
     service = ContentorService(db_session)
-    service.criar_contentor("C-ALT-CODIGO")
+    service.criar_contentor("28")
 
     alterado = service.alterar_com_auditoria(
-        codigo="C-ALT-CODIGO",
+        codigo="28",
         operador_telefone="351900000041",
         campo="status",
         novo_valor=StatusContentor.AGUARDANDO_RECOLHA,
     )
 
-    assert alterado.codigo == "C-ALT-CODIGO"
+    assert alterado.codigo == "28"
     assert alterado.status == StatusContentor.AGUARDANDO_RECOLHA
     assert alterado.alterado_por_operador == "351900000041"
 
 
 def test_alteracao_auditada_rejeita_campo_nao_permitido(db_session):
     service = ContentorService(db_session)
-    contentor = service.criar_contentor("C-CAMPO")
+    contentor = service.criar_contentor("29")
 
     with pytest.raises(ValueError, match="Campo nao permitido"):
         service.alterar_com_auditoria(
@@ -185,7 +185,7 @@ def test_alteracao_auditada_rejeita_campo_nao_permitido(db_session):
 
 def test_alteracao_auditada_bloqueia_contentor_excluido(db_session):
     service = ContentorService(db_session)
-    contentor = service.criar_contentor("C-ALT-DEL")
+    contentor = service.criar_contentor("30")
     service.excluir_com_auditoria(
         contentor_id=contentor.id,
         operador_telefone="351900000043",

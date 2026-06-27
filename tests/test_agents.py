@@ -56,9 +56,9 @@ def preparar_operacao_demo(db_session):
     aluguer_atrasado.data_vencimento = now - timedelta(days=1)
     aluguer_regular.data_vencimento = now + timedelta(days=4)
 
-    contentor_recolha = db_session.query(Contentor).filter_by(codigo="C04").one()
+    contentor_recolha = db_session.query(Contentor).filter_by(codigo="4").one()
     contentor_recolha.status = StatusContentor.AGUARDANDO_RECOLHA
-    contentor_manutencao = db_session.query(Contentor).filter_by(codigo="C05").one()
+    contentor_manutencao = db_session.query(Contentor).filter_by(codigo="5").one()
     contentor_manutencao.status = StatusContentor.MANUTENCAO
     db_session.commit()
     return aluguer_amanha, aluguer_atrasado, aluguer_regular
@@ -154,11 +154,11 @@ def test_router_chama_aluguer_agent_quando_mensagem_for_novo(db_session, monkeyp
     response = WhatsappRouterAgent(db_session).handle(text_message("novo"))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").first()
 
-    assert "Cadastro unitario iniciado para o contentor C01" in response
+    assert "Cadastro unitario iniciado para o contentor 1" in response
     assert "foto do contentor" in response
     assert conversa.estado_atual == AluguerAgent.START_STATE
-    assert conversa.contexto_json["contentor_codigo"] == "C01"
-    assert conversa.contexto_json["numero_contentor"] == "C01"
+    assert conversa.contexto_json["contentor_codigo"] == "1"
+    assert conversa.contexto_json["numero_contentor"] == "1"
 
 
 def test_comandos_de_inicio_disparam_cadastro(db_session, monkeypatch):
@@ -304,7 +304,7 @@ def test_fluxo_completo_de_novo_aluguer(db_session, monkeypatch):
     assert aluguer.nome_cliente == "Cliente Final"
     assert aluguer.telefone_cliente == "351911111111"
     assert aluguer.email_cliente is None
-    assert aluguer.numero_contentor == "C01"
+    assert aluguer.numero_contentor == "1"
     assert aluguer.tipo_residuo == "Entulho Misto"
     assert aluguer.forma_pagamento == "MBWay"
     assert aluguer.pago is True
@@ -314,7 +314,7 @@ def test_fluxo_completo_de_novo_aluguer(db_session, monkeypatch):
     assert aluguer.latitude == 38.7223
     assert aluguer.longitude == -9.1393
     assert aluguer.status == StatusAluguer.ATIVO
-    assert aluguer.contentor.codigo == "C01"
+    assert aluguer.contentor.codigo == "1"
     assert aluguer.contentor.status == StatusContentor.ALUGADO
     assert aluguer.data_vencimento == aluguer.data_entrega + timedelta(days=5)
     assert {evento.tipo for evento in aluguer.eventos} == {"entrega", "pagamento_informado", "criado"}
@@ -821,7 +821,7 @@ def test_exclusao_de_contentor_inicia_fluxo_quando_nao_ha_registros_recentes(db_
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000040").one()
 
     assert "Escolha o contentor para excluir:" in response
-    assert "1. C01 - disponivel" in response
+    assert "1. 1 - disponivel" in response
     assert conversa.estado_atual == "contentor_exclusao_aguardando_item"
 
 
@@ -831,51 +831,51 @@ def test_remover_contentor_rejeita_justificativa_curta_e_exclui_com_auditoria(db
     router = WhatsappRouterAgent(db_session)
 
     start = router.handle(text_message("remover", telefone="351900000041"))
-    confirmacao = router.handle(text_message("C01", telefone="351900000041"))
+    confirmacao = router.handle(text_message("1", telefone="351900000041"))
     pedido_justificativa = router.handle(text_message("1", telefone="351900000041"))
     curta = router.handle(text_message("curta", telefone="351900000041"))
     response = router.handle(text_message("Contentor duplicado no patio", telefone="351900000041"))
-    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+    contentor = db_session.query(Contentor).filter_by(codigo="1").one()
 
     assert "Escolha o contentor para excluir:" in start
-    assert "Contentor selecionado: C01" in confirmacao
+    assert "Contentor selecionado: 1" in confirmacao
     assert pedido_justificativa == "Informe a justificativa da exclusao com pelo menos 10 caracteres."
     assert curta == "A justificativa deve ter pelo menos 10 caracteres."
-    assert "Contentor C01 excluido com seguranca." in response
+    assert "Contentor 1 excluido com seguranca." in response
     assert "Menu principal - OLT Entulhos" in response
     assert contentor.is_deleted is True
     assert contentor.excluido_por_operador == "351900000041"
     assert contentor.justificativa_exclusao == "Contentor duplicado no patio"
     assert db_session.get(Contentor, contentor.id) is not None
-    assert "C01" not in router.handle(text_message("lista", telefone="351900000041"))
+    assert "\n1 - " not in "\n" + router.handle(text_message("lista", telefone="351900000041"))
     assert "Total: 19" in router.handle(text_message("resumo", telefone="351900000041"))
 
 
 def test_exclusao_de_contentor_nao_lista_contentor_ja_excluido(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     SeedService(db_session).seed_contentores_iniciais()
-    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+    contentor = db_session.query(Contentor).filter_by(codigo="1").one()
     contentor.is_deleted = True
     db_session.commit()
 
     response = WhatsappRouterAgent(db_session).handle(text_message("apagar"))
 
-    assert "C01" not in response
-    assert "C02" in response
+    assert ". 1 - " not in response
+    assert "2" in response
 
 
 def test_alteracao_status_contentor_inicia_fluxo_e_lista_ativos(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     SeedService(db_session).seed_contentores_iniciais()
-    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+    contentor = db_session.query(Contentor).filter_by(codigo="1").one()
     contentor.is_deleted = True
     db_session.commit()
 
     response = WhatsappRouterAgent(db_session).handle(text_message("alterar status"))
 
     assert "Escolha o contentor para alterar o status:" in response
-    assert "C01" not in response
-    assert "1. C02 - disponivel" in response
+    assert ". 1 - " not in response
+    assert "1. 2 - disponivel" in response
 
 
 def test_alteracao_status_contentor_confirma_e_grava_operador(db_session, monkeypatch):
@@ -884,33 +884,33 @@ def test_alteracao_status_contentor_confirma_e_grava_operador(db_session, monkey
     router = WhatsappRouterAgent(db_session)
 
     start = router.handle(text_message("status contentor", telefone="351900000050"))
-    status_prompt = router.handle(text_message("C01", telefone="351900000050"))
+    status_prompt = router.handle(text_message("1", telefone="351900000050"))
     confirmacao = router.handle(text_message("4", telefone="351900000050"))
     response = router.handle(text_message("1", telefone="351900000050"))
-    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+    contentor = db_session.query(Contentor).filter_by(codigo="1").one()
 
     assert "Escolha o contentor para alterar o status:" in start
     assert "Status atual: disponivel" in status_prompt
     assert "Novo status: manutencao" in confirmacao
-    assert "Status do contentor C01 alterado para manutencao." in response
+    assert "Status do contentor 1 alterado para manutencao." in response
     assert "Menu principal - OLT Entulhos" in response
     assert contentor.status == StatusContentor.MANUTENCAO
     assert contentor.alterado_por_operador == "351900000050"
 
 
-def test_alteracao_status_contentor_bloqueia_contentor_excluido_por_codigo(db_session, monkeypatch):
+def test_alteracao_status_contentor_mantem_excluido_fora_da_selecao(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     SeedService(db_session).seed_contentores_iniciais()
-    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+    contentor = db_session.query(Contentor).filter_by(codigo="1").one()
     contentor.is_deleted = True
     db_session.commit()
     router = WhatsappRouterAgent(db_session)
 
     router.handle(text_message("alterar contentor"))
-    response = router.handle(text_message("C01"))
+    response = router.handle(text_message("1"))
     db_session.refresh(contentor)
 
-    assert response == "Informe um numero da lista ou codigo de contentor valido."
+    assert "Contentor selecionado: 2" in response
     assert contentor.status == StatusContentor.DISPONIVEL
     assert contentor.alterado_por_operador is None
 
@@ -921,9 +921,9 @@ def test_cancelamento_global_na_alteracao_status_contentor_nao_altera(db_session
     router = WhatsappRouterAgent(db_session)
 
     router.handle(text_message("alterar contentor"))
-    router.handle(text_message("C01"))
+    router.handle(text_message("1"))
     response = router.handle(text_message("cancelar"))
-    contentor = db_session.query(Contentor).filter_by(codigo="C01").one()
+    contentor = db_session.query(Contentor).filter_by(codigo="1").one()
 
     assert response == CANCELLED_MENU_MESSAGE
     assert contentor.status == StatusContentor.DISPONIVEL
@@ -1298,7 +1298,7 @@ def test_mensagem_novo_de_operador_autorizado_inicia_fluxo(db_session, monkeypat
     response = WhatsappRouterAgent(db_session).handle(text_message("Novo", telefone="556198266551"))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="556198266551").one()
 
-    assert "Cadastro unitario iniciado para o contentor C01" in response
+    assert "Cadastro unitario iniciado para o contentor 1" in response
     assert "foto do contentor" in response
     assert conversa.estado_atual == AluguerAgent.START_STATE
 
@@ -1318,7 +1318,7 @@ def test_operador_ativo_no_banco_consegue_usar_bot(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("novo", telefone="351900000020"))
 
-    assert "Cadastro unitario iniciado para o contentor C01" in response
+    assert "Cadastro unitario iniciado para o contentor 1" in response
     assert "foto do contentor" in response
 
 
@@ -1424,7 +1424,7 @@ def test_comandos_operacionais_continuam_funcionando(db_session, monkeypatch):
     }
 
     assert "Resumo dos contentores" in responses["resumo"]
-    assert "C01 - alugado" in responses["lista"]
+    assert "1 - alugado" in responses["lista"]
     assert responses["disponiveis"].startswith("Contentores dispon")
     assert "Contentores alugados:" in responses["alugados"]
     assert "Alugueres que vencem" in responses["vencendo"]
@@ -1439,7 +1439,7 @@ def test_resumo_lista_retirada_de_hoje_com_cliente_e_localizacao(db_session, mon
 
     assert "Retiradas hoje:" in response
     assert "Cliente Retirada Hoje" in response
-    assert f"#{hoje.id} / C01" in response
+    assert f"#{hoje.id} / 1" in response
     assert "https://www.google.com/maps?q=38.7223,-9.1393" in response
     assert f"retirada {hoje.data_vencimento:%d/%m/%Y}" in response
 
@@ -1452,7 +1452,7 @@ def test_resumo_lista_retirada_de_amanha_com_cliente(db_session, monkeypatch):
 
     assert "Retiradas amanha:" in response
     assert "Cliente Retirada Amanha" in response
-    assert f"#{amanha.id} / C02" in response
+    assert f"#{amanha.id} / 2" in response
     assert f"retirada {amanha.data_vencimento:%d/%m/%Y}" in response
 
 
@@ -1559,7 +1559,7 @@ def test_registros_deletados_nao_aparecem_em_listas_e_resumo(db_session, monkeyp
     deletado = preparar_aluguer_gestao(db_session, "Cliente Deletado", "351912345690")
     ativo = preparar_aluguer_gestao(db_session, "Cliente Ativo", "351912345691")
     AluguerService(db_session).excluir(deletado.id, "351900000000", "Duplicidade operacional")
-    contentor_deletado = db_session.query(Contentor).filter_by(codigo="C20").one()
+    contentor_deletado = db_session.query(Contentor).filter_by(codigo="20").one()
     contentor_deletado.is_deleted = True
     db_session.commit()
 
@@ -1610,12 +1610,12 @@ def test_comando_lista_mostra_todos_os_contentores_com_status(db_session):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("lista"))
 
-    assert "C01 - alugado" in response
-    assert "C02 - alugado" in response
-    assert "C03 - alugado" in response
-    assert "C04 - aguardando recolha" in response
-    assert "C05 - manutenção" in response
-    assert "C20 - disponível" in response
+    assert "1 - alugado" in response
+    assert "2 - alugado" in response
+    assert "3 - alugado" in response
+    assert "4 - aguardando recolha" in response
+    assert "5 - manutenção" in response
+    assert "20 - disponível" in response
     assert len(response.splitlines()) == 20
 
 
@@ -1625,10 +1625,10 @@ def test_comando_disponiveis_lista_apenas_contentores_disponiveis(db_session):
     response = WhatsappRouterAgent(db_session).handle(text_message("disponiveis"))
 
     assert response.startswith("Contentores disponíveis:\n")
-    assert "C06" in response
-    assert "C20" in response
-    assert "C01" not in response
-    assert "C04" not in response
+    assert "6" in response
+    assert "20" in response
+    assert "\n1\n" not in f"\n{response}\n"
+    assert "\n4\n" not in f"\n{response}\n"
 
 
 def test_comando_alugados_lista_cliente_vencimento_e_status(db_session):
@@ -1637,9 +1637,9 @@ def test_comando_alugados_lista_cliente_vencimento_e_status(db_session):
     response = WhatsappRouterAgent(db_session).handle(text_message("alugados"))
 
     assert "Contentores alugados:" in response
-    assert f"C01 - Cliente Amanhã - vencimento {aluguer_amanha.data_vencimento:%d/%m/%Y} - ativo" in response
-    assert f"C02 - Cliente Atrasado - vencimento {aluguer_atrasado.data_vencimento:%d/%m/%Y} - ativo" in response
-    assert f"C03 - Cliente Regular - vencimento {aluguer_regular.data_vencimento:%d/%m/%Y} - ativo" in response
+    assert f"1 - Cliente Amanhã - vencimento {aluguer_amanha.data_vencimento:%d/%m/%Y} - ativo" in response
+    assert f"2 - Cliente Atrasado - vencimento {aluguer_atrasado.data_vencimento:%d/%m/%Y} - ativo" in response
+    assert f"3 - Cliente Regular - vencimento {aluguer_regular.data_vencimento:%d/%m/%Y} - ativo" in response
 
 
 def test_comando_vencendo_lista_alugueres_que_vencem_amanha(db_session):
@@ -1648,7 +1648,7 @@ def test_comando_vencendo_lista_alugueres_que_vencem_amanha(db_session):
     response = WhatsappRouterAgent(db_session).handle(text_message("vencendo"))
 
     assert "Alugueres que vencem amanhã:" in response
-    assert f"C01 - Cliente Amanhã - vencimento {aluguer_amanha.data_vencimento:%d/%m/%Y} - ativo" in response
+    assert f"1 - Cliente Amanhã - vencimento {aluguer_amanha.data_vencimento:%d/%m/%Y} - ativo" in response
     assert "Cliente Atrasado" not in response
     assert "Cliente Regular" not in response
 
@@ -1659,6 +1659,6 @@ def test_comando_atrasados_lista_alugueres_ativos_em_atraso(db_session):
     response = WhatsappRouterAgent(db_session).handle(text_message("atrasados"))
 
     assert "Alugueres em atraso:" in response
-    assert f"C02 - Cliente Atrasado - vencimento {aluguer_atrasado.data_vencimento:%d/%m/%Y} - ativo" in response
+    assert f"2 - Cliente Atrasado - vencimento {aluguer_atrasado.data_vencimento:%d/%m/%Y} - ativo" in response
     assert "Cliente Amanhã" not in response
     assert "Cliente Regular" not in response

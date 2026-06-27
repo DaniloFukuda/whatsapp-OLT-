@@ -17,6 +17,7 @@ from app.models.contentor import StatusContentor
 from app.repositories.aluguer_repository import AluguerRepository
 from app.repositories.cliente_repository import ClienteRepository
 from app.repositories.contentor_repository import ContentorRepository
+from app.services.contentor_service import ContentorService
 
 
 class AluguerService:
@@ -63,9 +64,12 @@ class AluguerService:
         contentor = self.contentores.get(contentor_id) if contentor_id else self.contentores.first_available()
         if contentor is None:
             raise ValueError("Nenhum contentor disponivel")
-        numero_contentor = (numero_contentor or contentor.codigo).strip()
-        if not 1 <= len(numero_contentor) <= 20:
-            raise ValueError("Numero do contentor deve ter entre 1 e 20 caracteres")
+        if status_entrega == StatusEntrega.PENDENTE.value and numero_contentor == "A definir":
+            numero_contentor = "A definir"
+        else:
+            numero_contentor = ContentorService.validar_numero(
+                contentor.codigo if numero_contentor is None else numero_contentor
+            )
 
         status_entrega = status_entrega or StatusEntrega.ENTREGUE.value
         pedido_feito_por = pedido_feito_por or operador_telefone
@@ -145,11 +149,7 @@ class AluguerService:
             raise ValueError("Envie a localizacao GPS exata da entrega")
         if aluguer.status_entrega == StatusEntrega.ENTREGUE.value:
             raise ValueError("Pedido ja esta marcado como entregue")
-        contentor = self.contentores.get_by_codigo(contentor_codigo)
-        if not contentor:
-            raise ValueError("Contentor nao encontrado")
-        if contentor.status != StatusContentor.DISPONIVEL:
-            raise ValueError("Contentor informado nao esta disponivel")
+        contentor = ContentorService(self.db).buscar_para_entrega(contentor_codigo)
         if not aluguer.pago and pago_no_ato is True:
             if not (forma_pagamento or "").strip():
                 raise ValueError("Informe a forma de pagamento recebida na entrega")

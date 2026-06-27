@@ -13,9 +13,14 @@ $criticalFiles = @(
     "app/agents/localizacao_agent.py",
     "app/agents/whatsapp_router_agent.py",
     "app/agents/entrega_agent.py",
+    "app/integrations/whatsapp/client.py",
+    "app/integrations/whatsapp/parser.py",
+    "app/routes/webhook.py",
     "app/services/aluguer_service.py",
     "tests/test_schema_migrations.py",
-    "tests/test_cadastro_pedido_paulo.py"
+    "tests/test_cadastro_pedido_paulo.py",
+    "tests/test_whatsapp_client.py",
+    "tests/test_webhook.py"
 )
 
 Write-Host "== Conferindo arquivos criticos =="
@@ -117,12 +122,37 @@ Assert-FileContains `
     )
 Write-Host ""
 
+Write-Host "== Conferindo botoes WhatsApp =="
+Assert-FileContains `
+    -Path "app/integrations/whatsapp/client.py" `
+    -Label "client.py" `
+    -Needles @(
+        "send_whatsapp_message",
+        "send_button_message",
+        "interactive",
+        "button",
+        "_yes_no_buttons_for_body"
+    )
+Assert-FileContains `
+    -Path "app/integrations/whatsapp/parser.py" `
+    -Label "parser.py" `
+    -Needles @(
+        "interactive",
+        "button_reply",
+        "list_reply"
+    )
+Assert-FileContains `
+    -Path "app/routes/webhook.py" `
+    -Label "webhook.py" `
+    -Needles @("send_whatsapp_message")
+Write-Host ""
+
 Write-Host "== Compilando app e tests =="
 & $python -m compileall app tests
 Write-Host ""
 
 Write-Host "== Pytest focado =="
-& $python -m pytest tests/test_schema_migrations.py tests/test_cadastro_pedido_paulo.py -q
+& $python -m pytest tests/test_schema_migrations.py tests/test_cadastro_pedido_paulo.py tests/test_whatsapp_client.py tests/test_webhook.py -q
 Write-Host ""
 
 Write-Host "== Pytest completo =="
