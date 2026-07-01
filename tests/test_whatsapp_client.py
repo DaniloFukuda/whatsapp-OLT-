@@ -130,7 +130,21 @@ def test_send_whatsapp_message_usa_botoes_para_sim_nao_em_mock(monkeypatch):
     }
 
 
-def test_send_whatsapp_message_envia_payload_interactive_para_sim_nao(monkeypatch):
+def test_send_whatsapp_message_usa_botoes_para_duas_opcoes_genericas(monkeypatch):
+    clear_settings(monkeypatch)
+
+    result = send_whatsapp_message("556198266551", "Qual a forma?\n\n1. MBWay\n2. Transferencia")
+
+    assert result == {
+        "to": "556198266551",
+        "body": "Qual a forma?\n\n1. MBWay\n2. Transferencia",
+        "status": "mocked",
+        "type": "interactive",
+        "buttons": [{"id": "1", "title": "MBWay"}, {"id": "2", "title": "Transferencia"}],
+    }
+
+
+def test_send_whatsapp_message_envia_payload_interactive_para_duas_opcoes(monkeypatch):
     clear_settings(monkeypatch)
     monkeypatch.setenv("ENV", "development")
     monkeypatch.setenv("WHATSAPP_ACCESS_TOKEN", "fake-token")
@@ -157,9 +171,19 @@ def test_send_whatsapp_message_envia_payload_interactive_para_sim_nao(monkeypatc
     ]
 
 
-def test_send_whatsapp_message_mantem_texto_quando_nao_for_sim_nao(monkeypatch):
+def test_send_whatsapp_message_mantem_texto_quando_tiver_tres_ou_mais_opcoes(monkeypatch):
     clear_settings(monkeypatch)
 
-    result = send_whatsapp_message("556198266551", "Qual a forma?\n\n1. MBWay\n2. Transferencia")
+    body = "Quando sera a entrega?\n\n1. Hoje\n2. Amanha\n3. Outra data"
+    result = send_whatsapp_message("556198266551", body)
 
-    assert result == {"to": "556198266551", "body": "Qual a forma?\n\n1. MBWay\n2. Transferencia", "status": "mocked"}
+    assert result == {"to": "556198266551", "body": body, "status": "mocked"}
+
+
+def test_send_whatsapp_message_mantem_texto_quando_titulo_de_botao_for_longo(monkeypatch):
+    clear_settings(monkeypatch)
+
+    body = "Escolha uma opcao\n\n1. Botao com titulo muito grande\n2. Opcao curta"
+    result = send_whatsapp_message("556198266551", body)
+
+    assert result == {"to": "556198266551", "body": body, "status": "mocked"}
