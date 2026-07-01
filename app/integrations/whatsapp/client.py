@@ -9,9 +9,12 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+MAX_BUTTON_OPTIONS = 2
+MAX_BUTTON_TITLE_CHARS = 20
+
 
 def send_whatsapp_message(to: str, body: str, force_mock: bool = False) -> dict[str, Any]:
-    buttons = _yes_no_buttons_for_body(body)
+    buttons = _buttons_for_body(body)
     if buttons:
         return send_button_message(to, body, buttons, force_mock=force_mock)
     return send_text_message(to, body, force_mock=force_mock)
@@ -120,18 +123,44 @@ def _send_payload(
     return result
 
 
-def _yes_no_buttons_for_body(body: str) -> list[dict[str, str]]:
+def _buttons_for_body(body: str) -> list[dict[str, str]]:
+    numbered_options = _numbered_options_for_body(body)
+    if 0 < len(numbered_options) <= MAX_BUTTON_OPTIONS:
+        buttons = _buttons_from_numbered_options(numbered_options)
+        if buttons:
+            return buttons
+
     normalized = _normalize_button_text(body)
-    numbered_options = re.findall(r"(?im)^\s*(\d+)\s*[\.\-\)]\s*(.+?)\s*$", normalized)
-    if numbered_options and {number for number, _ in numbered_options} != {"1", "2"}:
+    if "[sim]" in normalized and "[nao]" in normalized:
+        return [{"id": "1", "title": "Sim"}, {"id": "2", "title": "Nao"}]
+
+    return []
+
+
+def _numbered_options_for_body(body: str) -> list[tuple[str, str]]:
+    return re.findall(r"(?im)^\s*(\d+)\s*[\.\-\)]\s*(.+?)\s*$", body or "")
+
+
+def _buttons_from_numbered_options(numbered_options: list[tuple[str, str]]) -> list[dict[str, str]]:
+    expected_numbers = [str(index) for index in range(1, len(numbered_options) + 1)]
+    numbers = [number for number, _ in numbered_options]
+    if numbers != expected_numbers:
         return []
-    has_sim = any(number == "1" and re.search(r"\bsim\b", title) for number, title in numbered_options)
-    has_nao = any(number == "2" and re.search(r"\bnao\b", title) for number, title in numbered_options)
-    has_sim = bool(has_sim) or "[sim]" in normalized
-    has_nao = bool(has_nao) or "[nao]" in normalized
-    if not (has_sim and has_nao):
-        return []
-    return [{"id": "1", "title": "Sim"}, {"id": "2", "title": "Nao"}]
+
+    buttons = []
+    for number, title in numbered_options:
+        button_title = _format_button_title(title)
+        if not button_title:
+            return []
+        buttons.append({"id": number, "title": button_title})
+    return buttons
+
+
+def _format_button_title(title: str) -> str | None:
+    button_title = re.sub(r"\s+", " ", title or "").strip()
+    if not button_title or len(button_title) > MAX_BUTTON_TITLE_CHARS:
+        return None
+    return button_title
 
 
 def _normalize_button_text(value: str) -> str:
