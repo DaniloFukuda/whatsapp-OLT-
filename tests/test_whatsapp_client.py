@@ -123,10 +123,11 @@ def test_send_whatsapp_message_usa_botoes_para_sim_nao_em_mock(monkeypatch):
 
     assert result == {
         "to": "556198266551",
-        "body": "Deseja continuar?\n\n1. Sim\n2. Nao",
+        "body": "Deseja continuar?",
         "status": "mocked",
         "type": "interactive",
-        "buttons": [{"id": "1", "title": "Sim"}, {"id": "2", "title": "Nao"}],
+        "interactive_type": "button",
+        "buttons": [{"id": "option_1", "title": "Sim"}, {"id": "option_2", "title": "Nao"}],
     }
 
 
@@ -137,10 +138,11 @@ def test_send_whatsapp_message_usa_botoes_para_duas_opcoes_genericas(monkeypatch
 
     assert result == {
         "to": "556198266551",
-        "body": "Qual a forma?\n\n1. MBWay\n2. Transferencia",
+        "body": "Qual a forma?",
         "status": "mocked",
         "type": "interactive",
-        "buttons": [{"id": "1", "title": "MBWay"}, {"id": "2", "title": "Transferencia"}],
+        "interactive_type": "button",
+        "buttons": [{"id": "option_1", "title": "MBWay"}, {"id": "option_2", "title": "Transferencia"}],
     }
 
 
@@ -163,27 +165,81 @@ def test_send_whatsapp_message_envia_payload_interactive_para_duas_opcoes(monkey
     assert result["status"] == "sent"
     assert result["message_id"] == "wamid.button"
     assert result["type"] == "interactive"
+    assert result["interactive_type"] == "button"
     assert calls[0]["json"]["type"] == "interactive"
     assert calls[0]["json"]["interactive"]["type"] == "button"
+    assert calls[0]["json"]["interactive"]["body"] == {"text": "Deseja adicionar mais uma foto?"}
     assert calls[0]["json"]["interactive"]["action"]["buttons"] == [
-        {"type": "reply", "reply": {"id": "1", "title": "Sim"}},
-        {"type": "reply", "reply": {"id": "2", "title": "Nao"}},
+        {"type": "reply", "reply": {"id": "option_1", "title": "Sim"}},
+        {"type": "reply", "reply": {"id": "option_2", "title": "Nao"}},
     ]
 
 
-def test_send_whatsapp_message_mantem_texto_quando_tiver_tres_ou_mais_opcoes(monkeypatch):
+def test_send_whatsapp_message_usa_botoes_quando_tiver_tres_opcoes(monkeypatch):
     clear_settings(monkeypatch)
 
     body = "Quando sera a entrega?\n\n1. Hoje\n2. Amanha\n3. Outra data"
     result = send_whatsapp_message("556198266551", body)
 
-    assert result == {"to": "556198266551", "body": body, "status": "mocked"}
+    assert result == {
+        "to": "556198266551",
+        "body": "Quando sera a entrega?",
+        "status": "mocked",
+        "type": "interactive",
+        "interactive_type": "button",
+        "buttons": [
+            {"id": "option_1", "title": "Hoje"},
+            {"id": "option_2", "title": "Amanha"},
+            {"id": "option_3", "title": "Outra data"},
+        ],
+    }
 
 
-def test_send_whatsapp_message_mantem_texto_quando_titulo_de_botao_for_longo(monkeypatch):
+def test_send_whatsapp_message_trunca_titulo_longo_de_botao(monkeypatch):
     clear_settings(monkeypatch)
 
     body = "Escolha uma opcao\n\n1. Botao com titulo muito grande\n2. Opcao curta"
     result = send_whatsapp_message("556198266551", body)
 
-    assert result == {"to": "556198266551", "body": body, "status": "mocked"}
+    assert result == {
+        "to": "556198266551",
+        "body": "Escolha uma opcao",
+        "status": "mocked",
+        "type": "interactive",
+        "interactive_type": "button",
+        "buttons": [
+            {"id": "option_1", "title": "Botao com titulo..."},
+            {"id": "option_2", "title": "Opcao curta"},
+        ],
+    }
+
+
+def test_send_whatsapp_message_faz_fallback_para_texto_quando_interativo_falha(monkeypatch):
+    clear_settings(monkeypatch)
+    monkeypatch.setenv("ENV", "development")
+    monkeypatch.setenv("WHATSAPP_ACCESS_TOKEN", "fake-token")
+    monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "1148807428322172")
+    get_settings.cache_clear()
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(json)
+        if len(calls) == 1:
+            return httpx.Response(400, json={"error": {"message": "interactive failed"}})
+        return httpx.Response(200, json={"messages": [{"id": "wamid.text"}]})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    original_body = "Deseja continuar?\n\n1. Sim\n2. Nao"
+    result = send_whatsapp_message("556198266551", original_body)
+
+    assert calls[0]["type"] == "interactive"
+    assert calls[1] == {
+        "messaging_product": "whatsapp",
+        "to": "556198266551",
+        "type": "text",
+        "text": {"body": original_body},
+    }
+    assert result["status"] == "sent"
+    assert result["message_id"] == "wamid.text"
+    assert result["fallback_from"] == "button"
