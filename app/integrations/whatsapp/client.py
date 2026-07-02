@@ -9,14 +9,35 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-MAX_BUTTON_OPTIONS = 2
+MAX_BUTTON_OPTIONS = 3
+MAX_LIST_OPTIONS = 5
 MAX_BUTTON_TITLE_CHARS = 20
+MAX_LIST_TITLE_CHARS = 24
+LIST_BUTTON_TITLE = "Escolher opção"
+LIST_SECTION_TITLE = "Opções"
+OPTION_ID_PREFIX = "option_"
 
 
 def send_whatsapp_message(to: str, body: str, force_mock: bool = False) -> dict[str, Any]:
-    buttons = _buttons_for_body(body)
-    if buttons:
-        return send_button_message(to, body, buttons, force_mock=force_mock)
+    options = _options_for_body(body)
+    if 0 < len(options) <= MAX_BUTTON_OPTIONS:
+        result = send_button_message(
+            to,
+            _body_without_numbered_options(body),
+            _buttons_from_options(options),
+            force_mock=force_mock,
+        )
+        return _fallback_to_text_if_needed(to, body, result, force_mock, interactive_type="button")
+
+    if MAX_BUTTON_OPTIONS < len(options) <= MAX_LIST_OPTIONS:
+        result = send_list_message(
+            to,
+            _body_without_numbered_options(body),
+            _list_rows_from_options(options),
+            force_mock=force_mock,
+        )
+        return _fallback_to_text_if_needed(to, body, result, force_mock, interactive_type="list")
+
     return send_text_message(to, body, force_mock=force_mock)
 
 
@@ -46,7 +67,7 @@ def send_button_message(
             "action": {
                 "buttons": [
                     {"type": "reply", "reply": {"id": button["id"], "title": button["title"]}}
-                    for button in buttons[:3]
+                    for button in buttons[:MAX_BUTTON_OPTIONS]
                 ]
             },
         },
@@ -56,7 +77,36 @@ def send_button_message(
         body=body,
         payload=payload,
         force_mock=force_mock,
-        buttons=buttons[:3],
+        buttons=buttons[:MAX_BUTTON_OPTIONS],
+        include_type=True,
+    )
+
+
+def send_list_message(
+    to: str,
+    body: str,
+    rows: list[dict[str, str]],
+    force_mock: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "body": {"text": body},
+            "action": {
+                "button": LIST_BUTTON_TITLE,
+                "sections": [{"title": LIST_SECTION_TITLE, "rows": rows[:MAX_LIST_OPTIONS]}],
+            },
+        },
+    }
+    return _send_payload(
+        to=to,
+        body=body,
+        payload=payload,
+        force_mock=force_mock,
+        list_rows=rows[:MAX_LIST_OPTIONS],
         include_type=True,
     )
 
@@ -67,6 +117,7 @@ def _send_payload(
     payload: dict[str, Any],
     force_mock: bool = False,
     buttons: list[dict[str, str]] | None = None,
+    list_rows: list[dict[str, str]] | None = None,
     include_type: bool = False,
 ) -> dict[str, Any]:
     settings = get_settings()
@@ -75,8 +126,12 @@ def _send_payload(
         result = {"to": to, "body": body, "status": "mocked"}
         if include_type:
             result["type"] = payload["type"]
+            if payload["type"] == "interactive":
+                result["interactive_type"] = payload["interactive"]["type"]
         if buttons:
             result["buttons"] = buttons
+        if list_rows:
+            result["list_rows"] = list_rows
         return result
 
     url = (
@@ -118,21 +173,53 @@ def _send_payload(
     result = {"to": to, "body": body, "status": "sent", "message_id": message_id}
     if include_type:
         result["type"] = payload["type"]
+        if payload["type"] == "interactive":
+            result["interactive_type"] = payload["interactive"]["type"]
     if buttons:
         result["buttons"] = buttons
+    if list_rows:
+        result["list_rows"] = list_rows
     return result
 
 
+def _fallback_to_text_if_needed(
+    to: str,
+    original_body: str,
+    result: dict[str, Any],
+    force_mock: bool,
+    interactive_type: str,
+) -> dict[str, Any]:
+    if result.get("status") != "error":
+        return result
+
+    logger.warning(
+        "WhatsApp interactive %s failed to=%s; falling back to numbered text",
+        interactive_type,
+        to,
+    )
+    fallback_result = send_text_message(to, original_body, force_mock=force_mock)
+    fallback_result["fallback_from"] = interactive_type
+    fallback_result["interactive_error"] = result.get("response") or result.get("error")
+    return fallback_result
+
+
 def _buttons_for_body(body: str) -> list[dict[str, str]]:
+    options = _options_for_body(body)
+    if 0 < len(options) <= MAX_BUTTON_OPTIONS:
+        return _buttons_from_options(options)
+    return []
+
+
+def _options_for_body(body: str) -> list[dict[str, str]]:
     numbered_options = _numbered_options_for_body(body)
-    if 0 < len(numbered_options) <= MAX_BUTTON_OPTIONS:
-        buttons = _buttons_from_numbered_options(numbered_options)
-        if buttons:
-            return buttons
+    if 0 < len(numbered_options) <= MAX_LIST_OPTIONS:
+        options = _options_from_numbered_options(numbered_options)
+        if options:
+            return options
 
     normalized = _normalize_button_text(body)
     if "[sim]" in normalized and "[nao]" in normalized:
-        return [{"id": "1", "title": "Sim"}, {"id": "2", "title": "Nao"}]
+        return [{"id": "option_1", "title": "Sim"}, {"id": "option_2", "title": "Nao"}]
 
     return []
 
@@ -141,26 +228,77 @@ def _numbered_options_for_body(body: str) -> list[tuple[str, str]]:
     return re.findall(r"(?im)^\s*(\d+)\s*[\.\-\)]\s*(.+?)\s*$", body or "")
 
 
-def _buttons_from_numbered_options(numbered_options: list[tuple[str, str]]) -> list[dict[str, str]]:
+def _options_from_numbered_options(numbered_options: list[tuple[str, str]]) -> list[dict[str, str]]:
     expected_numbers = [str(index) for index in range(1, len(numbered_options) + 1)]
     numbers = [number for number, _ in numbered_options]
     if numbers != expected_numbers:
         return []
 
-    buttons = []
+    options = []
     for number, title in numbered_options:
-        button_title = _format_button_title(title)
+        option_title = _clean_option_title(title)
+        if not option_title:
+            return []
+        options.append({"id": f"{OPTION_ID_PREFIX}{number}", "title": option_title})
+    return options
+
+
+def _buttons_from_numbered_options(numbered_options: list[tuple[str, str]]) -> list[dict[str, str]]:
+    options = _options_from_numbered_options(numbered_options)
+    if not options:
+        return []
+    return _buttons_from_options(options)
+
+
+def _buttons_from_options(options: list[dict[str, str]]) -> list[dict[str, str]]:
+    buttons = []
+    for option in options:
+        button_title = _format_button_title(option["title"])
         if not button_title:
             return []
-        buttons.append({"id": number, "title": button_title})
+        buttons.append({"id": option["id"], "title": button_title})
     return buttons
 
 
+def _list_rows_from_options(options: list[dict[str, str]]) -> list[dict[str, str]]:
+    rows = []
+    for option in options:
+        row_title = _truncate_title(option["title"], MAX_LIST_TITLE_CHARS)
+        if not row_title:
+            return []
+        rows.append({"id": option["id"], "title": row_title})
+    return rows
+
+
 def _format_button_title(title: str) -> str | None:
-    button_title = re.sub(r"\s+", " ", title or "").strip()
-    if not button_title or len(button_title) > MAX_BUTTON_TITLE_CHARS:
+    button_title = _clean_option_title(title)
+    if not button_title:
         return None
-    return button_title
+    return _truncate_title(button_title, MAX_BUTTON_TITLE_CHARS)
+
+
+def _clean_option_title(title: str) -> str:
+    return re.sub(r"\s+", " ", title or "").strip()
+
+
+def _truncate_title(title: str, max_chars: int) -> str:
+    clean_title = _clean_option_title(title)
+    if len(clean_title) <= max_chars:
+        return clean_title
+    if max_chars <= 3:
+        return clean_title[:max_chars]
+    return f"{clean_title[: max_chars - 3].rstrip()}..."
+
+
+def _body_without_numbered_options(body: str) -> str:
+    lines = []
+    for line in (body or "").splitlines():
+        if re.match(r"^\s*\d+\s*[\.\-\)]\s*.+?\s*$", line):
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned or body
 
 
 def _normalize_button_text(value: str) -> str:
