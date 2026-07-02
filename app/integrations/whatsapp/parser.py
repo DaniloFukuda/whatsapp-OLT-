@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,7 +57,7 @@ def _parse_message(message: dict[str, Any]) -> NormalizedWhatsAppMessage | None:
     elif tipo == "interactive":
         interactive = message.get("interactive", {})
         reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
-        data["texto"] = reply.get("id") or reply.get("title")
+        data["texto"] = _interactive_reply_text(reply)
     elif tipo == "contacts":
         contacts = message.get("contacts", [])
         if contacts:
@@ -65,3 +66,15 @@ def _parse_message(message: dict[str, Any]) -> NormalizedWhatsAppMessage | None:
                 data["contact_phone"] = phones[0].get("phone") or phones[0].get("wa_id")
 
     return NormalizedWhatsAppMessage(**data)
+
+
+def _interactive_reply_text(reply: dict[str, Any]) -> str | None:
+    reply_id = reply.get("id")
+    if isinstance(reply_id, str):
+        reply_id = reply_id.strip()
+        option_match = re.fullmatch(r"option_(\d+)", reply_id)
+        if option_match:
+            return option_match.group(1)
+        if reply_id:
+            return reply_id
+    return reply.get("title")
