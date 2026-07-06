@@ -122,12 +122,18 @@ class ContentorFoto(Base):
     __tablename__ = "contentor_fotos"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    aluguer_id: Mapped[int] = mapped_column(ForeignKey("alugueres_contentor.id"), nullable=False)
-    url_foto: Mapped[str] = mapped_column(String(500), nullable=False)
-    tipo: Mapped[str] = mapped_column(String(30), default="entrega", nullable=False)
+    aluguer_id: Mapped[int | None] = mapped_column(ForeignKey("alugueres_contentor.id"), nullable=True)
+    pedido_contentor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("pedido_contentores.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    url_foto: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    url_midia: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    tipo: Mapped[str | None] = mapped_column(String(30), default="entrega", nullable=True)
+    tipo_foto: Mapped[str | None] = mapped_column(String(20), nullable=True)
     criado_em: Mapped[DateTime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     aluguer = relationship("AluguerContentor", back_populates="fotos")
+    pedido_contentor = relationship("PedidoContentor", back_populates="fotos")
 
 
 class ContentorFotoRecolha(Base):

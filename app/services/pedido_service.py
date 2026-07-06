@@ -1,0 +1,263 @@
+from collections import Counter
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+
+from sqlalchemy.orm import Session, joinedload
+
+from app.core.time import utcnow
+from app.models.aluguer import ContentorFoto
+from app.models.pedido import (
+    Pedido,
+    PedidoContentor,
+    StatusCicloPedido,
+    StatusEntregaPedido,
+    StatusPagamento,
+    StatusRecolhaPedido,
+    StatusResolucaoPedido,
+    TipoFoto,
+)
+
+
+class PedidoService:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def criar(
+        self,
+        *,
+        nome_cliente: str,
+        telefone_cliente: str,
+        data_planejada: datetime,
+        valor_global: Decimal | str | float,
+        pago: bool,
+        forma_pagamento: str | None,
+        pedido_feito_por: str,
+        endereco_aproximado: str,
+        ponto_referencia: str | None,
+        residuos: list[str],
+        endereco_latitude: float | None = None,
+        endereco_longitude: float | None = None,
+    ) -> Pedido:
+        if not residuos:
+            raise ValueError("O pedido precisa de pelo menos um contentor.")
+        try:
+            valor = Decimal(str(valor_global).replace(",", "."))
+        except InvalidOperation as exc:
+            raise ValueError("Valor global inválido.") from exc
+        if valor < 0 or valor > Decimal("99999999.99"):
+            raise ValueError("Valor global inválido.")
+        if len(endereco_aproximado.strip()) > 300:
+            raise ValueError("O endereço deve ter no máximo 300 caracteres.")
+        if ponto_referencia and len(ponto_referencia.strip()) > 50:
+            raise ValueError("O ponto de referência deve ter no máximo 50 caracteres.")
+        if pago and not forma_pagamento:
+            raise ValueError("Informe a forma de pagamento de um pedido pago.")
+        pedido = Pedido(
+            nome_cliente=nome_cliente.strip(),
+            telefone_cliente=telefone_cliente.strip(),
+            data_planejada=data_planejada,
+            valor_global=valor,
+            status_pagamento=StatusPagamento.PAGO.value if pago else StatusPagamento.PENDENTE.value,
+            forma_pagamento=forma_pagamento if pago else None,
+            pedido_feito_por=pedido_feito_por,
+            endereco_aproximado=endereco_aproximado.strip(),
+            endereco_latitude=endereco_latitude,
+            endereco_longitude=endereco_longitude,
+            ponto_referencia=ponto_referencia.strip() if ponto_referencia else None,
+            contentores=[PedidoContentor(residuo_contratado=item) for item in residuos],
+        )
+        self.db.add(pedido)
+        self.db.commit()
+        self.db.refresh(pedido)
+        return pedido
+
+    def get(self, pedido_id: int) -> Pedido | None:
+        return (
+            self.db.query(Pedido)
+            .options(joinedload(Pedido.contentores))
+            .filter(Pedido.id == pedido_id)
+            .first()
+        )
+
+    def pedidos_pendentes_entrega(self) -> list[Pedido]:
+        return (
+            self.db.query(Pedido)
+            .join(PedidoContentor)
+            .filter(PedidoContentor.status_entrega == StatusEntregaPedido.PENDENTE.value)
+            .distinct()
+            .order_by(Pedido.data_planejada, Pedido.id)
+            .all()
+        )
+
+    def contentores_para_recolha(self) -> list[PedidoContentor]:
+        return (
+            self.db.query(PedidoContentor)
+            .options(joinedload(PedidoContentor.pedido))
+            .filter(PedidoContentor.status_entrega == StatusEntregaPedido.ENTREGUE.value)
+            .filter(PedidoContentor.status_recolha == StatusRecolhaPedido.PENDENTE.value)
+            .order_by(PedidoContentor.numero_adesivo_contentor, PedidoContentor.id)
+            .all()
+        )
+
+    def contentores_para_despejo(self) -> list[PedidoContentor]:
+        return (
+            self.db.query(PedidoContentor)
+            .options(joinedload(PedidoContentor.pedido))
+            .filter(PedidoContentor.status_recolha == StatusRecolhaPedido.RECOLHIDO.value)
+            .filter(PedidoContentor.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value)
+            .order_by(PedidoContentor.numero_adesivo_contentor, PedidoContentor.id)
+            .all()
+        )
+
+    def adicionar_foto(self, contentor_id: int, url: str, tipo: TipoFoto | str) -> ContentorFoto:
+        contentor = self.db.get(PedidoContentor, contentor_id)
+        if not contentor:
+            raise ValueError("Contentor do pedido não encontrado.")
+        tipo_value = tipo.value if isinstance(tipo, TipoFoto) else str(tipo).upper()
+        if tipo_value not in {item.value for item in TipoFoto}:
+            raise ValueError("Tipo de foto inválido.")
+        foto = ContentorFoto(
+            pedido_contentor_id=contentor_id,
+            url_midia=url,
+            tipo_foto=tipo_value,
+            url_foto=url,
+            tipo=tipo_value.lower(),
+        )
+        self.db.add(foto)
+        self.db.commit()
+        return foto
+
+    def confirmar_entrega_lote(
+        self,
+        pedido_id: int,
+        operador: str,
+        latitude: float,
+        longitude: float,
+        ponto_referencia: str | None,
+    ) -> Pedido:
+        pedido = self.get(pedido_id)
+        if not pedido:
+            raise ValueError("Pedido não encontrado.")
+        pendentes = [c for c in pedido.contentores if c.status_entrega == StatusEntregaPedido.PENDENTE.value]
+        if any(not c.numero_adesivo_contentor for c in pendentes):
+            raise ValueError("Todos os contentores precisam do número do adesivo.")
+        if ponto_referencia and len(ponto_referencia) > 50:
+            raise ValueError("O ponto de referência deve ter no máximo 50 caracteres.")
+        agora = utcnow()
+        for contentor in pendentes:
+            contentor.status_entrega = StatusEntregaPedido.ENTREGUE.value
+            contentor.entrega_feita_por = operador
+            contentor.entrega_latitude = latitude
+            contentor.entrega_longitude = longitude
+            contentor.entrega_ponto_referencia = ponto_referencia
+            contentor.entrega_data_hora = agora
+        self.db.commit()
+        return pedido
+
+    def registrar_pagamento(self, pedido_id: int, forma: str) -> None:
+        pedido = self.get(pedido_id)
+        if not pedido:
+            raise ValueError("Pedido não encontrado.")
+        pedido.status_pagamento = StatusPagamento.PAGO.value
+        pedido.forma_pagamento = forma
+        self.db.commit()
+
+    def confirmar_recolha(
+        self, contentor_id: int, operador: str, avariado: bool, relato: str | None
+    ) -> PedidoContentor:
+        contentor = self.db.get(PedidoContentor, contentor_id)
+        if not contentor or contentor.status_entrega != StatusEntregaPedido.ENTREGUE.value:
+            raise ValueError("Contentor não disponível para recolha.")
+        if avariado and len((relato or "").strip()) < 10:
+            raise ValueError("O relato da avaria precisa ter pelo menos 10 caracteres.")
+        contentor.status_recolha = StatusRecolhaPedido.RECOLHIDO.value
+        contentor.recolha_feita_por = operador
+        contentor.recolha_data_hora = utcnow()
+        contentor.contentor_avariado = avariado
+        contentor.relato_avaria = relato.strip() if avariado and relato else None
+        contentor.status_resolucao_avaria = (
+            StatusResolucaoPedido.PENDENTE.value
+            if avariado
+            else StatusResolucaoPedido.NAO_APLICA.value
+        )
+        self.db.commit()
+        return contentor
+
+    def cotas_restantes(self, pedido_id: int) -> Counter:
+        pedido = self.get(pedido_id)
+        if not pedido:
+            raise ValueError("Pedido não encontrado.")
+        contratadas = Counter(c.residuo_contratado for c in pedido.contentores)
+        consumidas = Counter(
+            c.residuo_efetivo_vazadouro
+            for c in pedido.contentores
+            if c.status_ciclo == StatusCicloPedido.CONCLUIDO.value
+            and c.residuo_efetivo_vazadouro
+            and contratadas[c.residuo_efetivo_vazadouro] > 0
+        )
+        return contratadas - consumidas
+
+    def confirmar_despejo(
+        self,
+        contentor_id: int,
+        residuo_efetivo: str,
+        carga_errada: bool = False,
+        relato: str | None = None,
+    ) -> PedidoContentor:
+        contentor = self.db.get(PedidoContentor, contentor_id)
+        if not contentor or contentor.status_recolha != StatusRecolhaPedido.RECOLHIDO.value:
+            raise ValueError("Contentor não disponível para despejo.")
+        if contentor.status_ciclo == StatusCicloPedido.CONCLUIDO.value:
+            raise ValueError("O ciclo deste contentor já foi concluído.")
+        cotas = self.cotas_restantes(contentor.pedido_id)
+        if not carga_errada and cotas.get(residuo_efetivo, 0) <= 0:
+            raise ValueError("Não existe cota em aberto para esse tipo de resíduo.")
+        if carga_errada and len((relato or "").strip()) < 10:
+            raise ValueError("O relato da carga precisa ter pelo menos 10 caracteres.")
+        contentor.residuo_efetivo_vazadouro = residuo_efetivo
+        contentor.carga_errada = carga_errada
+        contentor.relato_carga = relato.strip() if carga_errada and relato else None
+        contentor.status_resolucao_carga = (
+            StatusResolucaoPedido.PENDENTE.value
+            if carga_errada
+            else StatusResolucaoPedido.NAO_APLICA.value
+        )
+        contentor.status_ciclo = StatusCicloPedido.CONCLUIDO.value
+        self.db.commit()
+        return contentor
+
+    def resolver(self, tipo: str, contentor_id: int) -> PedidoContentor:
+        contentor = self.db.get(PedidoContentor, contentor_id)
+        if not contentor:
+            raise ValueError("Contentor não encontrado.")
+        if tipo == "carga":
+            contentor.status_resolucao_carga = StatusResolucaoPedido.RESOLVIDO.value
+        elif tipo == "avaria":
+            contentor.status_resolucao_avaria = StatusResolucaoPedido.RESOLVIDO.value
+        else:
+            raise ValueError("Tipo de pendência inválido.")
+        self.db.commit()
+        return contentor
+
+    def pendencias(self) -> dict[str, list]:
+        financeiras = (
+            self.db.query(Pedido)
+            .filter(Pedido.status_pagamento == StatusPagamento.PENDENTE.value)
+            .order_by(Pedido.id)
+            .all()
+        )
+        cargas = (
+            self.db.query(PedidoContentor)
+            .options(joinedload(PedidoContentor.pedido))
+            .filter(PedidoContentor.carga_errada.is_(True))
+            .filter(PedidoContentor.status_resolucao_carga == StatusResolucaoPedido.PENDENTE.value)
+            .all()
+        )
+        avarias = (
+            self.db.query(PedidoContentor)
+            .options(joinedload(PedidoContentor.pedido))
+            .filter(PedidoContentor.contentor_avariado.is_(True))
+            .filter(PedidoContentor.status_resolucao_avaria == StatusResolucaoPedido.PENDENTE.value)
+            .all()
+        )
+        return {"financeiras": financeiras, "cargas": cargas, "avarias": avarias}

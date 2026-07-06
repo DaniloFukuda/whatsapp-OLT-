@@ -104,6 +104,53 @@ def ensure_alugueres_contentor_schema(engine: Engine) -> None:
                 """
             )
         )
+        foto_info = list(
+            connection.execute(text("PRAGMA table_info(contentor_fotos)")).mappings()
+        )
+        foto_columns = {row["name"] for row in foto_info}
+        needs_rebuild = any(
+            row["name"] in {"aluguer_id", "url_foto", "tipo"} and row["notnull"]
+            for row in foto_info
+        )
+        if needs_rebuild:
+            connection.execute(text("ALTER TABLE contentor_fotos RENAME TO contentor_fotos_legacy"))
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE contentor_fotos (
+                        id INTEGER PRIMARY KEY,
+                        aluguer_id INTEGER REFERENCES alugueres_contentor(id),
+                        pedido_contentor_id INTEGER REFERENCES pedido_contentores(id) ON DELETE CASCADE,
+                        url_foto VARCHAR(500),
+                        url_midia VARCHAR(500),
+                        tipo VARCHAR(30),
+                        tipo_foto VARCHAR(20),
+                        criado_em DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO contentor_fotos
+                        (id, aluguer_id, url_foto, url_midia, tipo, tipo_foto, criado_em)
+                    SELECT id, aluguer_id, url_foto, url_foto, tipo, UPPER(tipo), criado_em
+                    FROM contentor_fotos_legacy
+                    """
+                )
+            )
+            connection.execute(text("DROP TABLE contentor_fotos_legacy"))
+        else:
+            for column_name, definition in {
+                "pedido_contentor_id": "INTEGER REFERENCES pedido_contentores(id)",
+                "url_midia": "VARCHAR(500)",
+                "tipo_foto": "VARCHAR(20)",
+            }.items():
+                if column_name not in foto_columns:
+                    connection.execute(
+                        text(f"ALTER TABLE contentor_fotos ADD COLUMN {column_name} {definition}")
+                    )
         connection.execute(
             text(
                 """

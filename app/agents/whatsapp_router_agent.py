@@ -9,6 +9,7 @@ from app.agents.contentor_agent import ContentorAgent
 from app.agents.entrega_agent import EntregaAgent
 from app.agents.gestao_aluguer_agent import GestaoAluguerAgent
 from app.agents.recolha_agent import RecolhaAgent
+from app.agents.pedido_v24_agent import PedidoV24Agent
 from app.agents.renovacao_agent import RenovacaoAgent
 from app.core.config import get_settings
 from app.core.phone import normalize_phone, whatsapp_link
@@ -18,9 +19,11 @@ from app.models.aluguer import AluguerContentor, StatusAluguer, StatusEntrega
 from app.models.conversa import ConversaWhatsApp
 from app.models.contentor import StatusContentor
 from app.models.operador import PerfilOperador
+from app.models.pedido import PedidoContentor, StatusResolucaoPedido
 from app.services.aluguer_service import AluguerService
 from app.services.contentor_service import ContentorService
 from app.services.operador_service import OperadorService
+from app.services.pedido_service import PedidoService
 
 
 ACTIVE_ALUGUER_STATUSES = {StatusAluguer.ATIVO, StatusAluguer.VENCENDO, StatusAluguer.RENOVADO}
@@ -47,6 +50,15 @@ MAIN_MENU = (
     "0️⃣ ❌ Sair\n\n"
     "Digite o numero da opcao desejada."
 )
+# Menu v2.4: cinco caminhos restritos, convertidos em lista interativa pelo cliente.
+MAIN_MENU = (
+    "Menu principal - OLT Entulhos\n\n"
+    "1. Novo pedido\n"
+    "2. Entrega de contentor\n"
+    "3. Recolha de contentor\n"
+    "4. Confirmar Despejo no Vazadouro\n"
+    "5. Resumo dos contentores"
+)
 CANCELLED_MENU_MESSAGE = "Operacao cancelada. Nenhuma alteracao foi salva.\n\n" + MAIN_MENU
 
 
@@ -59,6 +71,8 @@ class WhatsappRouterAgent:
         self.renovacao_agent = RenovacaoAgent(db)
         self.contentor_agent = ContentorAgent(db)
         self.recolha_agent = RecolhaAgent(db)
+        self.pedido_v24_agent = PedidoV24Agent(db)
+        self.pedido_service = PedidoService(db)
         self.aluguer_service = AluguerService(db)
         self.contentor_service = ContentorService(db)
         self.operador_service = OperadorService(db)
@@ -98,6 +112,28 @@ class WhatsappRouterAgent:
                 self.db.commit()
                 return self.aluguer_agent.start(conversa)
             return "Opcao invalida. Responda 1 para continuar ou 2 para recomecar."
+
+        if conversa.estado_atual.startswith(PedidoV24Agent.PREFIX):
+            return self.pedido_v24_agent.handle(conversa, message)
+
+        if text in {"novo pedido", "cadastrar pedido"}:
+            if not self._is_authorized(message.telefone):
+                return "Telefone não autorizado."
+            if not self._can_create_pedido(message.telefone):
+                return "Seu perfil de motorista não possui permissão para cadastrar pedidos."
+            return self.pedido_v24_agent.start_cadastro(conversa)
+        if text in {"confirmar entrega de contentor", "confirmar entrega do lote"}:
+            if not self._is_authorized(message.telefone):
+                return "Telefone não autorizado."
+            return self.pedido_v24_agent.start_entrega(conversa)
+        if text == "confirmar recolha de contentor":
+            if not self._is_authorized(message.telefone):
+                return "Telefone não autorizado."
+            return self.pedido_v24_agent.start_recolha(conversa)
+        if text in {"confirmar despejo no vazadouro", "confirmar despejo"}:
+            if not self._is_authorized(message.telefone):
+                return "Telefone não autorizado."
+            return self.pedido_v24_agent.start_despejo(conversa)
 
         if conversa.estado_atual in AluguerAgent.ACTIVE_STATES and self._is_expired(conversa):
             context = dict(conversa.contexto_json or {})
@@ -192,7 +228,9 @@ class WhatsappRouterAgent:
 
     def _handle_operational_command(self, command: str, telefone: str | None = None) -> str:
         if command == "resumo":
-            return self._resumo_operacional(self.operador_service.obter_perfil(telefone) or PerfilOperador.FUNCIONARIO)
+            perfil = self.operador_service.obter_perfil(telefone) or PerfilOperador.FUNCIONARIO
+            legacy = self._resumo_operacional(perfil)
+            return legacy + "\n\n" + self._pendencias_v24(mostrar_financeiro=perfil == PerfilOperador.GESTOR)
         if command == "lista":
             return self._lista()
         if command == "disponiveis":
@@ -204,6 +242,34 @@ class WhatsappRouterAgent:
         if command == "atrasados":
             return self._atrasados()
         return "Comando nao reconhecido. Envie 'novo' para registar um aluguer."
+
+    def _pendencias_v24(self, mostrar_financeiro: bool = True) -> str:
+        itens = self.pedido_service.pendencias()
+        linhas = [
+            "PENDÊNCIAS OPERACIONAIS CRÍTICAS — V2.4",
+        ]
+        if mostrar_financeiro:
+            total = sum(Decimal(str(p.valor_global)) for p in itens["financeiras"])
+            linhas.extend(["", f"Financeiras: {len(itens['financeiras'])} pedido(s) — total € {total:.2f}"])
+            linhas.extend(
+                f"• #{p.id} {p.nome_cliente}: € {Decimal(str(p.valor_global)):.2f}"
+                for p in itens["financeiras"]
+            )
+        linhas.append("")
+        linhas.append(f"Cargas erradas: {len(itens['cargas'])}")
+        linhas.extend(
+            f"• {c.pedido.nome_cliente} — Contentor {c.numero_adesivo_contentor or c.id}: "
+            f"{c.relato_carga} | resolver carga {c.id}"
+            for c in itens["cargas"]
+        )
+        linhas.append("")
+        linhas.append(f"Avarias: {len(itens['avarias'])}")
+        linhas.extend(
+            f"• {c.pedido.nome_cliente} — Contentor {c.numero_adesivo_contentor or c.id}: "
+            f"{c.relato_avaria} | resolver avaria {c.id}"
+            for c in itens["avarias"]
+        )
+        return "\n".join(linhas)
 
     def _resumo_operacional(self, perfil: PerfilOperador = PerfilOperador.GESTOR) -> str:
         contentores = self.contentor_service.listar_contentores()
@@ -417,6 +483,13 @@ class WhatsappRouterAgent:
             return "Informe o ID do aluguer. Ex: resolver carga 12"
         aluguer_id = int(raw_id)
         try:
+            contentor = self.db.get(PedidoContentor, aluguer_id)
+            if contentor and (
+                (tipo == "carga" and contentor.status_resolucao_carga == StatusResolucaoPedido.PENDENTE.value)
+                or (tipo == "avaria" and contentor.status_resolucao_avaria == StatusResolucaoPedido.PENDENTE.value)
+            ):
+                self.pedido_service.resolver(tipo, aluguer_id)
+                return f"Pendência de {tipo} do contentor #{aluguer_id} resolvida."
             if tipo == "carga":
                 self.aluguer_service.resolver_pendencia_carga(aluguer_id, telefone)
                 return f"Pendencia de carga do aluguer #{aluguer_id} resolvida."
@@ -554,7 +627,7 @@ class WhatsappRouterAgent:
                 "Ola, sou o Robo de Gestao de Contentores da OLT. O que vamos fazer agora?\n\n"
                 "1. Confirmar entrega de contentor\n"
                 "2. Confirmar recolha de contentor\n"
-                "Digite o numero da opcao desejada."
+                "3. Confirmar Despejo no Vazadouro"
             )
         return (
             MAIN_MENU
