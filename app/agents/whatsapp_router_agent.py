@@ -19,7 +19,15 @@ from app.models.aluguer import AluguerContentor, StatusAluguer, StatusEntrega
 from app.models.conversa import ConversaWhatsApp
 from app.models.contentor import StatusContentor
 from app.models.operador import PerfilOperador
-from app.models.pedido import PedidoContentor, StatusResolucaoPedido
+from app.models.pedido import (
+    Pedido,
+    PedidoContentor,
+    StatusEntregaPedido,
+    StatusPagamento,
+    StatusRecolhaPedido,
+    StatusResolucaoPedido,
+    TipoEquipamentoPedido,
+)
 from app.services.aluguer_service import AluguerService
 from app.services.contentor_service import ContentorService
 from app.services.operador_service import OperadorService
@@ -256,8 +264,8 @@ class WhatsappRouterAgent:
     def _handle_operational_command(self, command: str, telefone: str | None = None) -> str:
         if command == "resumo":
             perfil = self.operador_service.obter_perfil(telefone) or PerfilOperador.FUNCIONARIO
-            legacy = self._resumo_operacional(perfil)
-            return legacy + "\n\n" + self._pendencias_v24(mostrar_financeiro=perfil == PerfilOperador.GESTOR)
+            self._queue_initial_menu(telefone or "")
+            return self._painel_v32(perfil)
         if command == "lista":
             return self._lista()
         if command == "disponiveis":
@@ -269,6 +277,200 @@ class WhatsappRouterAgent:
         if command == "atrasados":
             return self._atrasados()
         return "Comando nao reconhecido. Envie 'novo' para registar um aluguer."
+
+    def _painel_v32(self, perfil: PerfilOperador) -> str:
+        today = self._local_date(utcnow())
+        tomorrow = today + timedelta(days=1)
+        pedidos = self._pedidos_v32()
+        linhas = [
+            "PAINEL DE CONTROLE OPERACIONAL OLT",
+            f"Data: {today:%d/%m/%Y}",
+        ]
+        if perfil == PerfilOperador.GESTOR:
+            linhas.extend(
+                [
+                    "",
+                    "1. VENCEM AMANHA (ACAO COMERCIAL - EXCLUSIVO GESTOR - APENAS CONTENTORES):",
+                    self._painel_v32_vencem_amanha(pedidos, today),
+                ]
+            )
+        linhas.extend(
+            [
+                "",
+                "2. RECOLHER HOJE (URGENTE):",
+                self._painel_v32_recolhas(pedidos, today, "hoje"),
+                "",
+                "3. RECOLHER AMANHA (PLANEAMENTO):",
+                self._painel_v32_recolhas(pedidos, tomorrow, "amanha"),
+                "",
+                "4. PENDENCIAS ATIVAS:",
+                self._painel_v32_pendencias(perfil),
+            ]
+        )
+        if perfil == PerfilOperador.GESTOR:
+            linhas.extend(
+                [
+                    "",
+                    "5. RESUMO FINANCEIRO DO MES (EXCLUSIVO GESTOR):",
+                    self._painel_v32_financeiro(pedidos, today),
+                ]
+            )
+        return "\n".join(linhas)
+
+    def _pedidos_v32(self) -> list[Pedido]:
+        return (
+            self.db.query(Pedido)
+            .order_by(Pedido.data_planejada, Pedido.id)
+            .all()
+        )
+
+    def _painel_v32_vencem_amanha(self, pedidos: list[Pedido], today) -> str:
+        linhas = []
+        for pedido in pedidos:
+            contentores = [
+                item for item in pedido.contentores
+                if self._is_contentor_para_recolha(item)
+                and item.entrega_data_hora
+                and self._local_date(item.entrega_data_hora) == today - timedelta(days=4)
+            ]
+            if not contentores:
+                continue
+            link = f" | Renovar: {whatsapp_link(pedido.telefone_cliente)}" if pedido.telefone_cliente else ""
+            linhas.append(
+                f"- {pedido.nome_cliente}: {len(contentores)} contentor(es), "
+                f"valor total {self._money(pedido.valor_global)}{link}"
+            )
+        return "\n".join(linhas) if linhas else "Nenhum contentor vencendo amanha."
+
+    def _painel_v32_recolhas(self, pedidos: list[Pedido], target_date, label: str) -> str:
+        linhas = []
+        for pedido in pedidos:
+            contentores = [
+                item for item in pedido.contentores
+                if self._is_contentor_para_recolha(item)
+                and item.entrega_data_hora
+                and (
+                    self._local_date(item.entrega_data_hora) <= target_date - timedelta(days=5)
+                    if label == "hoje"
+                    else self._local_date(item.entrega_data_hora) == target_date - timedelta(days=5)
+                )
+            ]
+            if contentores:
+                numeros = ", ".join(
+                    item.numero_adesivo_contentor or f"#{item.id}"
+                    for item in sorted(contentores, key=lambda item: item.numero_adesivo_contentor or str(item.id))
+                )
+                linhas.append(f"- Contentores | {pedido.nome_cliente}: {numeros}{self._rota_gps(pedido, contentores[0])}")
+            carrinhas = [
+                item for item in pedido.contentores
+                if self._is_carrinha_para_recolha(item)
+                and self._local_date(pedido.data_planejada) == target_date
+            ]
+            for carrinha in carrinhas:
+                mao_obra = " • ⚠️ Com Pessoal" if carrinha.precisa_mao_de_obra else ""
+                linhas.append(
+                    f"- Carrinha | {pedido.nome_cliente}: horario {carrinha.horario_agendado or 'sem horario'}"
+                    f"{mao_obra}{self._rota_gps(pedido, carrinha)}"
+                )
+        if linhas:
+            return "\n".join(linhas)
+        return "Nenhum item para recolher hoje." if label == "hoje" else "Nenhum item para recolher amanha."
+
+    def _painel_v32_pendencias(self, perfil: PerfilOperador) -> str:
+        itens = self.pedido_service.pendencias()
+        linhas = []
+        if perfil == PerfilOperador.GESTOR:
+            if itens["financeiras"]:
+                linhas.append("Pagamentos pendentes:")
+                for pedido in itens["financeiras"]:
+                    link = f" | Cobrar: {whatsapp_link(pedido.telefone_cliente)}" if pedido.telefone_cliente else ""
+                    linhas.append(f"- #{pedido.id} {pedido.nome_cliente}: {self._money(pedido.valor_global)}{link}")
+            if itens["cargas"]:
+                linhas.append("Divergencias de residuo:")
+                for item in itens["cargas"]:
+                    linhas.append(
+                        f"- {self._painel_v32_equipamento(item)} | {item.pedido.nome_cliente}: "
+                        f"contratado {item.residuo_contratado}; vazadouro {item.residuo_efetivo_vazadouro or 'nao informado'} "
+                        f"| resolver carga {item.id}"
+                    )
+        if itens["avarias"]:
+            linhas.append("Avarias em equipamentos:")
+            for item in itens["avarias"]:
+                linhas.append(
+                    f"- {self._painel_v32_equipamento(item)} | {item.pedido.nome_cliente}: "
+                    f"{item.relato_avaria or 'sem relato'} | resolver avaria {item.id}"
+                )
+        return "\n".join(linhas) if linhas else "Nenhuma pendencia ativa."
+
+    def _painel_v32_financeiro(self, pedidos: list[Pedido], today) -> str:
+        totais = {
+            "contentores_pago": Decimal("0"),
+            "contentores_pendente": Decimal("0"),
+            "carrinhas_pago": Decimal("0"),
+            "carrinhas_pendente": Decimal("0"),
+        }
+        for pedido in pedidos:
+            if self._local_date(pedido.data_planejada).year != today.year or self._local_date(pedido.data_planejada).month != today.month:
+                continue
+            contentores = sum(1 for item in pedido.contentores if item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value)
+            carrinhas = sum(1 for item in pedido.contentores if item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value)
+            total_itens = contentores + carrinhas
+            if not total_itens:
+                continue
+            valor = Decimal(str(pedido.valor_global or 0))
+            # Pedido misto divide o valor proporcionalmente para nao duplicar receita por equipamento.
+            valor_contentores = valor * Decimal(contentores) / Decimal(total_itens)
+            valor_carrinhas = valor * Decimal(carrinhas) / Decimal(total_itens)
+            status = "pago" if pedido.status_pagamento == StatusPagamento.PAGO.value else "pendente"
+            totais[f"contentores_{status}"] += valor_contentores
+            totais[f"carrinhas_{status}"] += valor_carrinhas
+        faturado = totais["contentores_pago"] + totais["carrinhas_pago"]
+        receber = totais["contentores_pendente"] + totais["carrinhas_pendente"]
+        return "\n".join(
+            [
+                f"- Receita de Contentores ja paga: {self._money(totais['contentores_pago'])}",
+                f"- Receita de Contentores pendente: {self._money(totais['contentores_pendente'])}",
+                f"- Receita de Carrinhas ja paga: {self._money(totais['carrinhas_pago'])}",
+                f"- Receita de Carrinhas pendente: {self._money(totais['carrinhas_pendente'])}",
+                f"- Faturado Global: {self._money(faturado)}",
+                f"- A receber Global: {self._money(receber)}",
+                f"- Total projetado do mes: {self._money(faturado + receber)}",
+            ]
+        )
+
+    def _is_contentor_para_recolha(self, item: PedidoContentor) -> bool:
+        return (
+            item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+            and item.status_entrega == StatusEntregaPedido.ENTREGUE.value
+            and item.status_recolha == StatusRecolhaPedido.PENDENTE.value
+        )
+
+    def _is_carrinha_para_recolha(self, item: PedidoContentor) -> bool:
+        return (
+            item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+            and item.status_entrega == StatusEntregaPedido.ENTREGUE.value
+            and item.status_recolha == StatusRecolhaPedido.PENDENTE.value
+        )
+
+    def _painel_v32_equipamento(self, item: PedidoContentor) -> str:
+        if item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:
+            detalhe = (
+                item.numero_adesivo_contentor
+                if item.numero_adesivo_contentor and item.numero_adesivo_contentor != "0"
+                else item.horario_agendado or f"#{item.id}"
+            )
+            return f"Carrinha {detalhe}"
+        return f"Contentor {item.numero_adesivo_contentor or item.id}"
+
+    def _rota_gps(self, pedido: Pedido, item: PedidoContentor) -> str:
+        latitude = item.entrega_latitude if item.entrega_latitude is not None else pedido.endereco_latitude
+        longitude = item.entrega_longitude if item.entrega_longitude is not None else pedido.endereco_longitude
+        if latitude is None or longitude is None:
+            return ""
+        return f" | Rota: https://www.google.com/maps?q={latitude},{longitude}"
+
+    def _money(self, value) -> str:
+        return f"EUR {Decimal(str(value or 0)):.2f}"
 
     def _pendencias_v24(self, mostrar_financeiro: bool = True) -> str:
         itens = self.pedido_service.pendencias()

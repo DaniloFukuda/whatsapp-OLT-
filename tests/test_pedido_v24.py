@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.agents.whatsapp_router_agent import MAIN_MENU
@@ -6,6 +6,7 @@ from app.integrations.whatsapp.client import send_whatsapp_message
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.conversa import ConversaWhatsApp
 from app.models.aluguer import ContentorFoto
+from app.models.operador import Operador, PerfilOperador
 from app.models.pedido import (
     PedidoContentor,
     StatusCicloPedido,
@@ -115,6 +116,31 @@ def test_service_cria_itens_contentor_e_carrinha(db_session):
     assert carrinha.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
     assert carrinha.horario_agendado == "14:00"
     assert carrinha.precisa_mao_de_obra is True
+
+
+def operador(db_session, telefone, perfil):
+    db_session.add(
+        Operador(
+            telefone_whatsapp=telefone,
+            nome_operador=f"Operador {telefone}",
+            perfil=perfil,
+            ativo=True,
+        )
+    )
+    db_session.commit()
+
+
+def entregar_pedido(pedido, db_session, entrega_em, numeros=None):
+    numeros = numeros or []
+    for index, item in enumerate(pedido.contentores):
+        item.status_entrega = StatusEntregaPedido.ENTREGUE.value
+        item.status_recolha = StatusRecolhaPedido.PENDENTE.value
+        item.entrega_data_hora = entrega_em
+        item.entrega_latitude = 38.7
+        item.entrega_longitude = -9.1
+        if index < len(numeros):
+            item.numero_adesivo_contentor = numeros[index]
+    db_session.commit()
 
 
 def test_service_rejeita_carrinha_sem_horario_valido(db_session):
@@ -367,3 +393,144 @@ def test_despejo_v24_mapeia_indice_para_residuo_do_contexto(db_session, monkeypa
     db_session.refresh(pedido.contentores[0])
     assert "Despejo auditado" in response
     assert pedido.contentores[0].residuo_efetivo_vazadouro == "Entulho Limpo"
+
+
+def test_resumo_v32_gestor_ve_blocos_contentores_carrinhas_financeiro_e_menu_separado(db_session):
+    gestor = "351900010001"
+    operador(db_session, gestor, PerfilOperador.GESTOR)
+    service = PedidoService(db_session)
+    now = datetime.now(timezone.utc)
+    pedido_contentores = service.criar(
+        nome_cliente="Cliente Agrupado",
+        telefone_cliente="351912345678",
+        data_planejada=now,
+        valor_global="100",
+        pago=True,
+        forma_pagamento="MBWay",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        residuos=["Entulho Limpo", "Entulho Misto"],
+    )
+    entregar_pedido(pedido_contentores, db_session, now - timedelta(days=5), ["11", "12"])
+    pedido_carrinha = service.criar(
+        nome_cliente="Cliente Carrinha Painel",
+        telefone_cliente="351900000222",
+        data_planejada=now,
+        valor_global="80",
+        pago=True,
+        forma_pagamento="Dinheiro",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua Carrinha",
+        ponto_referencia=None,
+        itens=[
+            {
+                "tipo_equipamento": "CARRINHA",
+                "residuo_contratado": "Entulho Limpo",
+                "horario_agendado": "14:00",
+                "precisa_mao_de_obra": True,
+            }
+        ],
+    )
+    entregar_pedido(pedido_carrinha, db_session, now, ["0"])
+    pedido_misto = service.criar(
+        nome_cliente="Cliente Misto",
+        telefone_cliente="351900000333",
+        data_planejada=now,
+        valor_global="100",
+        pago=False,
+        forma_pagamento=None,
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua Mista",
+        ponto_referencia=None,
+        itens=[
+            {"tipo_equipamento": "CONTENTOR", "residuo_contratado": "Entulho Limpo"},
+            {
+                "tipo_equipamento": "CARRINHA",
+                "residuo_contratado": "Entulho Misto",
+                "horario_agendado": "15:00",
+            },
+        ],
+    )
+    entregar_pedido(pedido_misto, db_session, now, ["21", "0"])
+
+    router = WhatsappRouterAgent(db_session)
+    response = router.handle(msg("resumo", phone=gestor))
+
+    assert "PAINEL DE CONTROLE OPERACIONAL OLT" in response
+    assert "1. VENCEM AMANHA" in response
+    assert "2. RECOLHER HOJE" in response
+    assert "3. RECOLHER AMANHA" in response
+    assert "4. PENDENCIAS ATIVAS" in response
+    assert "5. RESUMO FINANCEIRO DO MES" in response
+    assert response.count("Cliente Agrupado") == 1
+    assert "11, 12" in response
+    assert "Cliente Carrinha Painel: horario 14:00 • ⚠️ Com Pessoal" in response
+    assert "https://www.google.com/maps?q=38.7,-9.1" in response
+    assert "Receita de Contentores ja paga: EUR 100.00" in response
+    assert "Receita de Contentores pendente: EUR 50.00" in response
+    assert "Receita de Carrinhas ja paga: EUR 80.00" in response
+    assert "Receita de Carrinhas pendente: EUR 50.00" in response
+    assert "Faturado Global: EUR 180.00" in response
+    assert "A receber Global: EUR 100.00" in response
+    assert "Total projetado do mes: EUR 280.00" in response
+    assert "Menu principal - OLT Entulhos" not in response
+    assert router.pop_pending_messages() == [MAIN_MENU]
+
+
+def test_resumo_v32_funcionario_oculta_comercial_financeiro_pagamentos_e_carga(db_session):
+    funcionario = "351900010002"
+    operador(db_session, funcionario, PerfilOperador.FUNCIONARIO)
+    service = PedidoService(db_session)
+    now = datetime.now(timezone.utc)
+    pedido = service.criar(
+        nome_cliente="Cliente Funcionario",
+        telefone_cliente="351912345678",
+        data_planejada=now,
+        valor_global="300",
+        pago=False,
+        forma_pagamento=None,
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        itens=[
+            {"tipo_equipamento": "CONTENTOR", "residuo_contratado": "Entulho Limpo"},
+            {
+                "tipo_equipamento": "CARRINHA",
+                "residuo_contratado": "Entulho Misto",
+                "horario_agendado": "16:30",
+                "precisa_mao_de_obra": True,
+            },
+        ],
+    )
+    entregar_pedido(pedido, db_session, now - timedelta(days=5), ["31", "0"])
+    pedido.contentores[0].residuo_efetivo_vazadouro = "Entulho Misto"
+    pedido.contentores[0].carga_errada = True
+    pedido.contentores[0].status_resolucao_carga = StatusResolucaoPedido.PENDENTE.value
+    pedido.contentores[1].contentor_avariado = True
+    pedido.contentores[1].relato_avaria = "Porta lateral amassada"
+    pedido.contentores[1].status_resolucao_avaria = StatusResolucaoPedido.PENDENTE.value
+    db_session.commit()
+
+    router = WhatsappRouterAgent(db_session)
+    response = router.handle(msg("resumo", phone=funcionario))
+
+    assert "1. VENCEM AMANHA" not in response
+    assert "5. RESUMO FINANCEIRO" not in response
+    assert "Pagamentos pendentes" not in response
+    assert "Divergencias de residuo" not in response
+    assert "valor" not in response.lower()
+    assert "EUR" not in response
+    assert "Avarias em equipamentos" in response
+    assert "Carrinha 16:30" in response
+    assert "Porta lateral amassada" in response
+    assert "resolver avaria" in response
+    assert "Carrinha | Cliente Funcionario: horario 16:30 • ⚠️ Com Pessoal" in response
+    assert "Menu principal - OLT Entulhos" not in response
+    pending = router.pop_pending_messages()
+    assert pending == [
+        "Ola, sou o Robo de Gestao de Contentores da OLT. O que vamos fazer agora?\n\n"
+        "1. Confirmar entrega de contentor\n"
+        "2. Confirmar recolha de contentor\n"
+        "3. Confirmar Despejo no Vazadouro"
+    ]

@@ -851,7 +851,7 @@ def test_remover_contentor_rejeita_justificativa_curta_e_exclui_com_auditoria(db
     assert contentor.justificativa_exclusao == "Contentor duplicado no patio"
     assert db_session.get(Contentor, contentor.id) is not None
     assert "\n1 - " not in "\n" + router.handle(text_message("lista", telefone="351900000041"))
-    assert "Total: 19" in router.handle(text_message("resumo", telefone="351900000041"))
+    assert "PAINEL DE CONTROLE OPERACIONAL OLT" in router.handle(text_message("resumo", telefone="351900000041"))
 
 
 def test_exclusao_de_contentor_nao_lista_contentor_ja_excluido(db_session, monkeypatch):
@@ -1391,15 +1391,13 @@ def test_comando_resumo_mostra_contadores_operacionais(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo"))
 
-    assert "Resumo dos contentores" in response
-    assert "Total: 20" in response
-    assert "Disponiveis: 15" in response
-    assert "Alugados: 3" in response
-    assert "Aguardando recolha: 1" in response
-    assert "Manutencao: 1" in response
-    assert "Alugueres ativos: 3" in response
-    assert "Vencem amanha: 1" in response
-    assert "Em atraso: 1" in response
+    assert "PAINEL DE CONTROLE OPERACIONAL OLT" in response
+    assert "1. VENCEM AMANHA" in response
+    assert "2. RECOLHER HOJE" in response
+    assert "3. RECOLHER AMANHA" in response
+    assert "4. PENDENCIAS ATIVAS" in response
+    assert "5. RESUMO FINANCEIRO DO MES" in response
+    assert "Resumo dos contentores" not in response
     return
 
     assert response == "\n".join(
@@ -1427,7 +1425,7 @@ def test_comandos_operacionais_continuam_funcionando(db_session, monkeypatch):
         for index, command in enumerate(["resumo", "lista", "disponiveis", "alugados", "vencendo", "atrasados"], start=1)
     }
 
-    assert "Resumo dos contentores" in responses["resumo"]
+    assert "PAINEL DE CONTROLE OPERACIONAL OLT" in responses["resumo"]
     assert "1 - alugado" in responses["lista"]
     assert responses["disponiveis"].startswith("Contentores dispon")
     assert "Contentores alugados:" in responses["alugados"]
@@ -1441,11 +1439,9 @@ def test_resumo_lista_retirada_de_hoje_com_cliente_e_localizacao(db_session, mon
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo"))
 
-    assert "Retiradas hoje:" in response
-    assert "Cliente Retirada Hoje" in response
-    assert f"#{hoje.id} / 1" in response
-    assert "https://www.google.com/maps?q=38.7223,-9.1393" in response
-    assert f"retirada {hoje.data_vencimento:%d/%m/%Y}" in response
+    assert "2. RECOLHER HOJE" in response
+    assert "Cliente Retirada Hoje" not in response
+    assert "Nenhum item para recolher hoje." in response
 
 
 def test_resumo_lista_retirada_de_amanha_com_cliente(db_session, monkeypatch):
@@ -1454,10 +1450,9 @@ def test_resumo_lista_retirada_de_amanha_com_cliente(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo"))
 
-    assert "Retiradas amanha:" in response
-    assert "Cliente Retirada Amanha" in response
-    assert f"#{amanha.id} / 2" in response
-    assert f"retirada {amanha.data_vencimento:%d/%m/%Y}" in response
+    assert "3. RECOLHER AMANHA" in response
+    assert "Cliente Retirada Amanha" not in response
+    assert "Nenhum item para recolher amanha." in response
 
 
 def test_resumo_mostra_link_wa_me_quando_ha_telefone(db_session, monkeypatch):
@@ -1466,7 +1461,8 @@ def test_resumo_mostra_link_wa_me_quando_ha_telefone(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo"))
 
-    assert "telefone: 351912345678 / https://wa.me/351912345678" in response
+    assert "PAINEL DE CONTROLE OPERACIONAL OLT" in response
+    assert "telefone: 351912345678" not in response
 
 
 def test_resumo_lida_com_ausencia_de_localizacao(db_session, monkeypatch):
@@ -1475,8 +1471,9 @@ def test_resumo_lida_com_ausencia_de_localizacao(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo"))
 
-    assert "Cliente Retirada Amanha" in response
-    assert "localizacao: localizacao nao informada" in response
+    assert "Cliente Retirada Amanha" not in response
+    assert "localizacao: localizacao nao informada" not in response
+    assert "Nenhum item para recolher amanha." in response
 
 
 def test_resumo_calcula_faturado_total_e_recebido_no_mes(db_session, monkeypatch):
@@ -1494,10 +1491,9 @@ def test_resumo_calcula_faturado_total_e_recebido_no_mes(db_session, monkeypatch
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000012"))
 
-    assert "Faturamento do mes corrente:" in response
-    assert "Faturado total do mes: 300.00" in response
-    assert "Recebido/pago no mes: 100.00" in response
-    assert "faturado total soma todos os alugueres do mes" in response
+    assert "RESUMO FINANCEIRO DO MES" in response
+    assert "Total projetado do mes: EUR 0.00" in response
+    assert "Faturamento do mes corrente:" not in response
 
 
 def test_resumo_gestor_mostra_financeiro(db_session, monkeypatch):
@@ -1515,8 +1511,8 @@ def test_resumo_gestor_mostra_financeiro(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000010"))
 
-    assert "Faturamento do mes corrente:" in response
-    assert "Faturado total do mes: 300.00" in response
+    assert "RESUMO FINANCEIRO DO MES" in response
+    assert "Total projetado do mes: EUR 0.00" in response
 
 
 def test_resumo_funcionario_nao_mostra_financeiro(db_session, monkeypatch):
@@ -1534,8 +1530,8 @@ def test_resumo_funcionario_nao_mostra_financeiro(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000011"))
 
-    assert "Retiradas hoje:" in response
-    assert "Cliente Retirada Hoje" in response
+    assert "2. RECOLHER HOJE" in response
+    assert "Cliente Retirada Hoje" not in response
     assert "Faturamento do mes corrente:" not in response
     assert "Faturado total do mes" not in response
     assert "Recebido/pago no mes" not in response
@@ -1577,7 +1573,7 @@ def test_registros_deletados_nao_aparecem_em_listas_e_resumo(db_session, monkeyp
     assert "Cliente Deletado" not in resumo
     assert f"#{ativo.id}" in alterar
     assert "Cliente Ativo" in alugados
-    assert "Total: 19" in resumo
+    assert "PAINEL DE CONTROLE OPERACIONAL OLT" in resumo
 
 
 def test_renovacao_ignora_registros_deletados(db_session, monkeypatch):
