@@ -35,4 +35,6 @@ def receive_whatsapp_webhook(
     for message in parse_whatsapp_payload(payload):
         response = router_agent.handle(message)
         sent_messages.append(send_whatsapp_message(message.telefone, response, force_mock=force_mock))
+        for pending in router_agent.pop_pending_messages():
+            sent_messages.append(send_whatsapp_message(message.telefone, pending, force_mock=force_mock))
     return {"status": "ok", "messages": sent_messages}

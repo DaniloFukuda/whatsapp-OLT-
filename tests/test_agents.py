@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 from app.agents.aluguer_agent import AluguerAgent
 from app.agents.recolha_agent import RecolhaAgent
-from app.agents.whatsapp_router_agent import CANCELLED_MENU_MESSAGE, WhatsappRouterAgent
+from app.agents.whatsapp_router_agent import CANCELLED_MENU_MESSAGE, MAIN_MENU, WhatsappRouterAgent
 from app.core.config import get_settings
 from app.core.phone import normalize_phone, normalize_portugal_phone, whatsapp_link
 from app.core.time import utcnow
@@ -738,7 +738,8 @@ def test_exclusao_com_opcao_2_cancela_sem_apagar(db_session, monkeypatch):
     response = router.handle(text_message("2"))
 
     assert "Exclusao cancelada. Nenhum registro foi apagado." in response
-    assert "Menu principal - OLT Entulhos" in response
+    assert "Menu principal - OLT Entulhos" not in response
+    assert router.pop_pending_messages() == [MAIN_MENU]
     assert AluguerService(db_session)._get_or_raise(aluguer.id).id == aluguer.id
 
 
@@ -798,7 +799,8 @@ def test_exclusao_com_confirmacao_clara_exclui(db_session, monkeypatch):
     assert pedido_justificativa == "Informe a justificativa da exclusao com pelo menos 10 caracteres."
     assert curta == "A justificativa deve ter pelo menos 10 caracteres."
     assert f"Registro #{aluguer_id} excluido." in response
-    assert "Menu principal - OLT Entulhos" in response
+    assert "Menu principal - OLT Entulhos" not in response
+    assert router.pop_pending_messages() == [MAIN_MENU]
     assert db_session.get(type(aluguer), aluguer_id) is not None
     assert aluguer.is_deleted is True
     assert aluguer.justificativa_exclusao == "Cliente pediu cancelamento"
@@ -842,7 +844,8 @@ def test_remover_contentor_rejeita_justificativa_curta_e_exclui_com_auditoria(db
     assert pedido_justificativa == "Informe a justificativa da exclusao com pelo menos 10 caracteres."
     assert curta == "A justificativa deve ter pelo menos 10 caracteres."
     assert "Contentor 1 excluido com seguranca." in response
-    assert "Menu principal - OLT Entulhos" in response
+    assert "Menu principal - OLT Entulhos" not in response
+    assert router.pop_pending_messages() == [MAIN_MENU]
     assert contentor.is_deleted is True
     assert contentor.excluido_por_operador == "351900000041"
     assert contentor.justificativa_exclusao == "Contentor duplicado no patio"
@@ -893,7 +896,8 @@ def test_alteracao_status_contentor_confirma_e_grava_operador(db_session, monkey
     assert "Status atual: disponivel" in status_prompt
     assert "Novo status: manutencao" in confirmacao
     assert "Status do contentor 1 alterado para manutencao." in response
-    assert "Menu principal - OLT Entulhos" in response
+    assert "Menu principal - OLT Entulhos" not in response
+    assert router.pop_pending_messages() == [MAIN_MENU]
     assert contentor.status == StatusContentor.MANUTENCAO
     assert contentor.alterado_por_operador == "351900000050"
 

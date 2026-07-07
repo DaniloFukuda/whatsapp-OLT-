@@ -134,23 +134,54 @@ class PedidoService:
         latitude: float,
         longitude: float,
         ponto_referencia: str | None,
+        entregas: list[dict] | None = None,
     ) -> Pedido:
         pedido = self.get(pedido_id)
         if not pedido:
             raise ValueError("Pedido não encontrado.")
         pendentes = [c for c in pedido.contentores if c.status_entrega == StatusEntregaPedido.PENDENTE.value]
-        if any(not c.numero_adesivo_contentor for c in pendentes):
+        entregas = entregas or []
+        entregas_por_id = {int(item["contentor_id"]): item for item in entregas if item.get("contentor_id")}
+        if entregas:
+            if {c.id for c in pendentes} != set(entregas_por_id):
+                raise ValueError("Todos os contentores precisam do numero do adesivo.")
+            adesivos = [str(item.get("numero_adesivo") or "").strip() for item in entregas_por_id.values()]
+            if any(not adesivo for adesivo in adesivos) or len(set(adesivos)) != len(adesivos):
+                raise ValueError("Todos os contentores precisam de adesivos validos e sem duplicidade.")
+            duplicado = (
+                self.db.query(PedidoContentor)
+                .filter(PedidoContentor.numero_adesivo_contentor.in_(adesivos))
+                .filter(PedidoContentor.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value)
+                .filter(~PedidoContentor.id.in_([c.id for c in pendentes]))
+                .first()
+            )
+            if duplicado:
+                raise ValueError("Um dos adesivos ja esta em um ciclo ativo.")
+        elif any(not c.numero_adesivo_contentor for c in pendentes):
             raise ValueError("Todos os contentores precisam do número do adesivo.")
         if ponto_referencia and len(ponto_referencia) > 50:
             raise ValueError("O ponto de referência deve ter no máximo 50 caracteres.")
         agora = utcnow()
         for contentor in pendentes:
+            entrega = entregas_por_id.get(contentor.id)
+            if entrega:
+                contentor.numero_adesivo_contentor = str(entrega["numero_adesivo"]).strip()
             contentor.status_entrega = StatusEntregaPedido.ENTREGUE.value
             contentor.entrega_feita_por = operador
             contentor.entrega_latitude = latitude
             contentor.entrega_longitude = longitude
             contentor.entrega_ponto_referencia = ponto_referencia
             contentor.entrega_data_hora = agora
+            for foto_url in (entrega or {}).get("fotos") or []:
+                self.db.add(
+                    ContentorFoto(
+                        pedido_contentor_id=contentor.id,
+                        url_midia=foto_url,
+                        tipo_foto=TipoFoto.ENTREGA.value,
+                        url_foto=foto_url,
+                        tipo=TipoFoto.ENTREGA.value.lower(),
+                    )
+                )
         self.db.commit()
         return pedido
 

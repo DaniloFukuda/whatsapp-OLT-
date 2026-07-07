@@ -59,6 +59,15 @@ MAIN_MENU = (
     "4. Confirmar Despejo no Vazadouro\n"
     "5. Resumo dos contentores"
 )
+MAIN_MENU = (
+    "🤖 Menu principal - OLT Entulhos\n\n"
+    "1. 🟢 Novo pedido\n"
+    "2. 🚛 Entrega de contentor\n"
+    "3. 📦 Recolha de contentor\n"
+    "4. ♻️ Confirmar Despejo no Vazadouro\n"
+    "5. 📊 Resumo dos contentores\n\n"
+    "Digite o numero da opcao desejada."
+)
 CANCELLED_MENU_MESSAGE = "Operacao cancelada. Nenhuma alteracao foi salva.\n\n" + MAIN_MENU
 
 
@@ -76,8 +85,10 @@ class WhatsappRouterAgent:
         self.aluguer_service = AluguerService(db)
         self.contentor_service = ContentorService(db)
         self.operador_service = OperadorService(db)
+        self._pending_messages: list[str] = []
 
     def handle(self, message: NormalizedWhatsAppMessage) -> str:
+        self._pending_messages = []
         conversa = self._get_or_create_conversa(message.telefone)
         text = (message.texto or "").strip().lower()
 
@@ -114,26 +125,12 @@ class WhatsappRouterAgent:
             return "Opcao invalida. Responda 1 para continuar ou 2 para recomecar."
 
         if conversa.estado_atual.startswith(PedidoV24Agent.PREFIX):
-            return self.pedido_v24_agent.handle(conversa, message)
-
-        if text in {"novo pedido", "cadastrar pedido"}:
-            if not self._is_authorized(message.telefone):
-                return "Telefone não autorizado."
-            if not self._can_create_pedido(message.telefone):
-                return "Seu perfil de motorista não possui permissão para cadastrar pedidos."
-            return self.pedido_v24_agent.start_cadastro(conversa)
-        if text in {"confirmar entrega de contentor", "confirmar entrega do lote"}:
-            if not self._is_authorized(message.telefone):
-                return "Telefone não autorizado."
-            return self.pedido_v24_agent.start_entrega(conversa)
-        if text == "confirmar recolha de contentor":
-            if not self._is_authorized(message.telefone):
-                return "Telefone não autorizado."
-            return self.pedido_v24_agent.start_recolha(conversa)
-        if text in {"confirmar despejo no vazadouro", "confirmar despejo"}:
-            if not self._is_authorized(message.telefone):
-                return "Telefone não autorizado."
-            return self.pedido_v24_agent.start_despejo(conversa)
+            return self._finalize_response(
+                self.pedido_v24_agent.handle(conversa, message),
+                conversa,
+                message.telefone,
+                append_menu_on_success=True,
+            )
 
         if conversa.estado_atual in AluguerAgent.ACTIVE_STATES and self._is_expired(conversa):
             context = dict(conversa.contexto_json or {})
@@ -152,17 +149,47 @@ class WhatsappRouterAgent:
             return self._handle_operational_command(text, message.telefone)
 
         if conversa.estado_atual in AluguerAgent.ACTIVE_STATES:
-            return self.aluguer_agent.handle(conversa, message)
+            return self._finalize_response(self.aluguer_agent.handle(conversa, message), conversa, message.telefone)
         if conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES:
-            return self.gestao_aluguer_agent.handle(conversa, message)
+            return self._finalize_response(self.gestao_aluguer_agent.handle(conversa, message), conversa, message.telefone)
         if conversa.estado_atual in EntregaAgent.ACTIVE_STATES:
-            return self.entrega_agent.handle(conversa, message)
+            return self._finalize_response(self.entrega_agent.handle(conversa, message), conversa, message.telefone)
         if conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES:
-            return self.renovacao_agent.handle(conversa, message)
+            return self._finalize_response(self.renovacao_agent.handle(conversa, message), conversa, message.telefone)
         if conversa.estado_atual in RecolhaAgent.ACTIVE_STATES:
-            return self.recolha_agent.handle(conversa, message)
+            return self._finalize_response(self.recolha_agent.handle(conversa, message), conversa, message.telefone)
         if conversa.estado_atual in ContentorAgent.ACTIVE_STATES:
-            return self.contentor_agent.handle(conversa, message)
+            return self._finalize_response(self.contentor_agent.handle(conversa, message), conversa, message.telefone)
+
+        if text == "5":
+            if not self._is_authorized(message.telefone):
+                return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
+            return self._handle_operational_command("resumo", message.telefone)
+
+        if text in {"1", "novo pedido", "cadastrar pedido"}:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nÃ£o autorizado."
+            if text == "1" and self._is_funcionario(message.telefone):
+                return self.entrega_agent.start(conversa)
+            if not self._can_create_pedido(message.telefone):
+                return "Seu perfil de motorista nÃ£o possui permissÃ£o para cadastrar pedidos."
+            return self.pedido_v24_agent.start_cadastro(conversa)
+        if text in {"2", "confirmar entrega de contentor", "confirmar entrega do lote"}:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nÃ£o autorizado."
+            if self.pedido_service.pedidos_pendentes_entrega():
+                return self.pedido_v24_agent.start_entrega(conversa)
+            return self.entrega_agent.start(conversa)
+        if text in {"3", "confirmar recolha de contentor"}:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nÃ£o autorizado."
+            if self.pedido_service.contentores_para_recolha():
+                return self.pedido_v24_agent.start_recolha(conversa)
+            return self.recolha_agent.start(conversa)
+        if text in {"4", "confirmar despejo no vazadouro", "confirmar despejo"}:
+            if not self._is_authorized(message.telefone):
+                return "Telefone nÃ£o autorizado."
+            return self.pedido_v24_agent.start_despejo(conversa)
 
         if text == "6":
             if not self._is_authorized(message.telefone):
@@ -578,7 +605,43 @@ class WhatsappRouterAgent:
             or conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES
             or conversa.estado_atual in RecolhaAgent.ACTIVE_STATES
             or conversa.estado_atual in ContentorAgent.ACTIVE_STATES
+            or conversa.estado_atual.startswith(PedidoV24Agent.PREFIX)
         )
+
+    def pop_pending_messages(self) -> list[str]:
+        messages = list(self._pending_messages)
+        self._pending_messages = []
+        return messages
+
+    def _finalize_response(
+        self,
+        response: str,
+        conversa: ConversaWhatsApp,
+        telefone: str,
+        append_menu_on_success: bool = False,
+    ) -> str:
+        response = self._detach_embedded_menu(response, telefone)
+        if append_menu_on_success and conversa.estado_atual == "idle" and response.lstrip().startswith("✅"):
+            self._queue_initial_menu(telefone)
+        return response
+
+    def _detach_embedded_menu(self, response: str, telefone: str) -> str:
+        markers = (
+            "🤖 Menu principal - OLT Entulhos",
+            "Menu principal - OLT Entulhos",
+            "ðŸ¤– Menu principal - OLT Entulhos",
+        )
+        for marker in markers:
+            index = response.find(marker)
+            if index > 0:
+                self._queue_initial_menu(telefone)
+                return response[:index].rstrip()
+        return response
+
+    def _queue_initial_menu(self, telefone: str) -> None:
+        menu = self._initial_menu(telefone)
+        if menu not in self._pending_messages:
+            self._pending_messages.append(menu)
 
     def _is_expired(self, conversa: ConversaWhatsApp) -> bool:
         context = conversa.contexto_json or {}
@@ -629,6 +692,4 @@ class WhatsappRouterAgent:
                 "2. Confirmar recolha de contentor\n"
                 "3. Confirmar Despejo no Vazadouro"
             )
-        return (
-            MAIN_MENU
-        )
+        return MAIN_MENU

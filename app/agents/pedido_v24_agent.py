@@ -198,29 +198,39 @@ class PedidoV24Agent:
             if not pedido:
                 return "Selecione um pedido da lista."
             pendentes = [c.id for c in pedido.contentores if c.status_entrega == "PENDENTE"]
-            ctx.update({"pedido_id": pedido.id, "contentores": pendentes, "indice": 0})
+            ctx.update({"pedido_id": pedido.id, "contentores": pendentes, "indice": 0, "entregas": []})
             return self._advance(conversa, "v24_entrega_adesivo", ctx, "Qual é o número do adesivo da caçamba descarregada agora?")
         if state == "v24_entrega_adesivo":
             number = raw.strip()
             if not re.fullmatch(r"\d{1,6}", number):
                 return "Informe somente o número visível no adesivo."
+            if number in [str(item.get("numero_adesivo")) for item in ctx.get("entregas") or []]:
+                return "Esse adesivo ja foi informado neste lote."
             duplicate = self.db.query(PedidoContentor).filter(
                 PedidoContentor.numero_adesivo_contentor == number,
                 PedidoContentor.status_ciclo == "EM_ANDAMENTO",
             ).first()
             if duplicate:
                 return "Esse adesivo já está em um ciclo ativo."
-            contentor = self.db.get(PedidoContentor, ctx["contentores"][ctx["indice"]])
-            contentor.numero_adesivo_contentor = number
-            self.db.commit()
-            ctx["fotos"] = 0
+            entregas = list(ctx.get("entregas") or [])
+            entregas.append(
+                {
+                    "contentor_id": ctx["contentores"][ctx["indice"]],
+                    "numero_adesivo": number,
+                    "fotos": [],
+                }
+            )
+            ctx["entregas"] = entregas
             return self._advance(conversa, "v24_entrega_foto", ctx, f"Envie a foto do Contentor {number} posicionado no local.")
         if state == "v24_entrega_foto":
             photo = self._photo(message)
             if not photo:
                 return "Envie uma imagem para continuar."
-            self.service.adicionar_foto(ctx["contentores"][ctx["indice"]], photo, TipoFoto.ENTREGA)
-            ctx["fotos"] += 1
+            entregas = list(ctx.get("entregas") or [])
+            entrega_atual = dict(entregas[-1])
+            entrega_atual["fotos"] = [*(entrega_atual.get("fotos") or []), photo]
+            entregas[-1] = entrega_atual
+            ctx["entregas"] = entregas
             return self._advance(
                 conversa, "v24_entrega_foto_acao", ctx,
                 "Foto guardada. O que deseja fazer?\n\n1. ➕ Outra Foto\n2. ➡️ Próximo Passo",
@@ -245,7 +255,12 @@ class PedidoV24Agent:
                 return "O ponto de referência deve ter no máximo 50 caracteres."
             ctx["referencia_entrega"] = None if choice == "nao" else raw
             pedido = self.service.confirmar_entrega_lote(
-                ctx["pedido_id"], conversa.telefone, ctx["latitude"], ctx["longitude"], ctx["referencia_entrega"]
+                ctx["pedido_id"],
+                conversa.telefone,
+                ctx["latitude"],
+                ctx["longitude"],
+                ctx["referencia_entrega"],
+                ctx.get("entregas") or [],
             )
             if pedido.status_pagamento == StatusPagamento.PENDENTE.value:
                 return self._advance(
@@ -339,8 +354,12 @@ class PedidoV24Agent:
                 return "Selecione Outra Foto ou Próximo Passo."
             return self._despejo_residuo_prompt(conversa, ctx)
         if state == "v24_despejo_residuo":
-            cotas = self.service.cotas_restantes(self.db.get(PedidoContentor, ctx["contentor_id"]).pedido_id)
-            residue = next((r for r in cotas if self._norm(r) == choice), None)
+            available = ctx.get("residuos_disponiveis") or []
+            residue = None
+            if choice.isdigit() and 1 <= int(choice) <= len(available):
+                residue = available[int(choice) - 1]
+            if not residue:
+                residue = next((r for r in available if self._norm(r) == choice), None)
             if not residue:
                 return "Selecione um tipo de resíduo com cota em aberto."
             self.service.confirmar_despejo(ctx["contentor_id"], residue)
@@ -371,6 +390,7 @@ class PedidoV24Agent:
                 f"O entulho está correto com o contratado ({available[0]})?\n\n"
                 "1. ✅ Sim, tudo certo\n2. 🚨 Não, está misturado/errado",
             )
+        ctx["residuos_disponiveis"] = available
         return self._advance(
             conversa, "v24_despejo_residuo", ctx,
             "Qual resíduo caiu no chão?\n\n"

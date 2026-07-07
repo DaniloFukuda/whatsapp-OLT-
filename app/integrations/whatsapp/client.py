@@ -19,6 +19,9 @@ OPTION_ID_PREFIX = "option_"
 
 
 def send_whatsapp_message(to: str, body: str, force_mock: bool = False) -> dict[str, Any]:
+    if _is_main_menu(body):
+        return send_text_message(to, body, force_mock=force_mock)
+
     options = _options_for_body(body)
     if 0 < len(options) <= MAX_BUTTON_OPTIONS:
         result = send_button_message(
@@ -304,6 +307,10 @@ def _body_without_numbered_options(body: str) -> str:
 def _normalize_button_text(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value or "")
     return "".join(char for char in normalized if not unicodedata.combining(char)).lower()
+
+
+def _is_main_menu(body: str) -> bool:
+    return "Menu principal - OLT Entulhos" in (body or "")
 
 
 def _should_mock(settings) -> bool:
