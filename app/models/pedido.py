@@ -39,6 +39,11 @@ class TipoFoto(StrEnum):
     DESPEJO = "DESPEJO"
 
 
+class TipoEquipamentoPedido(StrEnum):
+    CONTENTOR = "CONTENTOR"
+    CARRINHA = "CARRINHA"
+
+
 class Pedido(Base):
     __tablename__ = "pedidos"
 
@@ -74,6 +79,11 @@ class PedidoContentor(Base):
         ForeignKey("pedidos.id", ondelete="CASCADE"), nullable=False, index=True
     )
     numero_adesivo_contentor: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    tipo_equipamento: Mapped[str] = mapped_column(
+        String(20), default=TipoEquipamentoPedido.CONTENTOR.value, nullable=False
+    )
+    horario_agendado: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    precisa_mao_de_obra: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     residuo_contratado: Mapped[str] = mapped_column(String(80), nullable=False)
     residuo_efetivo_vazadouro: Mapped[str | None] = mapped_column(String(80), nullable=True)
     status_entrega: Mapped[str] = mapped_column(

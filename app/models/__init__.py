@@ -12,6 +12,7 @@ from app.models.pedido import (
     StatusRecolhaPedido,
     StatusResolucaoPedido,
     TipoFoto,
+    TipoEquipamentoPedido,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "StatusRecolhaPedido",
     "StatusResolucaoPedido",
     "TipoFoto",
+    "TipoEquipamentoPedido",
 ]

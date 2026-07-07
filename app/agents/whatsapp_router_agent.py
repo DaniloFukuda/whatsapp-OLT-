@@ -99,7 +99,7 @@ class WhatsappRouterAgent:
                 self.db.commit()
             return self._initial_menu(message.telefone)
 
-        if text in CANCEL_COMMANDS:
+        if text in CANCEL_COMMANDS and not (text == "0" and conversa.estado_atual == "v24_entrega_adesivo"):
             if self._has_active_flow(conversa):
                 conversa.estado_atual = "idle"
                 conversa.contexto_json = {}

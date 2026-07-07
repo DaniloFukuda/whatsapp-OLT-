@@ -10,6 +10,7 @@ from app.models.conversa import ConversaWhatsApp
 from app.models.pedido import (
     PedidoContentor,
     StatusPagamento,
+    TipoEquipamentoPedido,
     TipoFoto,
 )
 from app.services.pedido_service import PedidoService
@@ -48,9 +49,9 @@ class PedidoV24Agent:
             conversa,
             "v24_recolha_contentor",
             {"ids": [c.id for c in itens]},
-            "Selecione o contentor que será içado:\n\n"
+            "Selecione o equipamento que será içado:\n\n"
             + "\n".join(
-                f"{i}. 📦 Contentor {c.numero_adesivo_contentor} — {c.pedido.nome_cliente}"
+                f"{i}. {self._equipamento_label(c)} — {c.pedido.nome_cliente}"
                 for i, c in enumerate(itens, 1)
             ),
         )
@@ -63,9 +64,9 @@ class PedidoV24Agent:
             conversa,
             "v24_despejo_contentor",
             {"ids": [c.id for c in itens]},
-            "Selecione o contentor no camião:\n\n"
+            "Selecione o equipamento no camião:\n\n"
             + "\n".join(
-                f"{i}. 🚛 Contentor {c.numero_adesivo_contentor} — {c.pedido.nome_cliente}"
+                f"{i}. {self._equipamento_label(c)} — {c.pedido.nome_cliente}"
                 for i, c in enumerate(itens, 1)
             ),
         )
@@ -117,17 +118,59 @@ class PedidoV24Agent:
             if not raw.isdigit() or not 1 <= int(raw) <= 50:
                 return "Informe uma quantidade entre 1 e 50."
             ctx["quantidade"] = int(raw)
+            ctx["itens"] = []
             ctx["residuos"] = []
-            return self._advance(conversa, "v24_cadastro_residuo", ctx, self._residuo_prompt(ctx))
+            return self._advance(conversa, "v24_cadastro_tipo_equipamento", ctx, self._tipo_equipamento_prompt(ctx))
+        if state == "v24_cadastro_tipo_equipamento":
+            legacy_residue = None if choice in {"1", "2"} else self._parse_residue(choice)
+            if legacy_residue:
+                ctx["item_atual"] = {
+                    "tipo_equipamento": TipoEquipamentoPedido.CONTENTOR.value,
+                    "horario_agendado": None,
+                    "precisa_mao_de_obra": False,
+                }
+                return self._registrar_item_cadastro(conversa, ctx, legacy_residue)
+            equipamento = {
+                "1": TipoEquipamentoPedido.CONTENTOR.value,
+                "contentor": TipoEquipamentoPedido.CONTENTOR.value,
+                "2": TipoEquipamentoPedido.CARRINHA.value,
+                "carrinha": TipoEquipamentoPedido.CARRINHA.value,
+            }.get(choice)
+            if not equipamento:
+                return "Selecione Contentor ou Carrinha."
+            ctx["item_atual"] = {"tipo_equipamento": equipamento, "horario_agendado": None}
+            if equipamento == TipoEquipamentoPedido.CARRINHA.value:
+                return self._advance(
+                    conversa,
+                    "v24_cadastro_horario_carrinha",
+                    ctx,
+                    "Qual o horário agendado da carrinha? Envie no formato HH:MM. Ex: 14:00",
+                )
+            return self._advance(conversa, "v24_cadastro_mao_obra", ctx, self._mao_obra_prompt())
+        if state == "v24_cadastro_horario_carrinha":
+            if not self._horario_valido(raw):
+                return "Horário inválido. Envie no formato HH:MM, por exemplo 14:00 ou 09:30."
+            item_atual = dict(ctx.get("item_atual") or {})
+            item_atual["horario_agendado"] = raw
+            ctx["item_atual"] = item_atual
+            return self._advance(conversa, "v24_cadastro_mao_obra", ctx, self._mao_obra_prompt())
+        if state == "v24_cadastro_mao_obra":
+            if choice in {"1", "sim", "sim, com pessoal", "com pessoal"}:
+                item_atual = dict(ctx.get("item_atual") or {})
+                item_atual["precisa_mao_de_obra"] = True
+                ctx["item_atual"] = item_atual
+                return self._advance(conversa, "v24_cadastro_residuo", ctx, self._residuo_prompt(ctx))
+            if choice in {"2", "nao", "não", "nao, apenas equipamento", "não, apenas equipamento", "apenas equipamento"}:
+                item_atual = dict(ctx.get("item_atual") or {})
+                item_atual["precisa_mao_de_obra"] = False
+                ctx["item_atual"] = item_atual
+                return self._advance(conversa, "v24_cadastro_residuo", ctx, self._residuo_prompt(ctx))
+            return "Selecione Sim, com pessoal ou Não, apenas equipamento."
         if state == "v24_cadastro_residuo":
-            residue = {"1": "Entulho Limpo", "entulho limpo": "Entulho Limpo",
-                       "2": "Entulho Misto", "entulho misto": "Entulho Misto"}.get(choice)
+            residue = self._parse_residue(choice)
             if not residue:
                 return "Selecione Entulho Limpo ou Entulho Misto."
-            ctx["residuos"] = [*(ctx.get("residuos") or []), residue]
-            if len(ctx["residuos"]) < ctx["quantidade"]:
-                return self._advance(conversa, state, ctx, self._residuo_prompt(ctx))
-            return self._advance(conversa, "v24_cadastro_valor", ctx, "Qual é o valor global do pedido?")
+            return self._registrar_item_cadastro(conversa, ctx, residue)
         if state == "v24_cadastro_valor":
             try:
                 ctx["valor"] = str(float(raw.replace(",", ".")))
@@ -199,19 +242,25 @@ class PedidoV24Agent:
                 return "Selecione um pedido da lista."
             pendentes = [c.id for c in pedido.contentores if c.status_entrega == "PENDENTE"]
             ctx.update({"pedido_id": pedido.id, "contentores": pendentes, "indice": 0, "entregas": []})
-            return self._advance(conversa, "v24_entrega_adesivo", ctx, "Qual é o número do adesivo da caçamba descarregada agora?")
+            return self._advance(conversa, "v24_entrega_adesivo", ctx, self._entrega_numero_prompt(ctx))
         if state == "v24_entrega_adesivo":
             number = raw.strip()
-            if not re.fullmatch(r"\d{1,6}", number):
-                return "Informe somente o número visível no adesivo."
-            if number in [str(item.get("numero_adesivo")) for item in ctx.get("entregas") or []]:
+            contentor = self.db.get(PedidoContentor, ctx["contentores"][ctx["indice"]])
+            is_carrinha = contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+            if is_carrinha:
+                if not re.fullmatch(r"\d{1,6}", number):
+                    return "Informe o número da frota da carrinha ou 0 se não houver."
+            elif not re.fullmatch(r"\d{1,6}", number) or number == "0":
+                return "Informe somente o número visível no contentor."
+            if number != "0" and number in [str(item.get("numero_adesivo")) for item in ctx.get("entregas") or []]:
                 return "Esse adesivo ja foi informado neste lote."
-            duplicate = self.db.query(PedidoContentor).filter(
-                PedidoContentor.numero_adesivo_contentor == number,
-                PedidoContentor.status_ciclo == "EM_ANDAMENTO",
-            ).first()
-            if duplicate:
-                return "Esse adesivo já está em um ciclo ativo."
+            if not is_carrinha:
+                duplicate = self.db.query(PedidoContentor).filter(
+                    PedidoContentor.numero_adesivo_contentor == number,
+                    PedidoContentor.status_ciclo == "EM_ANDAMENTO",
+                ).first()
+                if duplicate:
+                    return "Esse adesivo já está em um ciclo ativo."
             entregas = list(ctx.get("entregas") or [])
             entregas.append(
                 {
@@ -221,7 +270,9 @@ class PedidoV24Agent:
                 }
             )
             ctx["entregas"] = entregas
-            return self._advance(conversa, "v24_entrega_foto", ctx, f"Envie a foto do Contentor {number} posicionado no local.")
+            label = "Carrinha" if is_carrinha else "Contentor"
+            numero_label = number if number != "0" else "sem frota"
+            return self._advance(conversa, "v24_entrega_foto", ctx, f"Envie a foto do {label} {numero_label} posicionado no local.")
         if state == "v24_entrega_foto":
             photo = self._photo(message)
             if not photo:
@@ -242,7 +293,7 @@ class PedidoV24Agent:
                 return "Selecione Outra Foto ou Próximo Passo."
             ctx["indice"] += 1
             if ctx["indice"] < len(ctx["contentores"]):
-                return self._advance(conversa, "v24_entrega_adesivo", ctx, "Qual é o número do adesivo da próxima caçamba?")
+                return self._advance(conversa, "v24_entrega_adesivo", ctx, self._entrega_numero_prompt(ctx))
             return self._advance(conversa, "v24_entrega_gps", ctx, "Compartilhe a localização GPS da obra.")
         if state == "v24_entrega_gps":
             coords = self._coordinates(message, raw)
@@ -315,7 +366,7 @@ class PedidoV24Agent:
             if choice in {"2", "proximo passo", "➡️ proximo passo"}:
                 return self._advance(
                     conversa, "v24_recolha_avaria", ctx,
-                    "O contentor sofreu algum estrago ou avaria na obra?\n\n1. ✅ Não, está perfeito\n2. 💥 Sim, está estragado",
+                    "O equipamento sofreu algum estrago ou avaria na obra?\n\n1. ✅ Não, está perfeito\n2. 💥 Sim, está estragado",
                 )
             return "Selecione Outra Foto ou Próximo Passo."
         if state == "v24_recolha_avaria":
@@ -403,11 +454,57 @@ class PedidoV24Agent:
             data_planejada=datetime.fromisoformat(ctx["data"]), valor_global=ctx["valor"],
             pago=ctx["pago"], forma_pagamento=ctx.get("forma"),
             pedido_feito_por=conversa.telefone, endereco_aproximado=ctx["endereco"],
-            ponto_referencia=ctx.get("referencia"), residuos=ctx["residuos"],
+            ponto_referencia=ctx.get("referencia"), itens=ctx.get("itens") or [],
             endereco_latitude=ctx.get("endereco_latitude"),
             endereco_longitude=ctx.get("endereco_longitude"),
         )
         return self._idle(conversa, f"✅ Pedido #{pedido.id} criado com {len(pedido.contentores)} contentor(es).")
+
+    def _registrar_item_cadastro(self, conversa, ctx, residue):
+        item = dict(ctx.get("item_atual") or {})
+        item.setdefault("tipo_equipamento", TipoEquipamentoPedido.CONTENTOR.value)
+        item.setdefault("horario_agendado", None)
+        item.setdefault("precisa_mao_de_obra", False)
+        item["residuo_contratado"] = residue
+        ctx["itens"] = [*(ctx.get("itens") or []), item]
+        ctx["residuos"] = [*(ctx.get("residuos") or []), residue]
+        ctx.pop("item_atual", None)
+        if len(ctx["itens"]) < ctx["quantidade"]:
+            return self._advance(conversa, "v24_cadastro_tipo_equipamento", ctx, self._tipo_equipamento_prompt(ctx))
+        return self._advance(conversa, "v24_cadastro_valor", ctx, "Qual é o valor global do pedido?")
+
+    def _parse_residue(self, choice):
+        return {
+            "1": "Entulho Limpo",
+            "entulho limpo": "Entulho Limpo",
+            "limpo": "Entulho Limpo",
+            "2": "Entulho Misto",
+            "entulho misto": "Entulho Misto",
+            "misto": "Entulho Misto",
+        }.get(choice)
+
+    def _equipamento_label(self, contentor: PedidoContentor) -> str:
+        if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:
+            horario = contentor.horario_agendado or "sem horario"
+            return f"🚛 Carrinha ({horario})"
+        return f"📦 Contentor {contentor.numero_adesivo_contentor or contentor.id}"
+
+    def _entrega_numero_prompt(self, ctx):
+        contentor = self.db.get(PedidoContentor, ctx["contentores"][ctx["indice"]])
+        if contentor and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:
+            return "Confirme o número da frota da carrinha alocada (ou digite 0 se não houver):"
+        return "Digite o número do contentor que está a descarregar agora:"
+
+    def _tipo_equipamento_prompt(self, ctx):
+        index = len(ctx.get("itens") or []) + 1
+        return f"Tipo de equipamento do item {index}/{ctx['quantidade']}:\n\n1. 📦 Contentor\n2. 🚛 Carrinha"
+
+    def _mao_obra_prompt(self):
+        return (
+            "O cliente solicitou pessoal para carregamento do resíduo?\n\n"
+            "1. Sim, com pessoal\n"
+            "2. Não, apenas equipamento"
+        )
 
     def _residuo_prompt(self, ctx):
         index = len(ctx["residuos"]) + 1
@@ -451,6 +548,12 @@ class PedidoV24Agent:
     def _norm(self, value):
         normalized = unicodedata.normalize("NFKD", value or "")
         return "".join(c for c in normalized if not unicodedata.combining(c)).strip().lower()
+
+    def _horario_valido(self, value):
+        if not re.fullmatch(r"\d{2}:\d{2}", (value or "").strip()):
+            return False
+        hour, minute = [int(part) for part in value.split(":")]
+        return 0 <= hour <= 23 and 0 <= minute <= 59
 
     def _lisbon_timezone(self):
         try:

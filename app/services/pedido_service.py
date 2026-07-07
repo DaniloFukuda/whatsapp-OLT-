@@ -1,6 +1,7 @@
 from collections import Counter
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+import re
 
 from sqlalchemy.orm import Session, joinedload
 
@@ -14,6 +15,7 @@ from app.models.pedido import (
     StatusPagamento,
     StatusRecolhaPedido,
     StatusResolucaoPedido,
+    TipoEquipamentoPedido,
     TipoFoto,
 )
 
@@ -34,12 +36,14 @@ class PedidoService:
         pedido_feito_por: str,
         endereco_aproximado: str,
         ponto_referencia: str | None,
-        residuos: list[str],
+        residuos: list[str] | None = None,
+        itens: list[dict] | None = None,
         endereco_latitude: float | None = None,
         endereco_longitude: float | None = None,
     ) -> Pedido:
-        if not residuos:
-            raise ValueError("O pedido precisa de pelo menos um contentor.")
+        itens_normalizados = self._normalizar_itens(residuos=residuos, itens=itens)
+        if not itens_normalizados:
+            raise ValueError("O pedido precisa de pelo menos um item.")
         try:
             valor = Decimal(str(valor_global).replace(",", "."))
         except InvalidOperation as exc:
@@ -64,12 +68,59 @@ class PedidoService:
             endereco_latitude=endereco_latitude,
             endereco_longitude=endereco_longitude,
             ponto_referencia=ponto_referencia.strip() if ponto_referencia else None,
-            contentores=[PedidoContentor(residuo_contratado=item) for item in residuos],
+            contentores=[
+                PedidoContentor(
+                    tipo_equipamento=item["tipo_equipamento"],
+                    horario_agendado=item["horario_agendado"],
+                    precisa_mao_de_obra=item["precisa_mao_de_obra"],
+                    residuo_contratado=item["residuo_contratado"],
+                )
+                for item in itens_normalizados
+            ],
         )
         self.db.add(pedido)
         self.db.commit()
         self.db.refresh(pedido)
         return pedido
+
+    def _normalizar_itens(
+        self,
+        *,
+        residuos: list[str] | None,
+        itens: list[dict] | None,
+    ) -> list[dict]:
+        if itens is None:
+            itens = [{"residuo_contratado": residuo} for residuo in (residuos or [])]
+        normalizados = []
+        for item in itens:
+            tipo = str(item.get("tipo_equipamento") or TipoEquipamentoPedido.CONTENTOR.value).strip().upper()
+            if tipo not in {TipoEquipamentoPedido.CONTENTOR.value, TipoEquipamentoPedido.CARRINHA.value}:
+                raise ValueError("Tipo de equipamento invalido.")
+            residuo = str(item.get("residuo_contratado") or item.get("residuo") or "").strip()
+            if not residuo:
+                raise ValueError("Informe o residuo contratado do item.")
+            horario = item.get("horario_agendado")
+            horario = str(horario).strip() if horario is not None else None
+            if tipo == TipoEquipamentoPedido.CARRINHA:
+                if not self._horario_valido(horario):
+                    raise ValueError("Carrinha precisa de horario agendado no formato HH:MM.")
+            else:
+                horario = None
+            normalizados.append(
+                {
+                    "tipo_equipamento": tipo,
+                    "residuo_contratado": residuo,
+                    "horario_agendado": horario,
+                    "precisa_mao_de_obra": bool(item.get("precisa_mao_de_obra")),
+                }
+            )
+        return normalizados
+
+    def _horario_valido(self, value: str | None) -> bool:
+        if not value or not re.fullmatch(r"\d{2}:\d{2}", value):
+            return False
+        hour, minute = [int(part) for part in value.split(":")]
+        return 0 <= hour <= 23 and 0 <= minute <= 59
 
     def get(self, pedido_id: int) -> Pedido | None:
         return (
@@ -145,9 +196,17 @@ class PedidoService:
         if entregas:
             if {c.id for c in pendentes} != set(entregas_por_id):
                 raise ValueError("Todos os contentores precisam do numero do adesivo.")
-            adesivos = [str(item.get("numero_adesivo") or "").strip() for item in entregas_por_id.values()]
-            if any(not adesivo for adesivo in adesivos) or len(set(adesivos)) != len(adesivos):
-                raise ValueError("Todos os contentores precisam de adesivos validos e sem duplicidade.")
+            adesivos = []
+            for contentor in pendentes:
+                item = entregas_por_id[contentor.id]
+                adesivo = str(item.get("numero_adesivo") or "").strip()
+                if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value and adesivo == "0":
+                    continue
+                if not adesivo:
+                    raise ValueError("Todos os contentores precisam de adesivos validos.")
+                adesivos.append(adesivo)
+            if len(set(adesivos)) != len(adesivos):
+                raise ValueError("Todos os contentores precisam de adesivos sem duplicidade.")
             duplicado = (
                 self.db.query(PedidoContentor)
                 .filter(PedidoContentor.numero_adesivo_contentor.in_(adesivos))
@@ -165,7 +224,12 @@ class PedidoService:
         for contentor in pendentes:
             entrega = entregas_por_id.get(contentor.id)
             if entrega:
-                contentor.numero_adesivo_contentor = str(entrega["numero_adesivo"]).strip()
+                numero = str(entrega["numero_adesivo"]).strip()
+                contentor.numero_adesivo_contentor = (
+                    None
+                    if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value and numero == "0"
+                    else numero
+                )
             contentor.status_entrega = StatusEntregaPedido.ENTREGUE.value
             contentor.entrega_feita_por = operador
             contentor.entrega_latitude = latitude
