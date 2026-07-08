@@ -111,8 +111,9 @@ def test_resumo_gestor_exibe_e_resolve_pendencia_de_carga(db_session, monkeypatc
     resolvido = router.handle(text_message(f"resolver carga {aluguer.id}", telefone=telefone))
     db_session.refresh(aluguer)
 
-    assert "PENDENCIAS OPERACIONAIS CRITICAS" in resumo
-    assert "Pendencias financeiras" in resumo
-    assert f"resolver carga {aluguer.id}" in resumo
+    assert "PAINEL DE CONTROLE OPERACIONAL OLT" in resumo
+    assert "PENDENCIAS ATIVAS" in resumo
+    assert "PENDENCIAS OPERACIONAIS CRITICAS" not in resumo
+    assert f"resolver carga {aluguer.id}" not in resumo
     assert "resolvida" in resolvido
     assert aluguer.status_resolucao_carga == StatusResolucao.RESOLVIDO.value
