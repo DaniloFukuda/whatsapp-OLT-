@@ -27,6 +27,24 @@ def msg(text=None, *, kind="text", media=None, lat=None, lon=None, phone="351900
     )
 
 
+def contact_msg(name=None, contact_phone=None, *, phone="351900009900"):
+    return NormalizedWhatsAppMessage(
+        telefone=phone,
+        tipo="contacts",
+        message_id="m-contact",
+        contact_name=name,
+        contact_phone=contact_phone,
+    )
+
+
+def liberar_operadores(monkeypatch):
+    for name in ("WHATSAPP_OWNER_PHONE", "AUTHORIZED_OPERATOR_PHONE",
+                 "AUTHORIZED_OPERATOR_PHONES", "OWNER_WHATSAPP"):
+        monkeypatch.setenv(name, "")
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+
+
 def test_service_cria_pedido_com_varios_contentores_e_consome_cotas(db_session):
     service = PedidoService(db_session)
     pedido = service.criar(
@@ -81,6 +99,79 @@ def test_fluxo_cadastro_v24_cria_lote(db_session, monkeypatch):
     conversa = db_session.query(ConversaWhatsApp).one()
     assert conversa.estado_atual == "idle"
     assert all(item.status_recolha != StatusRecolhaPedido.RECOLHIDO.value for item in itens)
+
+
+def test_cadastro_v24_contato_na_etapa_nome_salva_nome_telefone_e_avanca(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(msg("novo pedido"))
+    response = router.handle(contact_msg("Cliente Contacto", "+351 913 000 111"))
+
+    conversa = db_session.query(ConversaWhatsApp).one()
+    assert "Quando" in response
+    assert conversa.estado_atual == "v24_cadastro_data"
+    assert conversa.contexto_json["nome"] == "Cliente Contacto"
+    assert conversa.contexto_json["telefone"] == "351913000111"
+
+
+def test_cadastro_v24_contato_na_etapa_nome_sem_telefone_valido_pede_telefone(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(msg("novo pedido"))
+    response = router.handle(contact_msg("Cliente Sem Telefone", "abc"))
+
+    conversa = db_session.query(ConversaWhatsApp).one()
+    assert "telefone do cliente" in response
+    assert conversa.estado_atual == "v24_cadastro_telefone"
+    assert conversa.contexto_json["nome"] == "Cliente Sem Telefone"
+    assert "telefone" not in conversa.contexto_json
+
+
+def test_cadastro_v24_contato_na_etapa_telefone_valida_e_avanca(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(msg("novo pedido"))
+    router.handle(msg("Cliente Telefone"))
+    response = router.handle(contact_msg("Outro Nome", "+351 914 000 222"))
+
+    conversa = db_session.query(ConversaWhatsApp).one()
+    assert "Quando" in response
+    assert conversa.estado_atual == "v24_cadastro_data"
+    assert conversa.contexto_json["nome"] == "Cliente Telefone"
+    assert conversa.contexto_json["telefone"] == "351914000222"
+
+
+def test_cadastro_v24_contato_invalido_na_etapa_telefone_mantem_mensagem_atual(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(msg("novo pedido"))
+    router.handle(msg("Cliente Invalido"))
+    response = router.handle(contact_msg("Contato Invalido", "123"))
+
+    conversa = db_session.query(ConversaWhatsApp).one()
+    assert response == "O telefone informado não é válido."
+    assert conversa.estado_atual == "v24_cadastro_telefone"
+    assert "telefone" not in conversa.contexto_json
+
+
+def test_cadastro_v24_texto_nome_e_telefone_continuam_funcionando(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(msg("novo pedido"))
+    phone_prompt = router.handle(msg("Cliente Texto"))
+    response = router.handle(msg("+351 912 345 678"))
+
+    conversa = db_session.query(ConversaWhatsApp).one()
+    assert "telefone do cliente" in phone_prompt
+    assert "Quando" in response
+    assert conversa.estado_atual == "v24_cadastro_data"
+    assert conversa.contexto_json["nome"] == "Cliente Texto"
+    assert conversa.contexto_json["telefone"] == "351912345678"
 
 
 def test_service_cria_itens_contentor_e_carrinha(db_session):

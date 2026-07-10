@@ -77,6 +77,33 @@ class PedidoV24Agent:
         raw = (message.texto or "").strip()
         choice = self._norm(raw)
 
+        if state == "v24_cadastro_nome" and message.contact_name:
+            name = message.contact_name.strip()
+            if len(name) < 2:
+                return "Informe o nome completo do cliente."
+            ctx["nome"] = name
+            phone = self._phone_from_message(message, "")
+            if phone:
+                ctx["telefone"] = phone
+                return self._advance(
+                    conversa,
+                    "v24_cadastro_data",
+                    ctx,
+                    "Quando está planejada a entrega?\n\n1. Hoje\n2. Amanhã\n3. Outra data",
+                )
+            return self._advance(conversa, "v24_cadastro_telefone", ctx, "Qual é o telefone do cliente?")
+        if state == "v24_cadastro_telefone" and message.contact_phone:
+            phone = self._phone_from_message(message, raw)
+            if not phone:
+                return "O telefone informado não é válido."
+            ctx["telefone"] = phone
+            return self._advance(
+                conversa,
+                "v24_cadastro_data",
+                ctx,
+                "Quando está planejada a entrega?\n\n1. Hoje\n2. Amanhã\n3. Outra data",
+            )
+
         if state == "v24_cadastro_nome":
             if len(raw) < 2:
                 return "Informe o nome completo do cliente."
@@ -538,6 +565,11 @@ class PedidoV24Agent:
 
     def _photo(self, message):
         return message.media_id or message.filename or message.message_id if message.tipo == "image" else None
+
+    def _phone_from_message(self, message, raw):
+        value = message.contact_phone or raw
+        phone = re.sub(r"\D", "", value or "")
+        return phone if len(phone) >= 9 else None
 
     def _coordinates(self, message, raw):
         if message.tipo == "location" and message.latitude is not None and message.longitude is not None:

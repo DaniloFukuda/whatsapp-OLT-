@@ -144,3 +144,76 @@ def test_payload_interactive_button_reply_vira_texto_da_opcao():
     assert messages[0].telefone == "556198266551"
     assert messages[0].tipo == "interactive"
     assert messages[0].texto == "1"
+
+
+def test_payload_contacts_extrai_nome_e_prefere_wa_id():
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "from": "351900000000",
+                                    "id": "wamid.contact",
+                                    "type": "contacts",
+                                    "contacts": [
+                                        {
+                                            "name": {"formatted_name": "Cliente WhatsApp"},
+                                            "phones": [
+                                                {
+                                                    "phone": "+351 913 000 111",
+                                                    "wa_id": "351913000999",
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    messages = parse_whatsapp_payload(payload)
+
+    assert len(messages) == 1
+    assert messages[0].tipo == "contacts"
+    assert messages[0].contact_name == "Cliente WhatsApp"
+    assert messages[0].contact_phone == "351913000999"
+
+
+def test_payload_contacts_usa_primeiro_phone_quando_nao_ha_wa_id():
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "from": "351900000000",
+                                    "id": "wamid.contact",
+                                    "type": "contacts",
+                                    "contacts": [
+                                        {
+                                            "formatted_name": "Empresa Cliente",
+                                            "phones": [{"phone": "+351 914 000 222"}],
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    messages = parse_whatsapp_payload(payload)
+
+    assert messages[0].contact_name == "Empresa Cliente"
+    assert messages[0].contact_phone == "+351 914 000 222"

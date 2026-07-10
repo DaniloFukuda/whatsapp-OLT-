@@ -14,6 +14,7 @@ class NormalizedWhatsAppMessage:
     media_id: str | None = None
     mime_type: str | None = None
     filename: str | None = None
+    contact_name: str | None = None
     contact_phone: str | None = None
     raw: dict[str, Any] | None = None
 
@@ -58,14 +59,61 @@ def _parse_message(message: dict[str, Any]) -> NormalizedWhatsAppMessage | None:
         interactive = message.get("interactive", {})
         reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
         data["texto"] = _interactive_reply_text(reply)
-    elif tipo == "contacts":
-        contacts = message.get("contacts", [])
-        if contacts:
-            phones = contacts[0].get("phones", [])
-            if phones:
-                data["contact_phone"] = phones[0].get("phone") or phones[0].get("wa_id")
+    elif tipo in {"contact", "contacts", "vcard"}:
+        contact = _first_contact(message)
+        if contact:
+            data["contact_name"] = _contact_name(contact)
+            data["contact_phone"] = _contact_phone(contact)
 
     return NormalizedWhatsAppMessage(**data)
+
+
+def _first_contact(message: dict[str, Any]) -> dict[str, Any] | None:
+    contacts = message.get("contacts")
+    if isinstance(contacts, list) and contacts:
+        first = contacts[0]
+        return first if isinstance(first, dict) else None
+    contact = message.get("contact")
+    if isinstance(contact, dict):
+        return contact
+    return message
+
+
+def _contact_name(contact: dict[str, Any]) -> str | None:
+    name = contact.get("name")
+    if isinstance(name, dict):
+        for key in ("formatted_name", "full_name", "display_name"):
+            value = name.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    for key in ("formatted_name", "full_name", "display_name", "name"):
+        value = contact.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _contact_phone(contact: dict[str, Any]) -> str | None:
+    candidates: list[str] = []
+    for key in ("wa_id", "phone"):
+        value = contact.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value)
+    phones = contact.get("phones")
+    if isinstance(phones, list):
+        for phone in phones:
+            if not isinstance(phone, dict):
+                continue
+            wa_id = phone.get("wa_id")
+            number = phone.get("phone")
+            if isinstance(wa_id, str) and wa_id.strip():
+                candidates.append(wa_id)
+            if isinstance(number, str) and number.strip():
+                candidates.append(number)
+    for candidate in candidates:
+        if len(re.sub(r"\D", "", candidate)) >= 9:
+            return candidate.strip()
+    return candidates[0].strip() if candidates else None
 
 
 def _interactive_reply_text(reply: dict[str, Any]) -> str | None:
