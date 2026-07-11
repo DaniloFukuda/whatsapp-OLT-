@@ -40,10 +40,16 @@ class PedidoService:
         itens: list[dict] | None = None,
         endereco_latitude: float | None = None,
         endereco_longitude: float | None = None,
+        precisa_mao_de_obra: bool | None = None,
     ) -> Pedido:
         itens_normalizados = self._normalizar_itens(residuos=residuos, itens=itens)
         if not itens_normalizados:
             raise ValueError("O pedido precisa de pelo menos um item.")
+        pedido_precisa_mao_de_obra = (
+            bool(precisa_mao_de_obra)
+            if precisa_mao_de_obra is not None
+            else any(item["precisa_mao_de_obra"] for item in itens_normalizados)
+        )
         try:
             valor = Decimal(str(valor_global).replace(",", "."))
         except InvalidOperation as exc:
@@ -68,11 +74,12 @@ class PedidoService:
             endereco_latitude=endereco_latitude,
             endereco_longitude=endereco_longitude,
             ponto_referencia=ponto_referencia.strip() if ponto_referencia else None,
+            precisa_mao_de_obra=pedido_precisa_mao_de_obra,
             contentores=[
                 PedidoContentor(
                     tipo_equipamento=item["tipo_equipamento"],
                     horario_agendado=item["horario_agendado"],
-                    precisa_mao_de_obra=item["precisa_mao_de_obra"],
+                    precisa_mao_de_obra=False,
                     residuo_contratado=item["residuo_contratado"],
                 )
                 for item in itens_normalizados
@@ -114,7 +121,15 @@ class PedidoService:
                     "precisa_mao_de_obra": bool(item.get("precisa_mao_de_obra")),
                 }
             )
+        tipos = {item["tipo_equipamento"] for item in normalizados}
+        if len(tipos) > 1:
+            raise ValueError("Um pedido nao pode combinar contentores e carrinhas.")
         return normalizados
+
+    def precisa_mao_de_obra(self, pedido: Pedido) -> bool:
+        if bool(getattr(pedido, "precisa_mao_de_obra", False)):
+            return True
+        return any(item.precisa_mao_de_obra for item in pedido.contentores)
 
     def _horario_valido(self, value: str | None) -> bool:
         if not value or not re.fullmatch(r"\d{2}:\d{2}", value):

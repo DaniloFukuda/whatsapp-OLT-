@@ -8,6 +8,7 @@ from app.models.conversa import ConversaWhatsApp
 from app.models.aluguer import ContentorFoto
 from app.models.operador import Operador, PerfilOperador
 from app.models.pedido import (
+    Pedido,
     PedidoContentor,
     StatusCicloPedido,
     StatusEntregaPedido,
@@ -85,9 +86,9 @@ def test_fluxo_cadastro_v24_cria_lote(db_session, monkeypatch):
     router = WhatsappRouterAgent(db_session)
 
     steps = [
-        "novo pedido", "Cliente Lote", "351912345678", "Hoje", "2",
-        "Entulho Limpo", "Entulho Misto", "500", "Não, pendente",
-        "Rua Principal 10", "Não",
+        "novo pedido", "contentor", "Cliente Lote", "351912345678", "2",
+        "Não", "Entulho Limpo", "Entulho Misto", "Hoje", "500", "Não, pendente",
+        "Rua Principal 10", "Não", "1",
     ]
     response = ""
     for text in steps:
@@ -101,16 +102,31 @@ def test_fluxo_cadastro_v24_cria_lote(db_session, monkeypatch):
     assert all(item.status_recolha != StatusRecolhaPedido.RECOLHIDO.value for item in itens)
 
 
+def test_cadastro_v24_primeira_pergunta_apos_novo_pedido_e_tipo(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    response = router.handle(msg("novo pedido"))
+
+    conversa = db_session.query(ConversaWhatsApp).one()
+    assert "tipo de solicita" in response.lower()
+    assert "Contentor" in response
+    assert "Carrinha" in response
+    assert conversa.estado_atual == "v24_cadastro_tipo_solicitacao"
+    assert conversa.contexto_json == {}
+
+
 def test_cadastro_v24_contato_na_etapa_nome_salva_nome_telefone_e_avanca(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     router = WhatsappRouterAgent(db_session)
 
     router.handle(msg("novo pedido"))
+    router.handle(msg("contentor"))
     response = router.handle(contact_msg("Cliente Contacto", "+351 913 000 111"))
 
     conversa = db_session.query(ConversaWhatsApp).one()
-    assert "Quando" in response
-    assert conversa.estado_atual == "v24_cadastro_data"
+    assert "contentores" in response.lower()
+    assert conversa.estado_atual == "v24_cadastro_quantidade"
     assert conversa.contexto_json["nome"] == "Cliente Contacto"
     assert conversa.contexto_json["telefone"] == "351913000111"
 
@@ -120,6 +136,7 @@ def test_cadastro_v24_contato_na_etapa_nome_sem_telefone_valido_pede_telefone(db
     router = WhatsappRouterAgent(db_session)
 
     router.handle(msg("novo pedido"))
+    router.handle(msg("contentor"))
     response = router.handle(contact_msg("Cliente Sem Telefone", "abc"))
 
     conversa = db_session.query(ConversaWhatsApp).one()
@@ -134,12 +151,13 @@ def test_cadastro_v24_contato_na_etapa_telefone_valida_e_avanca(db_session, monk
     router = WhatsappRouterAgent(db_session)
 
     router.handle(msg("novo pedido"))
+    router.handle(msg("contentor"))
     router.handle(msg("Cliente Telefone"))
     response = router.handle(contact_msg("Outro Nome", "+351 914 000 222"))
 
     conversa = db_session.query(ConversaWhatsApp).one()
-    assert "Quando" in response
-    assert conversa.estado_atual == "v24_cadastro_data"
+    assert "contentores" in response.lower()
+    assert conversa.estado_atual == "v24_cadastro_quantidade"
     assert conversa.contexto_json["nome"] == "Cliente Telefone"
     assert conversa.contexto_json["telefone"] == "351914000222"
 
@@ -149,6 +167,7 @@ def test_cadastro_v24_contato_invalido_na_etapa_telefone_mantem_mensagem_atual(d
     router = WhatsappRouterAgent(db_session)
 
     router.handle(msg("novo pedido"))
+    router.handle(msg("contentor"))
     router.handle(msg("Cliente Invalido"))
     response = router.handle(contact_msg("Contato Invalido", "123"))
 
@@ -163,20 +182,66 @@ def test_cadastro_v24_texto_nome_e_telefone_continuam_funcionando(db_session, mo
     router = WhatsappRouterAgent(db_session)
 
     router.handle(msg("novo pedido"))
+    router.handle(msg("contentor"))
     phone_prompt = router.handle(msg("Cliente Texto"))
     response = router.handle(msg("+351 912 345 678"))
 
     conversa = db_session.query(ConversaWhatsApp).one()
     assert "telefone do cliente" in phone_prompt
-    assert "Quando" in response
-    assert conversa.estado_atual == "v24_cadastro_data"
+    assert "contentores" in response.lower()
+    assert conversa.estado_atual == "v24_cadastro_quantidade"
     assert conversa.contexto_json["nome"] == "Cliente Texto"
     assert conversa.contexto_json["telefone"] == "351912345678"
 
 
-def test_service_cria_itens_contentor_e_carrinha(db_session):
+def test_cadastro_v24_tipo_invalido_nao_avanca_fluxo(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(msg("novo pedido"))
+    response = router.handle(msg("retroescavadora"))
+
+    conversa = db_session.query(ConversaWhatsApp).one()
+    assert "tipo de solicita" in response.lower()
+    assert conversa.estado_atual == "v24_cadastro_tipo_solicitacao"
+    assert "tipo_solicitacao" not in conversa.contexto_json
+
+
+def test_service_rejeita_pedido_misto_contentor_e_carrinha(db_session):
+    try:
+        PedidoService(db_session).criar(
+            nome_cliente="Cliente Hibrido",
+            telefone_cliente="351912345678",
+            data_planejada=datetime.now(timezone.utc),
+            valor_global="600",
+            pago=False,
+            forma_pagamento=None,
+            pedido_feito_por="gestor",
+            endereco_aproximado="Rua",
+            ponto_referencia=None,
+            itens=[
+                {
+                    "tipo_equipamento": "CONTENTOR",
+                    "residuo_contratado": "Entulho Limpo",
+                    "precisa_mao_de_obra": False,
+                },
+                {
+                    "tipo_equipamento": "CARRINHA",
+                    "residuo_contratado": "Entulho Misto",
+                    "horario_agendado": "14:00",
+                    "precisa_mao_de_obra": True,
+                },
+            ],
+        )
+    except ValueError as exc:
+        assert "combinar contentores e carrinhas" in str(exc)
+    else:
+        raise AssertionError("Pedido misto deveria ser rejeitado")
+
+
+def test_service_cria_multiplas_carrinhas_com_mao_de_obra_unica(db_session):
     pedido = PedidoService(db_session).criar(
-        nome_cliente="Cliente Hibrido",
+        nome_cliente="Cliente Carrinhas",
         telefone_cliente="351912345678",
         data_planejada=datetime.now(timezone.utc),
         valor_global="600",
@@ -187,26 +252,63 @@ def test_service_cria_itens_contentor_e_carrinha(db_session):
         ponto_referencia=None,
         itens=[
             {
-                "tipo_equipamento": "CONTENTOR",
-                "residuo_contratado": "Entulho Limpo",
-                "precisa_mao_de_obra": False,
+                "tipo_equipamento": "CARRINHA",
+                "residuo_contratado": "Entulho Misto",
+                "horario_agendado": "14:00",
+                "precisa_mao_de_obra": True,
             },
             {
                 "tipo_equipamento": "CARRINHA",
-                "residuo_contratado": "Entulho Misto",
+                "residuo_contratado": "Entulho Limpo",
                 "horario_agendado": "14:00",
                 "precisa_mao_de_obra": True,
             },
         ],
     )
 
-    contentor, carrinha = pedido.contentores
-    assert contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
-    assert contentor.horario_agendado is None
-    assert contentor.precisa_mao_de_obra is False
-    assert carrinha.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
-    assert carrinha.horario_agendado == "14:00"
-    assert carrinha.precisa_mao_de_obra is True
+    assert len(pedido.contentores) == 2
+    assert all(item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value for item in pedido.contentores)
+    assert all(item.horario_agendado == "14:00" for item in pedido.contentores)
+    assert pedido.precisa_mao_de_obra is True
+    assert all(item.precisa_mao_de_obra is False for item in pedido.contentores)
+
+
+def test_mao_de_obra_do_pedido_nao_depende_de_alterar_ou_remover_item(db_session):
+    service = PedidoService(db_session)
+    pedido = service.criar(
+        nome_cliente="Cliente Mao Obra",
+        telefone_cliente="351912345678",
+        data_planejada=datetime.now(timezone.utc),
+        valor_global="600",
+        pago=False,
+        forma_pagamento=None,
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        precisa_mao_de_obra=True,
+        itens=[
+            {
+                "tipo_equipamento": "CARRINHA",
+                "residuo_contratado": "Entulho Misto",
+                "horario_agendado": "14:00",
+            },
+            {
+                "tipo_equipamento": "CARRINHA",
+                "residuo_contratado": "Entulho Limpo",
+                "horario_agendado": "14:00",
+            },
+        ],
+    )
+
+    pedido.contentores[0].precisa_mao_de_obra = False
+    db_session.delete(pedido.contentores[1])
+    db_session.commit()
+    db_session.refresh(pedido)
+
+    assert pedido.precisa_mao_de_obra is True
+    assert service.precisa_mao_de_obra(pedido) is True
+    assert len(pedido.contentores) == 1
+    assert pedido.contentores[0].precisa_mao_de_obra is False
 
 
 def operador(db_session, telefone, perfil):
@@ -232,6 +334,36 @@ def entregar_pedido(pedido, db_session, entrega_em, numeros=None):
         if index < len(numeros):
             item.numero_adesivo_contentor = numeros[index]
     db_session.commit()
+
+
+def criar_pedido_legado_misto(
+    db_session, *, nome, telefone, data_planejada, valor="100", pago=False, carrinha_horario="15:00"
+):
+    pedido = Pedido(
+        nome_cliente=nome,
+        telefone_cliente=telefone,
+        data_planejada=data_planejada,
+        valor_global=valor,
+        status_pagamento=StatusPagamento.PAGO.value if pago else StatusPagamento.PENDENTE.value,
+        forma_pagamento="MBWay" if pago else None,
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua legada",
+        contentores=[
+            PedidoContentor(
+                tipo_equipamento=TipoEquipamentoPedido.CONTENTOR.value,
+                residuo_contratado="Entulho Limpo",
+            ),
+            PedidoContentor(
+                tipo_equipamento=TipoEquipamentoPedido.CARRINHA.value,
+                residuo_contratado="Entulho Misto",
+                horario_agendado=carrinha_horario,
+            ),
+        ],
+    )
+    db_session.add(pedido)
+    db_session.commit()
+    db_session.refresh(pedido)
+    return pedido
 
 
 def test_service_rejeita_carrinha_sem_horario_valido(db_session):
@@ -273,27 +405,31 @@ def test_cadastro_v24_carrinha_valida_horario_e_mao_de_obra(db_session, monkeypa
     get_settings.cache_clear()
     router = WhatsappRouterAgent(db_session)
 
-    for text in ["novo pedido", "Cliente Carrinha", "351912345678", "Hoje", "1"]:
+    for text in ["novo pedido", "carrinha", "Cliente Carrinha", "351912345678", "1"]:
         response = router.handle(msg(text))
-    assert "Carrinha" in response
-    horario_prompt = router.handle(msg("2"))
-    assert "HH:MM" in horario_prompt
+    assert "HH:MM" in response
     invalid = router.handle(msg("99:99"))
     assert "Horário inválido" in invalid
     mao_obra = router.handle(msg("09:30"))
-    assert mao_obra.startswith("O cliente solicitou pessoal para carregamento do resíduo?")
-    assert "Sim, com pessoal" in mao_obra
-    assert "Não, apenas equipamento" in mao_obra
+    assert "mão de obra" in mao_obra.lower()
+    assert "Sim" in mao_obra
+    assert "Não" in mao_obra
     residuo_prompt = router.handle(msg("1"))
     assert "Entulho Limpo" in residuo_prompt
-    for text in ["1", "250", "Não, pendente", "Rua da Carrinha", "Não"]:
+    for text in ["1", "Hoje", "250", "Não, pendente", "Rua da Carrinha", "Não"]:
         response = router.handle(msg(text))
+    assert "Tipo da solicita" in response
+    assert "Carrinha" in response
+    assert "Mão de obra: Sim" in response
+    response = router.handle(msg("1"))
 
+    pedido = db_session.query(Pedido).one()
     item = db_session.query(PedidoContentor).one()
     assert "Pedido #1 criado" in response
+    assert pedido.precisa_mao_de_obra is True
     assert item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
     assert item.horario_agendado == "09:30"
-    assert item.precisa_mao_de_obra is True
+    assert item.precisa_mao_de_obra is False
     assert item.residuo_contratado == "Entulho Limpo"
 
 
@@ -306,16 +442,46 @@ def test_cadastro_v24_salva_mao_de_obra_false(db_session, monkeypatch):
     router = WhatsappRouterAgent(db_session)
 
     steps = [
-        "novo pedido", "Cliente Sem Pessoal", "351912345678", "Hoje", "1",
-        "1", "2", "2", "120", "Não, pendente", "Rua", "Não",
+        "novo pedido", "contentor", "Cliente Sem Pessoal", "351912345678", "1",
+        "2", "2", "Hoje", "120", "Não, pendente", "Rua", "Não", "1",
     ]
     for text in steps:
         response = router.handle(msg(text))
 
+    pedido = db_session.query(Pedido).one()
     item = db_session.query(PedidoContentor).one()
     assert "Pedido #1 criado" in response
+    assert pedido.precisa_mao_de_obra is False
     assert item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
     assert item.precisa_mao_de_obra is False
+
+
+def test_cadastro_v24_carrinha_multipla_pergunta_mao_de_obra_uma_vez(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    steps = ["novo pedido", "carrinha", "Cliente Carrinhas", "351912345678", "2", "09:30"]
+    for text in steps:
+        response = router.handle(msg(text))
+    assert "mão de obra" in response.lower()
+
+    response = router.handle(msg("1"))
+    assert "Entulho Limpo" in response
+    response = router.handle(msg("1"))
+    assert "mão de obra" not in response.lower()
+    assert "Entulho Limpo" in response
+    for text in ["2", "Hoje", "500", "Não, pendente", "Rua Carrinhas", "Não"]:
+        response = router.handle(msg(text))
+    assert response.count("Mão de obra") == 1
+    response = router.handle(msg("1"))
+
+    assert "Pedido #1 criado" in response
+    pedido = db_session.query(Pedido).one()
+    itens = db_session.query(PedidoContentor).all()
+    assert len(itens) == 2
+    assert pedido.precisa_mao_de_obra is True
+    assert all(item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value for item in itens)
+    assert all(item.precisa_mao_de_obra is False for item in itens)
 
 
 def test_entrega_v24_guarda_lote_no_contexto_ate_gps(db_session, monkeypatch):
@@ -410,24 +576,14 @@ def test_recolha_v24_lista_contentor_e_carrinha_com_labels(db_session, monkeypat
         monkeypatch.setenv(name, "")
     from app.core.config import get_settings
     get_settings.cache_clear()
-    pedido = PedidoService(db_session).criar(
-        nome_cliente="Cliente Recolha Hibrida",
-        telefone_cliente="351912345678",
+    pedido = criar_pedido_legado_misto(
+        db_session,
+        nome="Cliente Recolha Hibrida",
+        telefone="351912345678",
         data_planejada=datetime.now(timezone.utc),
-        valor_global="500",
+        valor="500",
         pago=True,
-        forma_pagamento="MBWay",
-        pedido_feito_por="gestor",
-        endereco_aproximado="Rua",
-        ponto_referencia=None,
-        itens=[
-            {"tipo_equipamento": "CONTENTOR", "residuo_contratado": "Entulho Limpo"},
-            {
-                "tipo_equipamento": "CARRINHA",
-                "residuo_contratado": "Entulho Misto",
-                "horario_agendado": "14:00",
-            },
-        ],
+        carrinha_horario="14:00",
     )
     service = PedidoService(db_session)
     service.confirmar_entrega_lote(
@@ -524,24 +680,14 @@ def test_resumo_v32_gestor_ve_blocos_contentores_carrinhas_financeiro_e_menu_sep
         ],
     )
     entregar_pedido(pedido_carrinha, db_session, now, ["0"])
-    pedido_misto = service.criar(
-        nome_cliente="Cliente Misto",
-        telefone_cliente="351900000333",
+    pedido_misto = criar_pedido_legado_misto(
+        db_session,
+        nome="Cliente Misto",
+        telefone="351900000333",
         data_planejada=now,
-        valor_global="100",
+        valor="100",
         pago=False,
-        forma_pagamento=None,
-        pedido_feito_por="gestor",
-        endereco_aproximado="Rua Mista",
-        ponto_referencia=None,
-        itens=[
-            {"tipo_equipamento": "CONTENTOR", "residuo_contratado": "Entulho Limpo"},
-            {
-                "tipo_equipamento": "CARRINHA",
-                "residuo_contratado": "Entulho Misto",
-                "horario_agendado": "15:00",
-            },
-        ],
+        carrinha_horario="15:00",
     )
     entregar_pedido(pedido_misto, db_session, now, ["21", "0"])
 
@@ -574,26 +720,17 @@ def test_resumo_v32_funcionario_oculta_comercial_financeiro_pagamentos_e_carga(d
     operador(db_session, funcionario, PerfilOperador.FUNCIONARIO)
     service = PedidoService(db_session)
     now = datetime.now(timezone.utc)
-    pedido = service.criar(
-        nome_cliente="Cliente Funcionario",
-        telefone_cliente="351912345678",
+    pedido = criar_pedido_legado_misto(
+        db_session,
+        nome="Cliente Funcionario",
+        telefone="351912345678",
         data_planejada=now,
-        valor_global="300",
+        valor="300",
         pago=False,
-        forma_pagamento=None,
-        pedido_feito_por="gestor",
-        endereco_aproximado="Rua",
-        ponto_referencia=None,
-        itens=[
-            {"tipo_equipamento": "CONTENTOR", "residuo_contratado": "Entulho Limpo"},
-            {
-                "tipo_equipamento": "CARRINHA",
-                "residuo_contratado": "Entulho Misto",
-                "horario_agendado": "16:30",
-                "precisa_mao_de_obra": True,
-            },
-        ],
+        carrinha_horario="16:30",
     )
+    pedido.contentores[1].precisa_mao_de_obra = True
+    db_session.commit()
     entregar_pedido(pedido, db_session, now - timedelta(days=5), ["31", "0"])
     pedido.contentores[0].residuo_efetivo_vazadouro = "Entulho Misto"
     pedido.contentores[0].carga_errada = True

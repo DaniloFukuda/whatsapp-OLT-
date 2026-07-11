@@ -146,6 +146,10 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
             row["name"]
             for row in connection.execute(text("PRAGMA table_info(pedido_contentores)")).mappings()
         }
+        pedidos_columns = {
+            row["name"]
+            for row in connection.execute(text("PRAGMA table_info(pedidos)")).mappings()
+        }
 
     assert {
         "email_cliente",
@@ -197,6 +201,7 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
         "horario_agendado",
         "precisa_mao_de_obra",
     } <= pedido_contentores_columns
+    assert {"precisa_mao_de_obra"} <= pedidos_columns
     assert contentor_row["is_deleted"] == 0
     assert contentor_row["justificativa_exclusao"] is None
     assert "quantidade_contentores" not in columns

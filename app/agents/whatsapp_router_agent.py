@@ -366,8 +366,19 @@ class WhatsappRouterAgent:
                 if self._is_carrinha_para_recolha(item)
                 and self._local_date(pedido.data_planejada) == target_date
             ]
+            if len(carrinhas) > 1:
+                horarios = ", ".join(
+                    item.horario_agendado or "sem horario"
+                    for item in sorted(carrinhas, key=lambda item: item.horario_agendado or str(item.id))
+                )
+                mao_obra = " - Com Pessoal" if self.pedido_service.precisa_mao_de_obra(pedido) else ""
+                linhas.append(
+                    f"- {len(carrinhas)} Carrinhas | {pedido.nome_cliente}: horario {horarios}"
+                    f"{mao_obra}{self._rota_gps(pedido, carrinhas[0])}"
+                )
+                carrinhas = []
             for carrinha in carrinhas:
-                mao_obra = " • ⚠️ Com Pessoal" if carrinha.precisa_mao_de_obra else ""
+                mao_obra = " • ⚠️ Com Pessoal" if self.pedido_service.precisa_mao_de_obra(pedido) else ""
                 linhas.append(
                     f"- Carrinha | {pedido.nome_cliente}: horario {carrinha.horario_agendado or 'sem horario'}"
                     f"{mao_obra}{self._rota_gps(pedido, carrinha)}"

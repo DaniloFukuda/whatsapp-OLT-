@@ -61,6 +61,7 @@ class Pedido(Base):
     endereco_latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     endereco_longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     ponto_referencia: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    precisa_mao_de_obra: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     criado_em: Mapped[DateTime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     atualizado_em: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False

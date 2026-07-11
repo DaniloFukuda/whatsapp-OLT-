@@ -54,6 +54,11 @@ PEDIDO_CONTENTORES_COLUMNS = {
 }
 
 
+PEDIDOS_COLUMNS = {
+    "precisa_mao_de_obra": "BOOLEAN DEFAULT 0 NOT NULL",
+}
+
+
 def ensure_alugueres_contentor_schema(engine: Engine) -> None:
     if engine.dialect.name != "sqlite":
         return
@@ -89,6 +94,16 @@ def ensure_alugueres_contentor_schema(engine: Engine) -> None:
             if pedido_contentores_columns and column_name not in pedido_contentores_columns:
                 connection.execute(
                     text(f"ALTER TABLE pedido_contentores ADD COLUMN {column_name} {column_definition}")
+                )
+
+        pedidos_columns = {
+            row["name"]
+            for row in connection.execute(text("PRAGMA table_info(pedidos)")).mappings()
+        }
+        for column_name, column_definition in PEDIDOS_COLUMNS.items():
+            if pedidos_columns and column_name not in pedidos_columns:
+                connection.execute(
+                    text(f"ALTER TABLE pedidos ADD COLUMN {column_name} {column_definition}")
                 )
 
         columns = {
