@@ -51,6 +51,8 @@ PEDIDO_CONTENTORES_COLUMNS = {
     "tipo_equipamento": "TEXT DEFAULT 'CONTENTOR' NOT NULL",
     "horario_agendado": "TEXT",
     "precisa_mao_de_obra": "BOOLEAN DEFAULT 0 NOT NULL",
+    "despejo_feito_por": "TEXT",
+    "despejo_data_hora": "DATETIME",
 }
 
 

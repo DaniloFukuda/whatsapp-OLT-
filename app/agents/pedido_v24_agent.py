@@ -39,39 +39,32 @@ class PedidoV24Agent:
             "v24_entrega_pedido",
             {"ids": [p.id for p in pedidos]},
             "Selecione o pedido pendente:\n\n"
-            + "\n".join(f"{i}. #{p.id} — {p.nome_cliente}" for i, p in enumerate(pedidos, 1)),
+            + "\n".join(f"{i}. {self._pedido_entrega_label(p)}" for i, p in enumerate(pedidos, 1)),
         )
 
     def start_recolha(self, conversa: ConversaWhatsApp) -> str:
-        itens = self.service.contentores_para_recolha()
-        if not itens:
+        pedidos = self.service.pedidos_para_recolha()
+        if not pedidos:
             return self._idle(conversa, "Não existem contentores aguardando recolha.")
         return self._advance(
             conversa,
-            "v24_recolha_contentor",
-            {"ids": [c.id for c in itens]},
-            "Selecione o equipamento que será içado:\n\n"
-            + "\n".join(
-                f"{i}. {self._equipamento_label(c)} — {c.pedido.nome_cliente}"
-                for i, c in enumerate(itens, 1)
-            ),
+            "v24_recolha_pedido",
+            {"ids": [p.id for p in pedidos]},
+            "Selecione o pedido para recolha:\n\n"
+            + "\n".join(f"{i}. {self._pedido_recolha_label(p)}" for i, p in enumerate(pedidos, 1)),
         )
 
     def start_despejo(self, conversa: ConversaWhatsApp) -> str:
-        itens = self.service.contentores_para_despejo()
-        if not itens:
+        pedidos = self.service.pedidos_para_despejo()
+        if not pedidos:
             return self._idle(conversa, "Não existem contentores recolhidos aguardando despejo.")
         return self._advance(
             conversa,
-            "v24_despejo_contentor",
-            {"ids": [c.id for c in itens]},
-            "Selecione o equipamento no camião:\n\n"
-            + "\n".join(
-                f"{i}. {self._equipamento_label(c)} — {c.pedido.nome_cliente}"
-                for i, c in enumerate(itens, 1)
-            ),
+            "v24_despejo_pedido",
+            {"ids": [p.id for p in pedidos]},
+            "Selecione o pedido para despejo no vazadouro:\n\n"
+            + "\n".join(f"{i}. {self._pedido_despejo_label(p)}" for i, p in enumerate(pedidos, 1)),
         )
-
     def handle(self, conversa: ConversaWhatsApp, message: NormalizedWhatsAppMessage) -> str:
         state = conversa.estado_atual
         ctx = dict(conversa.contexto_json or {})
@@ -288,11 +281,17 @@ class PedidoV24Agent:
             if not pedido:
                 return "Selecione um pedido da lista."
             pendentes = [c.id for c in pedido.contentores if c.status_entrega == "PENDENTE"]
+            if not pendentes:
+                return self._idle(conversa, "Esse pedido já não possui ativos pendentes de entrega.")
             ctx.update({"pedido_id": pedido.id, "contentores": pendentes, "indice": 0, "entregas": []})
             return self._advance(conversa, "v24_entrega_adesivo", ctx, self._entrega_numero_prompt(ctx))
         if state == "v24_entrega_adesivo":
+            if message.tipo == "interactive":
+                return "Digite o número físico do equipamento para continuar."
             number = raw.strip()
             contentor = self.db.get(PedidoContentor, ctx["contentores"][ctx["indice"]])
+            if not contentor or contentor.status_entrega != "PENDENTE":
+                return self._idle(conversa, "Esse ativo já não está pendente. Reinicie a entrega.")
             is_carrinha = contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
             if is_carrinha:
                 if not re.fullmatch(r"\d{1,6}", number):
@@ -326,7 +325,10 @@ class PedidoV24Agent:
                 return "Envie uma imagem para continuar."
             entregas = list(ctx.get("entregas") or [])
             entrega_atual = dict(entregas[-1])
-            entrega_atual["fotos"] = [*(entrega_atual.get("fotos") or []), photo]
+            fotos = list(entrega_atual.get("fotos") or [])
+            if photo not in fotos:
+                fotos.append(photo)
+            entrega_atual["fotos"] = fotos
             entregas[-1] = entrega_atual
             ctx["entregas"] = entregas
             return self._advance(
@@ -340,36 +342,35 @@ class PedidoV24Agent:
                 return "Selecione Outra Foto ou Próximo Passo."
             ctx["indice"] += 1
             if ctx["indice"] < len(ctx["contentores"]):
-                return self._advance(conversa, "v24_entrega_adesivo", ctx, self._entrega_numero_prompt(ctx))
+                progresso = f"✅ Ativo {ctx['indice']} de {len(ctx['contentores'])} preparado."
+                return self._advance(
+                    conversa,
+                    "v24_entrega_adesivo",
+                    ctx,
+                    f"{progresso}\n\nVamos registrar o próximo.\n\n{self._entrega_numero_prompt(ctx)}",
+                )
             return self._advance(conversa, "v24_entrega_gps", ctx, "Compartilhe a localização GPS da obra.")
         if state == "v24_entrega_gps":
-            coords = self._coordinates(message, raw)
+            coords = self._coordinates(message, raw) if message.tipo == "location" else None
             if not coords:
-                return "Compartilhe uma localização nativa ou um link válido do Google Maps."
+                return "Compartilhe a localização nativa do WhatsApp para confirmar a entrega."
             ctx["latitude"], ctx["longitude"] = coords
             return self._advance(conversa, "v24_entrega_referencia", ctx, "Qual é o ponto de referência? Envie “Não” se não houver.")
         if state == "v24_entrega_referencia":
             if len(raw) > 50:
                 return "O ponto de referência deve ter no máximo 50 caracteres."
             ctx["referencia_entrega"] = None if choice == "nao" else raw
-            pedido = self.service.confirmar_entrega_lote(
-                ctx["pedido_id"],
-                conversa.telefone,
-                ctx["latitude"],
-                ctx["longitude"],
-                ctx["referencia_entrega"],
-                ctx.get("entregas") or [],
-            )
-            if pedido.status_pagamento == StatusPagamento.PENDENTE.value:
-                return self._advance(
-                    conversa, "v24_entrega_pagou", ctx,
-                    "O cliente pagou no ato da entrega?\n\n1. Sim\n2. Não",
-                )
-            return self._idle(conversa, "✅ Entrega do lote registrada com sucesso.")
+            return self._advance(conversa, "v24_entrega_confirmacao", ctx, self._entrega_confirmacao_prompt(ctx))
+        if state == "v24_entrega_confirmacao":
+            if choice in {"1", "confirmar entrega", "✅ confirmar entrega"}:
+                return self._confirmar_entrega_preparada(conversa, ctx)
+            if choice in {"2", "cancelar", "❌ cancelar"}:
+                return self._idle(conversa, "Entrega cancelada. Nenhum ativo foi marcado como entregue.")
+            return "Escolha Confirmar entrega ou Cancelar."
         if state == "v24_entrega_pagou":
-            if choice in {"2", "nao"}:
-                return self._idle(conversa, "✅ Entrega registrada. O pagamento permanece pendente.")
-            if choice in {"1", "sim"}:
+            if choice in {"2", "nao", "nao, continua pendente", "🕒 nao, continua pendente"}:
+                return self._idle(conversa, "✅ Entrega confirmada com sucesso para todos os ativos processados. Pagamento permanece pendente.")
+            if choice in {"1", "sim", "sim, foi pago", "✅ sim, foi pago"}:
                 return self._advance(
                     conversa, "v24_entrega_forma", ctx,
                     "Selecione a forma recebida:\n\n1. MBWay\n2. Transferência\n3. Dinheiro\n4. Outro",
@@ -384,25 +385,57 @@ class PedidoV24Agent:
             if form == "Outro":
                 return self._advance(conversa, "v24_entrega_forma_outro", ctx, "Qual foi a forma recebida?")
             self.service.registrar_pagamento(ctx["pedido_id"], form)
-            return self._idle(conversa, "✅ Entrega e pagamento registrados.")
+            return self._idle(conversa, "✅ Entrega confirmada com sucesso para todos os ativos processados. Pagamento registrado.")
         if state == "v24_entrega_forma_outro":
             if not raw:
                 return "Informe a forma recebida."
             self.service.registrar_pagamento(ctx["pedido_id"], raw[:80])
-            return self._idle(conversa, "✅ Entrega e pagamento registrados.")
+            return self._idle(conversa, "✅ Entrega confirmada com sucesso para todos os ativos processados. Pagamento registrado.")
 
+        if state == "v24_recolha_pedido":
+            pedido_id = self._selected_id(raw, ctx["ids"])
+            pedido = self.service.get(pedido_id) if pedido_id else None
+            if not pedido:
+                return "Selecione um pedido da lista."
+            pendentes = self._recolha_pendentes(pedido)
+            if not pendentes:
+                return self._idle(conversa, "Esse pedido ja nao possui ativos pendentes de recolha.")
+            ctx.update({"pedido_id": pedido.id, "recolhas": []})
+            return self._advance(conversa, "v24_recolha_ativo", ctx, self._recolha_selecao_prompt(ctx, pendentes))
+        if state == "v24_recolha_ativo":
+            if self._is_recolha_terminar(message, choice, ctx):
+                return self._idle(conversa, "✅ Recolhas deste cliente encerradas. Os ativos restantes continuam pendentes.")
+            contentor_id = self._selected_recolha_contentor_id(raw, ctx)
+            if not contentor_id:
+                return "Selecione um ativo da lista."
+            contentor = self.db.get(PedidoContentor, contentor_id)
+            if not self._is_recolha_pendente_do_pedido(contentor, ctx["pedido_id"]):
+                pendentes = self._recolha_pendentes_por_pedido(ctx["pedido_id"])
+                if pendentes:
+                    return self._advance(
+                        conversa,
+                        "v24_recolha_ativo",
+                        ctx,
+                        "Esse ativo foi atualizado por outro operador.\n\n"
+                        + self._recolha_selecao_prompt(ctx, pendentes),
+                    )
+                return self._idle(conversa, "✅ Esse pedido ja nao possui ativos pendentes de recolha.")
+            ctx.update({"contentor_id": contentor_id, "fotos_recolha": [], "avariado": None, "relato_avaria": None})
+            return self._advance(conversa, "v24_recolha_foto", ctx, self._recolha_foto_prompt(ctx))
         if state == "v24_recolha_contentor":
             contentor_id = self._selected_id(raw, ctx["ids"])
             if not contentor_id:
                 return "Selecione um contentor da lista."
-            ctx.update({"contentor_id": contentor_id, "fotos": 0})
+            ctx.update({"contentor_id": contentor_id, "fotos_recolha": [], "avariado": None, "relato_avaria": None})
             return self._advance(conversa, "v24_recolha_foto", ctx, "Envie a foto do equipamento cheio antes do içamento.")
         if state == "v24_recolha_foto":
             photo = self._photo(message)
             if not photo:
                 return "Envie uma imagem para continuar."
-            self.service.adicionar_foto(ctx["contentor_id"], photo, TipoFoto.RECOLHA)
-            ctx["fotos"] += 1
+            fotos = list(ctx.get("fotos_recolha") or [])
+            if photo not in fotos:
+                fotos.append(photo)
+            ctx["fotos_recolha"] = fotos
             return self._advance(
                 conversa, "v24_recolha_foto_acao", ctx,
                 "Foto guardada.\n\n1. ➕ Outra Foto\n2. ➡️ Próximo Passo",
@@ -418,29 +451,93 @@ class PedidoV24Agent:
             return "Selecione Outra Foto ou Próximo Passo."
         if state == "v24_recolha_avaria":
             if choice in {"1", "nao, esta perfeito", "✅ nao, esta perfeito"}:
-                self.service.confirmar_recolha(ctx["contentor_id"], conversa.telefone, False, None)
-                return self._idle(conversa, "✅ Recolha registrada. O contentor aguarda despejo.")
+                ctx["avariado"] = False
+                ctx["relato_avaria"] = None
+                return self._advance(conversa, "v24_recolha_confirmacao", ctx, self._recolha_confirmacao_prompt(ctx))
             if choice in {"2", "sim, esta estragado", "💥 sim, esta estragado"}:
                 return self._advance(conversa, "v24_recolha_relato", ctx, "Descreva a avaria com pelo menos 10 caracteres.")
             return "Selecione uma das opções de avaria."
         if state == "v24_recolha_relato":
-            if len(raw) < 10:
+            relato = raw.strip()
+            if len(relato) < 10:
                 return "O relato da avaria precisa ter pelo menos 10 caracteres."
-            self.service.confirmar_recolha(ctx["contentor_id"], conversa.telefone, True, raw)
-            return self._idle(conversa, "✅ Recolha registrada com pendência de avaria.")
+            ctx["avariado"] = True
+            ctx["relato_avaria"] = relato
+            return self._advance(conversa, "v24_recolha_confirmacao", ctx, self._recolha_confirmacao_prompt(ctx))
 
+        if state == "v24_recolha_confirmacao":
+            if choice in {"1", "confirmar recolha", "confirmar"}:
+                return self._confirmar_recolha_atual(conversa, ctx)
+            if choice in {"2", "cancelar ativo", "cancelar"}:
+                return self._cancelar_recolha_atual(conversa, ctx)
+            return "Escolha Confirmar recolha ou Cancelar ativo."
+
+        if state == "v24_despejo_pedido":
+            pedido_id = self._selected_id(raw, ctx["ids"])
+            pedido = self.service.get(pedido_id) if pedido_id else None
+            if not pedido:
+                return "Selecione um pedido da lista."
+            pendentes = self._despejo_pendentes(pedido)
+            if not pendentes:
+                return self._idle(conversa, "Esse pedido ja nao possui ativos pendentes de despejo.")
+            ctx.update({"pedido_id": pedido.id, "despejos": []})
+            return self._advance(conversa, "v24_despejo_ativo", ctx, self._despejo_selecao_prompt(ctx, pendentes))
+        if state == "v24_despejo_ativo":
+            if self._is_despejo_terminar(message, choice, ctx):
+                return self._idle(conversa, "✅ Despejos deste cliente encerrados. Os ativos restantes continuam em andamento.")
+            contentor_id = self._selected_despejo_contentor_id(raw, ctx)
+            if not contentor_id:
+                return "Selecione um ativo da lista."
+            contentor = self.db.get(PedidoContentor, contentor_id)
+            if not self._is_despejo_pendente_do_pedido(contentor, ctx["pedido_id"]):
+                pendentes = self._despejo_pendentes_por_pedido(ctx["pedido_id"])
+                if pendentes:
+                    return self._advance(
+                        conversa,
+                        "v24_despejo_ativo",
+                        ctx,
+                        "Esse ativo foi atualizado por outro operador.\n\n"
+                        + self._despejo_selecao_prompt(ctx, pendentes),
+                    )
+                return self._idle(conversa, "✅ Esse pedido ja nao possui ativos pendentes de despejo.")
+            ctx.update(
+                {
+                    "contentor_id": contentor_id,
+                    "fotos_despejo": [],
+                    "residuo_contratado": contentor.residuo_contratado,
+                    "residuo_efetivo": None,
+                    "carga_errada": None,
+                    "relato_carga": None,
+                }
+            )
+            return self._advance(conversa, "v24_despejo_foto", ctx, self._despejo_foto_prompt(ctx))
         if state == "v24_despejo_contentor":
             contentor_id = self._selected_id(raw, ctx["ids"])
             if not contentor_id:
                 return "Selecione um contentor da lista."
-            ctx.update({"contentor_id": contentor_id, "fotos": 0})
+            contentor = self.db.get(PedidoContentor, contentor_id)
+            if not contentor:
+                return "Selecione um contentor da lista."
+            ctx.update(
+                {
+                    "contentor_id": contentor_id,
+                    "pedido_id": contentor.pedido_id,
+                    "fotos_despejo": [],
+                    "residuo_contratado": contentor.residuo_contratado,
+                    "residuo_efetivo": None,
+                    "carga_errada": None,
+                    "relato_carga": None,
+                }
+            )
             return self._advance(conversa, "v24_despejo_foto", ctx, "Envie a foto do entulho espalhado no chão.")
         if state == "v24_despejo_foto":
             photo = self._photo(message)
             if not photo:
                 return "Envie uma imagem para continuar."
-            self.service.adicionar_foto(ctx["contentor_id"], photo, TipoFoto.DESPEJO)
-            ctx["fotos"] += 1
+            fotos = list(ctx.get("fotos_despejo") or [])
+            if photo not in fotos:
+                fotos.append(photo)
+            ctx["fotos_despejo"] = fotos
             return self._advance(
                 conversa, "v24_despejo_foto_acao", ctx,
                 "Foto guardada.\n\n1. ➕ Outra Foto\n2. ➡️ Próximo Passo",
@@ -450,7 +547,11 @@ class PedidoV24Agent:
                 return self._advance(conversa, "v24_despejo_foto", ctx, "Envie a próxima foto do despejo.")
             if choice not in {"2", "proximo passo", "➡️ proximo passo"}:
                 return "Selecione Outra Foto ou Próximo Passo."
-            return self._despejo_residuo_prompt(conversa, ctx)
+            if not ctx.get("fotos_despejo"):
+                return "Envie pelo menos uma imagem para continuar."
+            return self._advance(conversa, "v24_despejo_conformidade", ctx, self._despejo_conformidade_prompt(ctx))
+        if state in {"v24_despejo_residuo", "v24_despejo_conformidade", "v24_despejo_relato"}:
+            self._hydrate_legacy_despejo_context(ctx)
         if state == "v24_despejo_residuo":
             available = ctx.get("residuos_disponiveis") or []
             residue = None
@@ -458,24 +559,321 @@ class PedidoV24Agent:
                 residue = available[int(choice) - 1]
             if not residue:
                 residue = next((r for r in available if self._norm(r) == choice), None)
+            if residue and "pedido_id" in ctx:
+                ctx["residuo_efetivo"] = residue
+                ctx["carga_errada"] = True
+                return self._advance(conversa, "v24_despejo_relato", ctx, "Descreva a divergencia com pelo menos 10 caracteres.")
             if not residue:
                 return "Selecione um tipo de resíduo com cota em aberto."
-            self.service.confirmar_despejo(ctx["contentor_id"], residue)
+            self.service.confirmar_despejo(ctx["contentor_id"], residue, operador=conversa.telefone)
             return self._idle(conversa, "✅ Despejo auditado e ciclo concluído.")
         if state == "v24_despejo_conformidade":
+            if "pedido_id" in ctx:
+                if choice in {"1", "sim", "sim, corresponde", "âœ… sim, corresponde", "sim, tudo certo", "âœ… sim, tudo certo"}:
+                    ctx["residuo_efetivo"] = ctx["residuo_contratado"]
+                    ctx["carga_errada"] = False
+                    ctx["relato_carga"] = None
+                    return self._advance(conversa, "v24_despejo_confirmacao", ctx, self._despejo_confirmacao_prompt(ctx))
+                if choice in {"2", "nao", "nao, existe divergencia", "âŒ nao, existe divergencia", "nao, esta misturado/errado", "ðŸš¨ nao, esta misturado/errado"}:
+                    return self._despejo_residuo_efetivo_prompt(conversa, ctx)
+                return "Selecione se o material corresponde ao residuo contratado."
             residue = ctx["residuo_assumido"]
             if choice in {"1", "sim, tudo certo", "✅ sim, tudo certo"}:
-                self.service.confirmar_despejo(ctx["contentor_id"], residue)
+                self.service.confirmar_despejo(ctx["contentor_id"], residue, operador=conversa.telefone)
                 return self._idle(conversa, "✅ Despejo auditado e ciclo concluído.")
             if choice in {"2", "nao, esta misturado/errado", "🚨 nao, esta misturado/errado"}:
                 return self._advance(conversa, "v24_despejo_relato", ctx, "Justifique a carga errada com pelo menos 10 caracteres.")
             return "Selecione Sim, tudo certo ou Não, está misturado/errado."
         if state == "v24_despejo_relato":
+            if "pedido_id" in ctx:
+                relato = raw.strip()
+                if len(relato) < 10:
+                    return "O relato da carga precisa ter pelo menos 10 caracteres."
+                ctx["relato_carga"] = relato
+                return self._advance(conversa, "v24_despejo_confirmacao", ctx, self._despejo_confirmacao_prompt(ctx))
             if len(raw) < 10:
                 return "O relato da carga precisa ter pelo menos 10 caracteres."
-            self.service.confirmar_despejo(ctx["contentor_id"], ctx["residuo_assumido"], True, raw)
+            self.service.confirmar_despejo(
+                ctx["contentor_id"], ctx["residuo_assumido"], True, raw, operador=conversa.telefone
+            )
             return self._idle(conversa, "✅ Ciclo concluído com pendência de carga.")
+        if state == "v24_despejo_confirmacao":
+            if choice in {"1", "confirmar despejo", "confirmar", "âœ… confirmar despejo"}:
+                return self._confirmar_despejo_atual(conversa, ctx)
+            if choice in {"2", "voltar", "â†©ï¸ voltar"}:
+                return self._advance(conversa, "v24_despejo_conformidade", ctx, self._despejo_conformidade_prompt(ctx))
+            if choice in {"3", "cancelar", "âŒ cancelar"}:
+                return self._idle(conversa, "Despejo cancelado. Nenhuma foto foi salva e o ativo permanece em andamento.")
+            return "Escolha Confirmar despejo, Voltar ou Cancelar."
         return self._idle(conversa, "Fluxo reiniciado. Abra o menu para continuar.")
+
+    def _confirmar_despejo_atual(self, conversa, ctx):
+        contentor_id = ctx["contentor_id"]
+        fotos = list(ctx.get("fotos_despejo") or [])
+        try:
+            contentor = self.service.confirmar_despejo(
+                contentor_id,
+                ctx.get("residuo_efetivo"),
+                bool(ctx.get("carga_errada")),
+                ctx.get("relato_carga"),
+                operador=conversa.telefone,
+                pedido_id=ctx.get("pedido_id"),
+                fotos=fotos,
+            )
+        except ValueError:
+            pendentes = self._despejo_pendentes_por_pedido(ctx["pedido_id"])
+            self._limpar_despejo_atual(ctx)
+            if pendentes:
+                return self._advance(
+                    conversa,
+                    "v24_despejo_ativo",
+                    ctx,
+                    "Esse ativo foi atualizado por outro operador.\n\n"
+                    + self._despejo_selecao_prompt(ctx, pendentes),
+                )
+            return self._idle(conversa, "✅ Esse pedido ja nao possui ativos pendentes de despejo.")
+
+        despejos = list(ctx.get("despejos") or [])
+        despejos.append({"contentor_id": contentor_id, "fotos": len(fotos), "carga_errada": bool(ctx.get("carga_errada"))})
+        ctx["despejos"] = despejos
+        self._limpar_despejo_atual(ctx)
+        pendentes = self._despejo_pendentes_por_pedido(ctx["pedido_id"])
+        label = self._equipamento_label(contentor)
+        if pendentes:
+            return self._advance(
+                conversa,
+                "v24_despejo_ativo",
+                ctx,
+                f"✅ {label} processado no vazadouro.\n\nSelecione a proxima unidade deste cliente:\n\n"
+                + self._despejo_selecao_prompt(ctx, pendentes),
+            )
+        return self._idle(conversa, f"✅ {label} processado no vazadouro. Despejo do pedido concluido.")
+
+    def _limpar_despejo_atual(self, ctx):
+        for key in (
+            "contentor_id",
+            "fotos_despejo",
+            "residuo_contratado",
+            "residuo_efetivo",
+            "carga_errada",
+            "relato_carga",
+            "residuos_disponiveis",
+        ):
+            ctx.pop(key, None)
+
+    def _selected_despejo_contentor_id(self, raw, ctx) -> int | None:
+        return self._selected_id(raw, ctx.get("contentores") or [])
+
+    def _is_despejo_terminar(self, message, choice, ctx) -> bool:
+        if choice in {"terminar", "terminar despejos deste cliente", "🏁 terminar despejos deste cliente"}:
+            return True
+        if not choice.isdigit() or int(choice) != ctx.get("terminar_indice"):
+            return False
+        if message.tipo == "interactive":
+            return True
+        return self.db.get(PedidoContentor, int(choice)) is None
+
+    def _is_despejo_pendente_do_pedido(self, contentor, pedido_id: int) -> bool:
+        return bool(
+            contentor
+            and contentor.pedido_id == pedido_id
+            and contentor.status_recolha == "RECOLHIDO"
+            and contentor.status_ciclo == "EM_ANDAMENTO"
+        )
+
+    def _despejo_foto_prompt(self, ctx) -> str:
+        contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
+        label = self._equipamento_label(contentor) if contentor else "equipamento"
+        return f"Envie a foto do despejo do {label} no vazadouro."
+
+    def _despejo_conformidade_prompt(self, ctx) -> str:
+        return (
+            f"O material descarregado corresponde a {ctx['residuo_contratado']}?\n\n"
+            "1. ✅ Sim, corresponde\n"
+            "2. ❌ Não, existe divergência"
+        )
+
+    def _despejo_residuo_efetivo_prompt(self, conversa, ctx):
+        ctx["residuos_disponiveis"] = ["Entulho Limpo", "Entulho Misto"]
+        return self._advance(
+            conversa,
+            "v24_despejo_residuo",
+            ctx,
+            "Qual residuo foi efetivamente encontrado?\n\n"
+            + "\n".join(f"{index}. {residuo}" for index, residuo in enumerate(ctx["residuos_disponiveis"], 1)),
+        )
+
+    def _despejo_confirmacao_prompt(self, ctx) -> str:
+        pedido = self.service.get(ctx["pedido_id"])
+        contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
+        label = self._equipamento_label(contentor) if contentor else f"Ativo #{ctx['contentor_id']}"
+        linhas = [
+            "Confirme o despejo deste ativo:",
+            "",
+            f"Cliente: {pedido.nome_cliente if pedido else ctx.get('pedido_id')}",
+            f"Ativo: {label}",
+            f"Fotos: {len(ctx.get('fotos_despejo') or [])}",
+            f"Residuo contratado: {ctx.get('residuo_contratado')}",
+            f"Residuo efetivo: {ctx.get('residuo_efetivo')}",
+            f"Divergencia: {'Sim' if ctx.get('carga_errada') else 'Nao'}",
+        ]
+        if ctx.get("carga_errada"):
+            linhas.append(f"Relato: {ctx.get('relato_carga')}")
+        linhas.extend(["", "1. ✅ Confirmar despejo", "2. ↩️ Voltar", "3. ❌ Cancelar"])
+        return "\n".join(linhas)
+
+    def _despejo_selecao_prompt(self, ctx, pendentes) -> str:
+        ctx["contentores"] = [item.id for item in pendentes]
+        ctx["terminar_indice"] = len(pendentes) + 1
+        linhas = ["Selecione o ativo descarregado:"]
+        linhas.extend(f"{index}. {self._equipamento_label(item)}" for index, item in enumerate(pendentes, 1))
+        linhas.append(f"{ctx['terminar_indice']}. 🏁 Terminar despejos deste cliente")
+        return "\n".join(linhas)
+
+    def _despejo_pendentes_por_pedido(self, pedido_id: int):
+        pedido = self.service.get(pedido_id)
+        return self._despejo_pendentes(pedido) if pedido else []
+
+    def _despejo_pendentes(self, pedido):
+        return [
+            item
+            for item in sorted(pedido.contentores, key=lambda item: (item.numero_adesivo_contentor or "", item.id))
+            if item.status_recolha == "RECOLHIDO" and item.status_ciclo == "EM_ANDAMENTO"
+        ]
+
+    def _hydrate_legacy_despejo_context(self, ctx) -> None:
+        if "pedido_id" in ctx or not ctx.get("contentor_id"):
+            return
+        contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
+        if not contentor:
+            return
+        ctx["pedido_id"] = contentor.pedido_id
+        ctx.setdefault("residuo_contratado", contentor.residuo_contratado)
+        ctx.setdefault("residuo_efetivo", ctx.get("residuo_assumido"))
+        ctx.setdefault("carga_errada", None)
+        ctx.setdefault("relato_carga", None)
+        ctx.setdefault("fotos_despejo", [])
+
+    def _confirmar_recolha_atual(self, conversa, ctx):
+        contentor_id = ctx["contentor_id"]
+        avariado = bool(ctx.get("avariado"))
+        relato = ctx.get("relato_avaria")
+        fotos = list(ctx.get("fotos_recolha") or [])
+        try:
+            self.service.confirmar_recolha(contentor_id, conversa.telefone, avariado, relato, fotos)
+        except ValueError:
+            pendentes = self._recolha_pendentes_por_pedido(ctx["pedido_id"])
+            self._limpar_recolha_atual(ctx)
+            if pendentes:
+                return self._advance(
+                    conversa,
+                    "v24_recolha_ativo",
+                    ctx,
+                    "Esse ativo foi atualizado por outro operador.\n\n"
+                    + self._recolha_selecao_prompt(ctx, pendentes),
+                )
+            return self._idle(conversa, "✅ Esse pedido ja nao possui ativos pendentes de recolha.")
+
+        recolhas = list(ctx.get("recolhas") or [])
+        recolhas.append({"contentor_id": contentor_id, "avariado": avariado, "fotos": len(fotos)})
+        ctx["recolhas"] = recolhas
+        self._limpar_recolha_atual(ctx)
+
+        if "pedido_id" not in ctx:
+            if avariado:
+                return self._idle(conversa, "✅ Recolha registrada com pendencia de avaria.")
+            return self._idle(conversa, "✅ Recolha registrada. O contentor aguarda despejo.")
+
+        pendentes = self._recolha_pendentes_por_pedido(ctx["pedido_id"])
+        if pendentes:
+            return self._advance(
+                conversa,
+                "v24_recolha_ativo",
+                ctx,
+                "Ativo recolhido. Escolha o proximo ou termine as recolhas deste cliente.\n\n"
+                + self._recolha_selecao_prompt(ctx, pendentes),
+            )
+
+        if any(item.get("avariado") for item in recolhas):
+            return self._idle(conversa, "✅ Recolha do pedido concluida com pendencia de avaria. Ativos aguardam despejo.")
+        return self._idle(conversa, "✅ Recolha do pedido concluida. Ativos aguardam despejo.")
+
+    def _cancelar_recolha_atual(self, conversa, ctx):
+        self._limpar_recolha_atual(ctx)
+        pendentes = self._recolha_pendentes_por_pedido(ctx["pedido_id"])
+        if pendentes:
+            return self._advance(
+                conversa,
+                "v24_recolha_ativo",
+                ctx,
+                "Recolha do ativo cancelada. Nenhuma foto foi salva.\n\n"
+                + self._recolha_selecao_prompt(ctx, pendentes),
+            )
+        return self._idle(conversa, "✅ Nao existem mais ativos pendentes de recolha neste pedido.")
+
+    def _limpar_recolha_atual(self, ctx):
+        for key in ("contentor_id", "fotos_recolha", "avariado", "relato_avaria"):
+            ctx.pop(key, None)
+
+    def _selected_recolha_contentor_id(self, raw, ctx) -> int | None:
+        return self._selected_id(raw, ctx.get("contentores") or [])
+
+    def _is_recolha_terminar(self, message, choice, ctx) -> bool:
+        if choice in {"terminar", "terminar recolhas deste cliente", "🏁 terminar recolhas deste cliente"}:
+            return True
+        if not choice.isdigit() or int(choice) != ctx.get("terminar_indice"):
+            return False
+        if message.tipo == "interactive":
+            return True
+        return self.db.get(PedidoContentor, int(choice)) is None
+
+    def _is_recolha_pendente_do_pedido(self, contentor, pedido_id: int) -> bool:
+        return bool(
+            contentor
+            and contentor.pedido_id == pedido_id
+            and contentor.status_entrega == "ENTREGUE"
+            and contentor.status_recolha == "PENDENTE"
+        )
+
+    def _recolha_foto_prompt(self, ctx) -> str:
+        contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
+        label = self._equipamento_label(contentor) if contentor else "equipamento"
+        return f"Envie a foto de recolha do {label} cheio antes do icamento."
+
+    def _recolha_confirmacao_prompt(self, ctx) -> str:
+        contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
+        label = self._equipamento_label(contentor) if contentor else f"Ativo #{ctx['contentor_id']}"
+        avaria = "Sim" if ctx.get("avariado") else "Nao"
+        linhas = [
+            "Confirme a recolha deste ativo:",
+            "",
+            f"Ativo: {label}",
+            f"Fotos: {len(ctx.get('fotos_recolha') or [])}",
+            f"Avaria: {avaria}",
+        ]
+        if ctx.get("avariado"):
+            linhas.append(f"Relato: {ctx.get('relato_avaria')}")
+        linhas.extend(["", "1. Confirmar recolha", "2. Cancelar ativo"])
+        return "\n".join(linhas)
+
+    def _recolha_selecao_prompt(self, ctx, pendentes) -> str:
+        ctx["contentores"] = [item.id for item in pendentes]
+        ctx["terminar_indice"] = len(pendentes) + 1
+        linhas = ["Selecione o ativo que esta recolhendo:"]
+        linhas.extend(f"{index}. {self._equipamento_label(item)}" for index, item in enumerate(pendentes, 1))
+        linhas.append(f"{ctx['terminar_indice']}. 🏁 Terminar recolhas deste cliente")
+        return "\n".join(linhas)
+
+    def _recolha_pendentes_por_pedido(self, pedido_id: int):
+        pedido = self.service.get(pedido_id)
+        return self._recolha_pendentes(pedido) if pedido else []
+
+    def _recolha_pendentes(self, pedido):
+        return [
+            item
+            for item in sorted(pedido.contentores, key=lambda item: (item.numero_adesivo_contentor or "", item.id))
+            if item.status_entrega == "ENTREGUE" and item.status_recolha == "PENDENTE"
+        ]
 
     def _despejo_residuo_prompt(self, conversa, ctx):
         contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
@@ -494,6 +892,61 @@ class PedidoV24Agent:
             "Qual resíduo caiu no chão?\n\n"
             + "\n".join(f"{i}. 🟢 {item}" for i, item in enumerate(available, 1)),
         )
+
+    def _confirmar_entrega_preparada(self, conversa, ctx):
+        try:
+            pedido = self.service.confirmar_entrega_lote(
+                ctx["pedido_id"],
+                conversa.telefone,
+                ctx["latitude"],
+                ctx["longitude"],
+                ctx["referencia_entrega"],
+                ctx.get("entregas") or [],
+            )
+        except ValueError as exc:
+            return self._idle(conversa, f"⚠️ {exc}")
+        if pedido.status_pagamento == StatusPagamento.PENDENTE.value:
+            return self._advance(
+                conversa,
+                "v24_entrega_pagou",
+                ctx,
+                "O cliente realizou o pagamento no local?\n\n"
+                "1. ✅ Sim, foi pago\n"
+                "2. 🕒 Não, continua pendente",
+            )
+        return self._idle(conversa, "✅ Entrega confirmada com sucesso para todos os ativos processados.")
+
+    def _entrega_confirmacao_prompt(self, ctx):
+        pedido = self.service.get(ctx["pedido_id"])
+        entregas = ctx.get("entregas") or []
+        linhas = [
+            "Confirme a entrega preparada:",
+            "",
+            f"Cliente: {pedido.nome_cliente if pedido else ctx.get('pedido_id')}",
+            f"Pedido: #{ctx['pedido_id']}",
+            f"Quantidade de ativos: {len(entregas)}",
+        ]
+        for index, entrega in enumerate(entregas, 1):
+            contentor = self.db.get(PedidoContentor, entrega["contentor_id"])
+            label = self._equipamento_label(contentor) if contentor else f"Ativo #{entrega['contentor_id']}"
+            numero = entrega.get("numero_adesivo") or "sem identificação"
+            if contentor and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value and numero == "0":
+                numero = "sem frota"
+            linhas.append(
+                f"{index}. {label} | identificação: {numero} | fotos: {len(entrega.get('fotos') or [])}"
+            )
+        referencia = ctx.get("referencia_entrega") or "sem referência"
+        pagamento = "pendente" if pedido and pedido.status_pagamento == StatusPagamento.PENDENTE.value else "pago"
+        linhas.extend(
+            [
+                f"Ponto de referência: {referencia}",
+                f"Pagamento: {pagamento}",
+                "",
+                "1. ✅ Confirmar entrega",
+                "2. ❌ Cancelar",
+            ]
+        )
+        return "\n".join(linhas)
 
     def _finish_cadastro(self, conversa, ctx):
         if not ctx.get("_confirmado"):
@@ -569,6 +1022,44 @@ class PedidoV24Agent:
             "não, apenas equipamento": False,
             "apenas equipamento": False,
         }.get(choice)
+
+    def _pedido_entrega_label(self, pedido) -> str:
+        pendentes = [item for item in pedido.contentores if item.status_entrega == "PENDENTE"]
+        tipos = {item.tipo_equipamento for item in pendentes}
+        if tipos == {TipoEquipamentoPedido.CARRINHA.value}:
+            tipo = "Carrinha"
+        elif tipos == {TipoEquipamentoPedido.CONTENTOR.value}:
+            tipo = "Contentor"
+        else:
+            tipo = "Equipamento"
+        data = pedido.data_planejada.strftime("%d/%m/%Y") if pedido.data_planejada else "sem data"
+        return f"#{pedido.id} — {pedido.nome_cliente} — {tipo} x{len(pendentes)} — {data}"
+
+    def _pedido_recolha_label(self, pedido) -> str:
+        pendentes = self._recolha_pendentes(pedido)
+        contentores = [item for item in pendentes if item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value]
+        carrinhas = [item for item in pendentes if item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value]
+        partes = []
+        if contentores:
+            partes.append(", ".join(self._equipamento_label(item) for item in contentores))
+        if carrinhas:
+            partes.append(", ".join(self._equipamento_label(item) for item in carrinhas))
+        data = pedido.data_planejada.strftime("%d/%m/%Y") if pedido.data_planejada else "sem data"
+        resumo = " | ".join(partes) if partes else "sem ativos pendentes"
+        return f"#{pedido.id} - {pedido.nome_cliente} - {resumo} - {data}"
+
+    def _pedido_despejo_label(self, pedido) -> str:
+        pendentes = self._despejo_pendentes(pedido)
+        contentores = [item for item in pendentes if item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value]
+        carrinhas = [item for item in pendentes if item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value]
+        partes = []
+        if contentores:
+            partes.append(f"{len(contentores)} Contentor(es)")
+        if carrinhas:
+            partes.append(f"{len(carrinhas)} Carrinha(s)")
+        data = pedido.data_planejada.strftime("%d/%m/%Y") if pedido.data_planejada else "sem data"
+        resumo = " e ".join(partes) if partes else "sem ativos"
+        return f"#{pedido.id} - {pedido.nome_cliente} - {resumo} aguardando despejo - {data}"
 
     def _equipamento_label(self, contentor: PedidoContentor) -> str:
         if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:

@@ -165,6 +165,18 @@ class PedidoService:
             .all()
         )
 
+    def pedidos_para_recolha(self) -> list[Pedido]:
+        return (
+            self.db.query(Pedido)
+            .join(PedidoContentor)
+            .options(joinedload(Pedido.contentores))
+            .filter(PedidoContentor.status_entrega == StatusEntregaPedido.ENTREGUE.value)
+            .filter(PedidoContentor.status_recolha == StatusRecolhaPedido.PENDENTE.value)
+            .distinct()
+            .order_by(Pedido.data_planejada, Pedido.id)
+            .all()
+        )
+
     def contentores_para_despejo(self) -> list[PedidoContentor]:
         return (
             self.db.query(PedidoContentor)
@@ -172,6 +184,18 @@ class PedidoService:
             .filter(PedidoContentor.status_recolha == StatusRecolhaPedido.RECOLHIDO.value)
             .filter(PedidoContentor.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value)
             .order_by(PedidoContentor.numero_adesivo_contentor, PedidoContentor.id)
+            .all()
+        )
+
+    def pedidos_para_despejo(self) -> list[Pedido]:
+        return (
+            self.db.query(Pedido)
+            .join(PedidoContentor)
+            .options(joinedload(Pedido.contentores))
+            .filter(PedidoContentor.status_recolha == StatusRecolhaPedido.RECOLHIDO.value)
+            .filter(PedidoContentor.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value)
+            .distinct()
+            .order_by(Pedido.data_planejada, Pedido.id)
             .all()
         )
 
@@ -208,13 +232,18 @@ class PedidoService:
         pendentes = [c for c in pedido.contentores if c.status_entrega == StatusEntregaPedido.PENDENTE.value]
         entregas = entregas or []
         entregas_por_id = {int(item["contentor_id"]): item for item in entregas if item.get("contentor_id")}
+        if not entregas:
+            raise ValueError("Nenhum ativo preparado para entrega.")
+        if {c.id for c in pendentes} != set(entregas_por_id):
+            raise ValueError("A lista de ativos pendentes mudou. Reinicie a entrega.")
         if entregas:
-            if {c.id for c in pendentes} != set(entregas_por_id):
-                raise ValueError("Todos os contentores precisam do numero do adesivo.")
             adesivos = []
             for contentor in pendentes:
                 item = entregas_por_id[contentor.id]
                 adesivo = str(item.get("numero_adesivo") or "").strip()
+                fotos = [foto for foto in (item.get("fotos") or []) if foto]
+                if not fotos:
+                    raise ValueError("Todos os ativos precisam de pelo menos uma foto.")
                 if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value and adesivo == "0":
                     continue
                 if not adesivo:
@@ -273,23 +302,55 @@ class PedidoService:
         self.db.commit()
 
     def confirmar_recolha(
-        self, contentor_id: int, operador: str, avariado: bool, relato: str | None
+        self,
+        contentor_id: int,
+        operador: str,
+        avariado: bool,
+        relato: str | None,
+        fotos: list[str] | None = None,
     ) -> PedidoContentor:
         contentor = self.db.get(PedidoContentor, contentor_id)
-        if not contentor or contentor.status_entrega != StatusEntregaPedido.ENTREGUE.value:
+        if (
+            not contentor
+            or contentor.status_entrega != StatusEntregaPedido.ENTREGUE.value
+            or contentor.status_recolha != StatusRecolhaPedido.PENDENTE.value
+        ):
             raise ValueError("Contentor não disponível para recolha.")
-        if avariado and len((relato or "").strip()) < 10:
+        relato_limpo = (relato or "").strip()
+        if avariado and len(relato_limpo) < 10:
             raise ValueError("O relato da avaria precisa ter pelo menos 10 caracteres.")
+        fotos_unicas = []
+        for foto in fotos or []:
+            foto_limpa = str(foto or "").strip()
+            if foto_limpa and foto_limpa not in fotos_unicas:
+                fotos_unicas.append(foto_limpa)
         contentor.status_recolha = StatusRecolhaPedido.RECOLHIDO.value
         contentor.recolha_feita_por = operador
         contentor.recolha_data_hora = utcnow()
         contentor.contentor_avariado = avariado
-        contentor.relato_avaria = relato.strip() if avariado and relato else None
+        contentor.relato_avaria = relato_limpo if avariado else None
         contentor.status_resolucao_avaria = (
             StatusResolucaoPedido.PENDENTE.value
             if avariado
             else StatusResolucaoPedido.NAO_APLICA.value
         )
+        fotos_existentes = {
+            foto.url_midia
+            for foto in contentor.fotos
+            if foto.tipo_foto == TipoFoto.RECOLHA.value
+        }
+        for foto_url in fotos_unicas:
+            if foto_url in fotos_existentes:
+                continue
+            self.db.add(
+                ContentorFoto(
+                    pedido_contentor_id=contentor.id,
+                    url_midia=foto_url,
+                    tipo_foto=TipoFoto.RECOLHA.value,
+                    url_foto=foto_url,
+                    tipo=TipoFoto.RECOLHA.value.lower(),
+                )
+            )
         self.db.commit()
         return contentor
 
@@ -313,25 +374,59 @@ class PedidoService:
         residuo_efetivo: str,
         carga_errada: bool = False,
         relato: str | None = None,
+        operador: str | None = None,
+        pedido_id: int | None = None,
+        fotos: list[str] | None = None,
     ) -> PedidoContentor:
         contentor = self.db.get(PedidoContentor, contentor_id)
         if not contentor or contentor.status_recolha != StatusRecolhaPedido.RECOLHIDO.value:
             raise ValueError("Contentor não disponível para despejo.")
+        if pedido_id is not None and contentor.pedido_id != pedido_id:
+            raise ValueError("Ativo nao pertence ao pedido selecionado.")
         if contentor.status_ciclo == StatusCicloPedido.CONCLUIDO.value:
             raise ValueError("O ciclo deste contentor já foi concluído.")
+        if residuo_efetivo not in {"Entulho Limpo", "Entulho Misto"}:
+            raise ValueError("Residuo efetivo invalido.")
+        fotos_unicas = []
+        for foto in fotos or []:
+            foto_limpa = str(foto or "").strip()
+            if foto_limpa and foto_limpa not in fotos_unicas:
+                fotos_unicas.append(foto_limpa)
+        if fotos is not None and not fotos_unicas:
+            raise ValueError("Envie pelo menos uma foto do despejo.")
         cotas = self.cotas_restantes(contentor.pedido_id)
         if not carga_errada and cotas.get(residuo_efetivo, 0) <= 0:
             raise ValueError("Não existe cota em aberto para esse tipo de resíduo.")
-        if carga_errada and len((relato or "").strip()) < 10:
+        relato_limpo = (relato or "").strip()
+        if carga_errada and len(relato_limpo) < 10:
             raise ValueError("O relato da carga precisa ter pelo menos 10 caracteres.")
         contentor.residuo_efetivo_vazadouro = residuo_efetivo
         contentor.carga_errada = carga_errada
-        contentor.relato_carga = relato.strip() if carga_errada and relato else None
+        contentor.relato_carga = relato_limpo if carga_errada else None
         contentor.status_resolucao_carga = (
             StatusResolucaoPedido.PENDENTE.value
             if carga_errada
             else StatusResolucaoPedido.NAO_APLICA.value
         )
+        fotos_existentes = {
+            foto.url_midia
+            for foto in contentor.fotos
+            if foto.tipo_foto == TipoFoto.DESPEJO.value
+        }
+        for foto_url in fotos_unicas:
+            if foto_url in fotos_existentes:
+                continue
+            self.db.add(
+                ContentorFoto(
+                    pedido_contentor_id=contentor.id,
+                    url_midia=foto_url,
+                    tipo_foto=TipoFoto.DESPEJO.value,
+                    url_foto=foto_url,
+                    tipo=TipoFoto.DESPEJO.value.lower(),
+                )
+            )
+        contentor.despejo_feito_por = operador
+        contentor.despejo_data_hora = utcnow()
         contentor.status_ciclo = StatusCicloPedido.CONCLUIDO.value
         self.db.commit()
         return contentor

@@ -110,6 +110,37 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
                 """
             )
         )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pedidos (
+                    id, nome_cliente, telefone_cliente, data_planejada, valor_global,
+                    status_pagamento, pedido_feito_por, endereco_aproximado, criado_em, atualizado_em
+                )
+                VALUES (
+                    1, 'Cliente Pedido Antigo', '351900000001', '2026-01-01 10:00:00',
+                    200.00, 'PENDENTE', 'gestor', 'Rua Antiga',
+                    '2026-01-01 10:00:00', '2026-01-01 10:00:00'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pedido_contentores (
+                    id, pedido_id, numero_adesivo_contentor, residuo_contratado,
+                    status_entrega, status_recolha, status_ciclo,
+                    contentor_avariado, carga_errada, criado_em, atualizado_em
+                )
+                VALUES (
+                    1, 1, '77', 'Entulho Limpo', 'ENTREGUE', 'RECOLHIDO',
+                    'EM_ANDAMENTO', 0, 0, '2026-01-01 10:00:00',
+                    '2026-01-01 10:00:00'
+                )
+                """
+            )
+        )
 
     ensure_alugueres_contentor_schema(engine)
     ensure_alugueres_contentor_schema(engine)
@@ -146,10 +177,23 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
             row["name"]
             for row in connection.execute(text("PRAGMA table_info(pedido_contentores)")).mappings()
         }
+        pedido_contentor_row = connection.execute(
+            text(
+                """
+                SELECT numero_adesivo_contentor, residuo_contratado, tipo_equipamento,
+                       horario_agendado, precisa_mao_de_obra, despejo_feito_por,
+                       despejo_data_hora
+                FROM pedido_contentores WHERE id = 1
+                """
+            )
+        ).mappings().one()
         pedidos_columns = {
             row["name"]
             for row in connection.execute(text("PRAGMA table_info(pedidos)")).mappings()
         }
+        pedido_row = connection.execute(
+            text("SELECT precisa_mao_de_obra FROM pedidos WHERE id = 1")
+        ).mappings().one()
 
     assert {
         "email_cliente",
@@ -200,9 +244,19 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
         "tipo_equipamento",
         "horario_agendado",
         "precisa_mao_de_obra",
+        "despejo_feito_por",
+        "despejo_data_hora",
     } <= pedido_contentores_columns
     assert {"precisa_mao_de_obra"} <= pedidos_columns
     assert contentor_row["is_deleted"] == 0
     assert contentor_row["justificativa_exclusao"] is None
+    assert pedido_row["precisa_mao_de_obra"] == 0
+    assert pedido_contentor_row["numero_adesivo_contentor"] == "77"
+    assert pedido_contentor_row["residuo_contratado"] == "Entulho Limpo"
+    assert pedido_contentor_row["tipo_equipamento"] == "CONTENTOR"
+    assert pedido_contentor_row["horario_agendado"] is None
+    assert pedido_contentor_row["precisa_mao_de_obra"] == 0
+    assert pedido_contentor_row["despejo_feito_por"] is None
+    assert pedido_contentor_row["despejo_data_hora"] is None
     assert "quantidade_contentores" not in columns
     assert row_count == 1

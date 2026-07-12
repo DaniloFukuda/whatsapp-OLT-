@@ -113,6 +113,8 @@ class PedidoContentor(Base):
     status_resolucao_carga: Mapped[str] = mapped_column(
         String(20), default=StatusResolucaoPedido.NAO_APLICA.value, nullable=False
     )
+    despejo_feito_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    despejo_data_hora: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     criado_em: Mapped[DateTime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     atualizado_em: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False

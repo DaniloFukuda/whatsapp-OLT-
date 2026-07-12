@@ -1587,7 +1587,7 @@ def test_resumo_calcula_faturado_total_e_recebido_no_mes(db_session, monkeypatch
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000012"))
 
     assert "RESUMO FINANCEIRO DO MES" in response
-    assert "Total projetado do mes: EUR 0.00" in response
+    assert "Total projetado do mes: 0,00 €" in response
     assert "Faturamento do mes corrente:" not in response
 
 
@@ -1607,7 +1607,7 @@ def test_resumo_gestor_mostra_financeiro(db_session, monkeypatch):
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000010"))
 
     assert "RESUMO FINANCEIRO DO MES" in response
-    assert "Total projetado do mes: EUR 0.00" in response
+    assert "Total projetado do mes: 0,00 €" in response
 
 
 def test_resumo_funcionario_nao_mostra_financeiro(db_session, monkeypatch):

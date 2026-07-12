@@ -117,9 +117,13 @@ class WhatsappRouterAgent:
                 self._pending_messages = []
                 return UNAUTHORIZED_MESSAGE
             if self._has_active_flow(conversa):
+                is_v24_flow = conversa.estado_atual.startswith(PedidoV24Agent.PREFIX)
                 conversa.estado_atual = "idle"
                 conversa.contexto_json = {}
                 self.db.commit()
+                if is_v24_flow:
+                    self._queue_initial_menu(message.telefone)
+                    return "Operação cancelada. Nenhuma alteração foi salva."
                 return CANCELLED_MENU_MESSAGE
             return "Nenhuma operação em andamento para cancelar.\n\n" + self._initial_menu(message.telefone)
 
@@ -291,27 +295,30 @@ class WhatsappRouterAgent:
         tomorrow = today + timedelta(days=1)
         pedidos = self._pedidos_v32()
         linhas = [
-            "PAINEL DE CONTROLE OPERACIONAL OLT",
-            f"Data: {today:%d/%m/%Y}",
+            "📊 PAINEL DE CONTROLE OPERACIONAL OLT",
+            f"📅 Data: {today:%d/%m/%Y}",
         ]
         if perfil == PerfilOperador.GESTOR:
             linhas.extend(
                 [
                     "",
-                    "1. VENCEM AMANHA (ACAO COMERCIAL - EXCLUSIVO GESTOR - APENAS CONTENTORES):",
+                    "🗓️ 1. VENCEM AMANHA",
+                    "ACAO COMERCIAL",
                     self._painel_v32_vencem_amanha(pedidos, today),
                 ]
             )
         linhas.extend(
             [
                 "",
-                "2. RECOLHER HOJE (URGENTE):",
+                "🚛 2. RECOLHER HOJE",
+                "URGENTE",
                 self._painel_v32_recolhas(pedidos, today, "hoje"),
                 "",
-                "3. RECOLHER AMANHA (PLANEAMENTO):",
+                "🚚 3. RECOLHER AMANHA",
+                "PLANEAMENTO",
                 self._painel_v32_recolhas(pedidos, tomorrow, "amanha"),
                 "",
-                "4. PENDENCIAS ATIVAS:",
+                "🚨 4. PENDENCIAS ATIVAS",
                 self._painel_v32_pendencias(perfil),
             ]
         )
@@ -319,7 +326,7 @@ class WhatsappRouterAgent:
             linhas.extend(
                 [
                     "",
-                    "5. RESUMO FINANCEIRO DO MES (EXCLUSIVO GESTOR):",
+                    "💰 5. RESUMO FINANCEIRO DO MES",
                     self._painel_v32_financeiro(pedidos, today),
                 ]
             )
@@ -334,7 +341,7 @@ class WhatsappRouterAgent:
 
     def _painel_v32_vencem_amanha(self, pedidos: list[Pedido], today) -> str:
         linhas = []
-        for pedido in pedidos:
+        for pedido in sorted(pedidos, key=lambda pedido: (pedido.data_planejada, pedido.nome_cliente, pedido.id)):
             contentores = [
                 item for item in pedido.contentores
                 if self._is_contentor_para_recolha(item)
@@ -343,16 +350,18 @@ class WhatsappRouterAgent:
             ]
             if not contentores:
                 continue
-            link = f" | Renovar: {whatsapp_link(pedido.telefone_cliente)}" if pedido.telefone_cliente else ""
-            linhas.append(
-                f"- {pedido.nome_cliente}: {len(contentores)} contentor(es), "
-                f"valor total {self._money(pedido.valor_global)}{link}"
-            )
+            linha = [
+                f"• {pedido.nome_cliente} ({len(contentores)} Contentores)",
+                f"  Valor: {self._money(pedido.valor_global)}",
+            ]
+            if pedido.telefone_cliente:
+                linha.append(f"  💬 Enviar mensagem de renovacao: {whatsapp_link(pedido.telefone_cliente)}")
+            linhas.append("\n".join(linha))
         return "\n".join(linhas) if linhas else "Nenhum contentor vencendo amanha."
 
     def _painel_v32_recolhas(self, pedidos: list[Pedido], target_date, label: str) -> str:
         linhas = []
-        for pedido in pedidos:
+        for pedido in sorted(pedidos, key=lambda pedido: (pedido.data_planejada, pedido.nome_cliente, pedido.id)):
             contentores = [
                 item for item in pedido.contentores
                 if self._is_contentor_para_recolha(item)
@@ -364,36 +373,55 @@ class WhatsappRouterAgent:
                 )
             ]
             if contentores:
-                numeros = ", ".join(
-                    item.numero_adesivo_contentor or f"#{item.id}"
-                    for item in sorted(contentores, key=lambda item: item.numero_adesivo_contentor or str(item.id))
-                )
-                linhas.append(f"- Contentores | {pedido.nome_cliente}: {numeros}{self._rota_gps(pedido, contentores[0])}")
+                linhas.append(self._render_recolha_contentores(pedido, contentores))
             carrinhas = [
                 item for item in pedido.contentores
                 if self._is_carrinha_para_recolha(item)
                 and self._local_date(pedido.data_planejada) == target_date
             ]
-            if len(carrinhas) > 1:
-                horarios = ", ".join(
-                    item.horario_agendado or "sem horario"
-                    for item in sorted(carrinhas, key=lambda item: item.horario_agendado or str(item.id))
-                )
-                mao_obra = " - Com Pessoal" if self.pedido_service.precisa_mao_de_obra(pedido) else ""
-                linhas.append(
-                    f"- {len(carrinhas)} Carrinhas | {pedido.nome_cliente}: horario {horarios}"
-                    f"{mao_obra}{self._rota_gps(pedido, carrinhas[0])}"
-                )
-                carrinhas = []
-            for carrinha in carrinhas:
-                mao_obra = " • ⚠️ Com Pessoal" if self.pedido_service.precisa_mao_de_obra(pedido) else ""
-                linhas.append(
-                    f"- Carrinha | {pedido.nome_cliente}: horario {carrinha.horario_agendado or 'sem horario'}"
-                    f"{mao_obra}{self._rota_gps(pedido, carrinha)}"
-                )
+            if carrinhas:
+                linhas.append(self._render_recolha_carrinhas(pedido, carrinhas))
         if linhas:
             return "\n".join(linhas)
         return "Nenhum item para recolher hoje." if label == "hoje" else "Nenhum item para recolher amanha."
+
+    def _render_recolha_contentores(self, pedido: Pedido, contentores: list[PedidoContentor]) -> str:
+        numeros = ", ".join(
+            self._unique_sorted(
+                item.numero_adesivo_contentor or f"Ativo {item.id}"
+                for item in contentores
+            )
+        )
+        prefixo = "Contentores" if len(contentores) > 1 else "Contentor"
+        return f"- {prefixo} | {pedido.nome_cliente}: {numeros}{self._operational_extras(pedido, contentores)}"
+
+    def _render_recolha_carrinhas(self, pedido: Pedido, carrinhas: list[PedidoContentor]) -> str:
+        horarios = ", ".join(
+            self._unique_sorted(
+                item.horario_agendado or "sem horario"
+                for item in carrinhas
+            )
+        )
+        frotas = self._unique_sorted(
+            item.numero_adesivo_contentor
+            for item in carrinhas
+            if item.numero_adesivo_contentor and item.numero_adesivo_contentor != "0"
+        )
+        frota = f" | frota {', '.join(frotas)}" if frotas else ""
+        prefixo = f"{len(carrinhas)} Carrinhas" if len(carrinhas) > 1 else "Carrinha"
+        return f"- {prefixo} | {pedido.nome_cliente}: horario {horarios}{frota}{self._operational_extras(pedido, carrinhas)}"
+
+    def _operational_extras(self, pedido: Pedido, itens: list[PedidoContentor]) -> str:
+        extras = []
+        if self.pedido_service.precisa_mao_de_obra(pedido):
+            extras.append("Com Pessoal")
+        rota = self._rota_gps(pedido, itens[0]) if itens else ""
+        if rota:
+            extras.append(f"Rota: {rota}")
+        return f" | {' | '.join(extras)}" if extras else ""
+
+    def _unique_sorted(self, values) -> list[str]:
+        return sorted({str(value).strip() for value in values if value and str(value).strip()})
 
     def _painel_v32_pendencias(self, perfil: PerfilOperador) -> str:
         itens = self.pedido_service.pendencias()
@@ -427,24 +455,32 @@ class WhatsappRouterAgent:
             "contentores_pendente": Decimal("0"),
             "carrinhas_pago": Decimal("0"),
             "carrinhas_pendente": Decimal("0"),
+            "global_pago": Decimal("0"),
+            "global_pendente": Decimal("0"),
         }
         for pedido in pedidos:
-            if self._local_date(pedido.data_planejada).year != today.year or self._local_date(pedido.data_planejada).month != today.month:
+            criado_em = self._local_date(pedido.criado_em)
+            if criado_em.year != today.year or criado_em.month != today.month:
                 continue
-            contentores = sum(1 for item in pedido.contentores if item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value)
-            carrinhas = sum(1 for item in pedido.contentores if item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value)
-            total_itens = contentores + carrinhas
-            if not total_itens:
+            tipos = {
+                item.tipo_equipamento
+                for item in pedido.contentores
+                if item.tipo_equipamento in {
+                    TipoEquipamentoPedido.CONTENTOR.value,
+                    TipoEquipamentoPedido.CARRINHA.value,
+                }
+            }
+            if not tipos:
                 continue
             valor = Decimal(str(pedido.valor_global or 0))
-            # Pedido misto divide o valor proporcionalmente para nao duplicar receita por equipamento.
-            valor_contentores = valor * Decimal(contentores) / Decimal(total_itens)
-            valor_carrinhas = valor * Decimal(carrinhas) / Decimal(total_itens)
             status = "pago" if pedido.status_pagamento == StatusPagamento.PAGO.value else "pendente"
-            totais[f"contentores_{status}"] += valor_contentores
-            totais[f"carrinhas_{status}"] += valor_carrinhas
-        faturado = totais["contentores_pago"] + totais["carrinhas_pago"]
-        receber = totais["contentores_pendente"] + totais["carrinhas_pendente"]
+            totais[f"global_{status}"] += valor
+            if tipos == {TipoEquipamentoPedido.CONTENTOR.value}:
+                totais[f"contentores_{status}"] += valor
+            elif tipos == {TipoEquipamentoPedido.CARRINHA.value}:
+                totais[f"carrinhas_{status}"] += valor
+        faturado = totais["global_pago"]
+        receber = totais["global_pendente"]
         return "\n".join(
             [
                 f"- Receita de Contentores ja paga: {self._money(totais['contentores_pago'])}",
@@ -486,10 +522,14 @@ class WhatsappRouterAgent:
         longitude = item.entrega_longitude if item.entrega_longitude is not None else pedido.endereco_longitude
         if latitude is None or longitude is None:
             return ""
-        return f" | Rota: https://www.google.com/maps?q={latitude},{longitude}"
+        if Decimal(str(latitude)) == Decimal("0") and Decimal(str(longitude)) == Decimal("0"):
+            return ""
+        return f"https://www.google.com/maps?q={latitude},{longitude}"
 
     def _money(self, value) -> str:
-        return f"EUR {Decimal(str(value or 0)):.2f}"
+        quantized = Decimal(str(value or 0)).quantize(Decimal("0.01"))
+        formatted = f"{quantized:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+        return f"{formatted} €"
 
     def _pendencias_v24(self, mostrar_financeiro: bool = True) -> str:
         itens = self.pedido_service.pendencias()
@@ -842,9 +882,13 @@ class WhatsappRouterAgent:
         append_menu_on_success: bool = False,
     ) -> str:
         response = self._detach_embedded_menu(response, telefone)
-        if append_menu_on_success and conversa.estado_atual == "idle" and response.lstrip().startswith("✅"):
+        if append_menu_on_success and conversa.estado_atual == "idle" and self._is_success_response(response):
             self._queue_initial_menu(telefone)
         return response
+
+    def _is_success_response(self, response: str) -> bool:
+        clean = (response or "").lstrip()
+        return clean.startswith("✅") or clean.startswith("âœ…")
 
     def _detach_embedded_menu(self, response: str, telefone: str) -> str:
         markers = (
