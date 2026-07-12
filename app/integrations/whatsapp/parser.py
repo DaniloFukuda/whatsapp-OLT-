@@ -159,7 +159,7 @@ def _location_text(
     if name and address:
         description = f"{name} - {address}"
     else:
-        description = address or name or "Localizacao enviada pelo WhatsApp"
+        description = address or name or "Localização enviada pelo WhatsApp"
     return _location_text_with_limit(description, link, max_chars)
 
 
@@ -176,7 +176,7 @@ def _location_coords(latitude: Any, longitude: Any) -> tuple[str, str] | None:
 
 def _location_text_with_limit(description: str, link: str, max_chars: int) -> str:
     separator = " - "
-    description = _clean_text(description) or "Localizacao enviada pelo WhatsApp"
+    description = _clean_text(description) or "Localização enviada pelo WhatsApp"
     available = max_chars - len(separator) - len(link)
     if available <= 0:
         return link[-max_chars:]

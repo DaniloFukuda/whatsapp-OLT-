@@ -1,6 +1,7 @@
 import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
@@ -172,13 +173,6 @@ class PedidoV24Agent:
             if not equipamento:
                 return "Selecione Contentor ou Carrinha."
             ctx["item_atual"] = {"tipo_equipamento": equipamento, "horario_agendado": None}
-            if equipamento == TipoEquipamentoPedido.CARRINHA.value:
-                return self._advance(
-                    conversa,
-                    "v24_cadastro_horario_carrinha",
-                    ctx,
-                    "Qual o horário agendado da carrinha? Envie no formato HH:MM. Ex: 14:00",
-                )
             return self._advance(conversa, "v24_cadastro_mao_obra", ctx, self._mao_obra_prompt())
         if state == "v24_cadastro_horario_carrinha":
             if not self._horario_valido(raw):
@@ -187,14 +181,21 @@ class PedidoV24Agent:
             item_atual["horario_agendado"] = raw
             ctx["item_atual"] = item_atual
             ctx["horario_agendado"] = raw
+            if "precisa_mao_de_obra" in ctx:
+                return self._advance(conversa, "v24_cadastro_residuo", ctx, self._residuo_prompt(ctx))
             return self._advance(conversa, "v24_cadastro_mao_obra", ctx, self._mao_obra_prompt())
         if state == "v24_cadastro_mao_obra":
             mao_obra = self._parse_mao_obra(choice)
             if mao_obra is not None:
                 item_atual = dict(ctx.get("item_atual") or {})
+                tipo_item = item_atual.get("tipo_equipamento") or ctx.get("tipo_solicitacao")
+                if tipo_item:
+                    item_atual["tipo_equipamento"] = tipo_item
                 item_atual["precisa_mao_de_obra"] = mao_obra
                 ctx["item_atual"] = item_atual
                 ctx["precisa_mao_de_obra"] = mao_obra
+                if tipo_item == TipoEquipamentoPedido.CARRINHA.value and not item_atual.get("horario_agendado"):
+                    return self._advance(conversa, "v24_cadastro_horario_carrinha", ctx, self._horario_carrinha_prompt())
                 return self._advance(conversa, "v24_cadastro_residuo", ctx, self._residuo_prompt(ctx))
             return self._mao_obra_prompt()
         if state == "v24_cadastro_residuo":
@@ -244,7 +245,7 @@ class PedidoV24Agent:
             return self._advance(conversa, "v24_cadastro_endereco", ctx, self._endereco_prompt())
         if state == "v24_cadastro_endereco":
             if message.tipo == "location" and not self._coordinates(message, raw):
-                return "Nao foi possivel ler a localizacao. Reenvie a localizacao nativa ou digite o endereco."
+                return "Não foi possível ler a localização. Reenvie a localização nativa ou digite o endereço."
             if not raw or len(raw) > 300:
                 return "O endereço precisa ter entre 1 e 300 caracteres."
             ctx["endereco"] = raw
@@ -598,6 +599,9 @@ class PedidoV24Agent:
     def _tipo_solicitacao_prompt(self):
         return "🚛 Qual é o tipo de solicitação?\n\n1️⃣ Contentor\n2️⃣ Carrinha"
 
+    def _horario_carrinha_prompt(self):
+        return "Qual o horário agendado da carrinha? Envie no formato HH:MM. Ex: 14:00"
+
     def _quantidade_prompt(self, ctx):
         if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value:
             return "🔢 Quantas carrinhas são necessárias para este pedido?"
@@ -621,22 +625,27 @@ class PedidoV24Agent:
     def _format_confirmacao_cadastro(self, ctx):
         tipo = self._tipo_label(ctx.get("tipo_solicitacao"))
         mao_obra = "Sim" if ctx.get("precisa_mao_de_obra") else "Não"
+        quantidade_label = (
+            "Quantidade de carrinhas"
+            if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value
+            else "Quantidade de contentores"
+        )
         linhas = [
             "Confirme os dados do pedido:",
             "",
             f"Tipo da solicitação: {tipo}",
-            f"Quantidade: {ctx.get('quantidade')}",
+            f"{quantidade_label}: {ctx.get('quantidade')}",
             f"Mão de obra: {mao_obra}",
         ]
         if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value:
-            linhas.append(f"Horario da carrinha: {ctx.get('horario_agendado') or 'sem horario'}")
+            linhas.append(f"Horário da carrinha: {ctx.get('horario_agendado') or 'sem horário'}")
         linhas.extend(
             [
                 f"Cliente: {ctx.get('nome')}",
                 f"Telefone: {ctx.get('telefone')}",
-                f"Valor: {ctx.get('valor')}",
+                f"Valor: {self._format_money(ctx.get('valor'))}",
                 f"Pagamento: {'Pago' if ctx.get('pago') else 'Pendente'}",
-                f"Endereco: {ctx.get('endereco')}",
+                f"Endereço: {ctx.get('endereco')}",
                 "",
                 "1. Confirmar e salvar",
                 "2. Corrigir",
@@ -651,18 +660,33 @@ class PedidoV24Agent:
     def _endereco_prompt(self):
         return "Informe o endereço aproximado (até 300 caracteres) ou envie um link do Google Maps."
 
+    def _format_money(self, value):
+        try:
+            amount = Decimal(str(value)).quantize(Decimal("0.01"))
+        except (InvalidOperation, TypeError, ValueError):
+            amount = Decimal("0.00")
+        formatted = f"{amount:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+        return f"{formatted} €"
+
     def _advance(self, conversa, state, ctx, response):
         if state == "v24_cadastro_tipo_solicitacao":
             response = self._tipo_solicitacao_prompt()
         elif state == "v24_cadastro_quantidade":
             response = self._quantidade_prompt(ctx)
         elif state == "v24_cadastro_tipo_equipamento" and ctx.get("tipo_solicitacao"):
-            if "precisa_mao_de_obra" in ctx:
+            if (
+                "precisa_mao_de_obra" in ctx
+                and ctx["tipo_solicitacao"] == TipoEquipamentoPedido.CARRINHA.value
+                and not ctx.get("horario_agendado")
+            ):
+                state = "v24_cadastro_horario_carrinha"
+                response = self._horario_carrinha_prompt()
+            elif "precisa_mao_de_obra" in ctx:
                 state = "v24_cadastro_residuo"
                 response = self._residuo_prompt(ctx)
             elif ctx["tipo_solicitacao"] == TipoEquipamentoPedido.CARRINHA.value:
-                state = "v24_cadastro_horario_carrinha"
-                response = "Qual o horario agendado da carrinha? Envie no formato HH:MM. Ex: 14:00"
+                state = "v24_cadastro_mao_obra"
+                response = self._mao_obra_prompt()
             else:
                 state = "v24_cadastro_mao_obra"
                 response = self._mao_obra_prompt()

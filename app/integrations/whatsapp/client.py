@@ -325,7 +325,7 @@ def _normalize_button_text(value: str) -> str:
 
 
 def _is_main_menu(body: str) -> bool:
-    return "Menu principal - OLT Entulhos" in (body or "")
+    return "Menu principal - OLT Gestão de Resíduos & Demolições" in (body or "")
 
 
 def _should_mock(settings) -> bool:

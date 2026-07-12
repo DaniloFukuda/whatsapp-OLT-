@@ -2,7 +2,13 @@ from datetime import datetime, timedelta
 
 from app.agents.aluguer_agent import AluguerAgent
 from app.agents.recolha_agent import RecolhaAgent
-from app.agents.whatsapp_router_agent import CANCELLED_MENU_MESSAGE, MAIN_MENU, WhatsappRouterAgent
+from app.agents.whatsapp_router_agent import (
+    APP_DISPLAY_NAME,
+    CANCELLED_MENU_MESSAGE,
+    MAIN_MENU,
+    UNAUTHORIZED_MESSAGE,
+    WhatsappRouterAgent,
+)
 from app.core.config import get_settings
 from app.core.phone import normalize_phone, normalize_portugal_phone, whatsapp_link
 from app.core.time import utcnow
@@ -738,7 +744,7 @@ def test_exclusao_com_opcao_2_cancela_sem_apagar(db_session, monkeypatch):
     response = router.handle(text_message("2"))
 
     assert "Exclusao cancelada. Nenhum registro foi apagado." in response
-    assert "Menu principal - OLT Entulhos" not in response
+    assert "Menu principal" not in response
     assert router.pop_pending_messages() == [MAIN_MENU]
     assert AluguerService(db_session)._get_or_raise(aluguer.id).id == aluguer.id
 
@@ -799,7 +805,7 @@ def test_exclusao_com_confirmacao_clara_exclui(db_session, monkeypatch):
     assert pedido_justificativa == "Informe a justificativa da exclusao com pelo menos 10 caracteres."
     assert curta == "A justificativa deve ter pelo menos 10 caracteres."
     assert f"Registro #{aluguer_id} excluido." in response
-    assert "Menu principal - OLT Entulhos" not in response
+    assert "Menu principal" not in response
     assert router.pop_pending_messages() == [MAIN_MENU]
     assert db_session.get(type(aluguer), aluguer_id) is not None
     assert aluguer.is_deleted is True
@@ -844,7 +850,7 @@ def test_remover_contentor_rejeita_justificativa_curta_e_exclui_com_auditoria(db
     assert pedido_justificativa == "Informe a justificativa da exclusao com pelo menos 10 caracteres."
     assert curta == "A justificativa deve ter pelo menos 10 caracteres."
     assert "Contentor 1 excluido com seguranca." in response
-    assert "Menu principal - OLT Entulhos" not in response
+    assert "Menu principal" not in response
     assert router.pop_pending_messages() == [MAIN_MENU]
     assert contentor.is_deleted is True
     assert contentor.excluido_por_operador == "351900000041"
@@ -896,7 +902,7 @@ def test_alteracao_status_contentor_confirma_e_grava_operador(db_session, monkey
     assert "Status atual: disponivel" in status_prompt
     assert "Novo status: manutencao" in confirmacao
     assert "Status do contentor 1 alterado para manutencao." in response
-    assert "Menu principal - OLT Entulhos" not in response
+    assert "Menu principal" not in response
     assert router.pop_pending_messages() == [MAIN_MENU]
     assert contentor.status == StatusContentor.MANUTENCAO
     assert contentor.alterado_por_operador == "351900000050"
@@ -947,8 +953,8 @@ def test_numero_nao_autorizado_nao_altera_nem_exclui(db_session, monkeypatch):
     alterar = router.handle(text_message("alterar", telefone="351900000000"))
     excluir = router.handle(text_message("excluir", telefone="351900000000"))
 
-    assert alterar == "Telefone nao autorizado para alterar registros. Contacte o administrador do sistema."
-    assert excluir == "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
+    assert alterar == UNAUTHORIZED_MESSAGE
+    assert excluir == UNAUTHORIZED_MESSAGE
 
 
 def test_renovar_e_prorrogar_iniciam_fluxo(db_session, monkeypatch):
@@ -1208,8 +1214,8 @@ def test_numero_nao_autorizado_nao_renova_nem_prorroga(db_session, monkeypatch):
     renovar = router.handle(text_message("renovar", telefone="351900000000"))
     prorrogar = router.handle(text_message("prorrogar", telefone="351900000000"))
 
-    assert renovar == "Telefone nao autorizado para renovar registros. Contacte o administrador do sistema."
-    assert prorrogar == "Telefone nao autorizado para renovar registros. Contacte o administrador do sistema."
+    assert renovar == UNAUTHORIZED_MESSAGE
+    assert prorrogar == UNAUTHORIZED_MESSAGE
 
 
 def test_gestor_ve_menu_completo_e_acessa_entrega(db_session, monkeypatch):
@@ -1230,7 +1236,7 @@ def test_gestor_ve_menu_completo_e_acessa_entrega(db_session, monkeypatch):
     menu = router.handle(text_message("ola", telefone=telefone))
     entrega = router.handle(text_message("2", telefone=telefone))
 
-    assert "Menu principal - OLT Entulhos" in menu
+    assert f"Menu principal - {APP_DISPLAY_NAME}" in menu
     assert "Entrega de contentor" in menu
     assert "Entrega de contentor" in entrega or "Nao existem pedidos pendentes de entrega" in entrega
 
@@ -1288,7 +1294,7 @@ def test_numero_nao_autorizado(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("novo", telefone="556100000000"))
 
-    assert response == "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
+    assert response == UNAUTHORIZED_MESSAGE
 
 
 def test_mensagem_novo_de_operador_autorizado_inicia_fluxo(db_session, monkeypatch):
@@ -1340,7 +1346,7 @@ def test_operador_inativo_no_banco_e_bloqueado(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("novo", telefone="351900000021"))
 
-    assert response == "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
+    assert response == UNAUTHORIZED_MESSAGE
 
 
 def test_telefone_desconhecido_e_bloqueado_quando_existir_operador_no_banco(db_session, monkeypatch):
@@ -1357,7 +1363,7 @@ def test_telefone_desconhecido_e_bloqueado_quando_existir_operador_no_banco(db_s
 
     response = WhatsappRouterAgent(db_session).handle(text_message("novo", telefone="351900000023"))
 
-    assert response == "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
+    assert response == UNAUTHORIZED_MESSAGE
 
 
 def test_cancelar_sem_fluxo_ativo_informa_que_nao_ha_operacao(db_session, monkeypatch):
@@ -1366,8 +1372,8 @@ def test_cancelar_sem_fluxo_ativo_informa_que_nao_ha_operacao(db_session, monkey
     response = WhatsappRouterAgent(db_session).handle(text_message("cancelar"))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one()
 
-    assert "Nenhuma operacao em andamento para cancelar." in response
-    assert "Menu principal - OLT Entulhos" in response
+    assert "Nenhuma operação em andamento para cancelar." in response
+    assert f"Menu principal - {APP_DISPLAY_NAME}" in response
     assert conversa.estado_atual == "idle"
     assert conversa.contexto_json == {}
 
@@ -1379,10 +1385,99 @@ def test_menu_global_mostra_menu_principal_sem_cancelamento(db_session, monkeypa
     for texto in ("Menu", "menu", "MENU"):
         response = router.handle(text_message(texto, telefone=f"3519000007{len(texto)}"))
 
-        assert "Menu principal - OLT Entulhos" in response
+        assert f"Menu principal - {APP_DISPLAY_NAME}" in response
         assert "Novo pedido" in response
         assert "Nenhuma operacao em andamento para cancelar" not in response
         assert "Nenhuma operação em andamento para cancelar" not in response
+
+
+def test_menu_global_nao_autorizado_nao_recebe_menu_nem_pendentes(db_session, monkeypatch):
+    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONE", "351999999999")
+    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONES", "")
+    monkeypatch.setenv("WHATSAPP_OWNER_PHONE", "")
+    monkeypatch.setenv("OWNER_WHATSAPP", "")
+    get_settings.cache_clear()
+    router = WhatsappRouterAgent(db_session)
+
+    response = router.handle(text_message("menu", telefone="351900000000"))
+
+    assert response == UNAUTHORIZED_MESSAGE
+    assert "Menu principal" not in response
+    assert router.pop_pending_messages() == []
+
+
+def test_menu_global_funcionario_ativo_recebe_apenas_opcoes_permitidas(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    telefone = "351900000081"
+    db_session.add(
+        Operador(
+            telefone_whatsapp=telefone,
+            nome_operador="Funcionario Menu",
+            perfil=PerfilOperador.FUNCIONARIO,
+            ativo=True,
+        )
+    )
+    db_session.commit()
+
+    response = WhatsappRouterAgent(db_session).handle(text_message("menu", telefone=telefone))
+
+    assert "Confirmar entrega de contentor" in response
+    assert "Confirmar recolha de contentor" in response
+    assert "Novo pedido" not in response
+    assert "Resumo dos contentores" not in response
+
+
+def test_menu_global_operador_inativo_nao_recebe_menu(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    telefone = "351900000082"
+    db_session.add(
+        Operador(
+            telefone_whatsapp=telefone,
+            nome_operador="Inativo Menu",
+            perfil=PerfilOperador.GESTOR,
+            ativo=False,
+        )
+    )
+    db_session.commit()
+    router = WhatsappRouterAgent(db_session)
+
+    response = router.handle(text_message("menu", telefone=telefone))
+
+    assert response == UNAUTHORIZED_MESSAGE
+    assert router.pop_pending_messages() == []
+
+
+def test_menu_global_telefone_nao_cadastrado_nao_recebe_menu_quando_ha_operadores(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    db_session.add(
+        Operador(
+            telefone_whatsapp="351900000083",
+            nome_operador="Gestor Existente",
+            perfil=PerfilOperador.GESTOR,
+            ativo=True,
+        )
+    )
+    db_session.commit()
+    router = WhatsappRouterAgent(db_session)
+
+    response = router.handle(text_message("menu", telefone="351900000084"))
+
+    assert response == UNAUTHORIZED_MESSAGE
+    assert router.pop_pending_messages() == []
+
+
+def test_cancelar_nao_autorizado_nao_recebe_menu(db_session, monkeypatch):
+    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONE", "351999999999")
+    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONES", "")
+    monkeypatch.setenv("WHATSAPP_OWNER_PHONE", "")
+    monkeypatch.setenv("OWNER_WHATSAPP", "")
+    get_settings.cache_clear()
+    router = WhatsappRouterAgent(db_session)
+
+    response = router.handle(text_message("cancelar", telefone="351900000000"))
+
+    assert response == UNAUTHORIZED_MESSAGE
+    assert router.pop_pending_messages() == []
 
 
 def test_comando_resumo_mostra_contadores_operacionais(db_session, monkeypatch):
@@ -1601,7 +1696,7 @@ def test_numero_nao_autorizado_nao_recebe_resumo_detalhado(db_session, monkeypat
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000000"))
 
-    assert response == "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
+    assert response == UNAUTHORIZED_MESSAGE
     assert "Cliente Retirada Hoje" not in response
 
 

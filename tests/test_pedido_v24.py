@@ -50,8 +50,6 @@ def liberar_operadores(monkeypatch):
 
 def avancar_cadastro_v24_ate_mao_obra(router, *, tipo="contentor", quantidade="1", phone="351900009900"):
     steps = ["novo pedido", tipo, "Cliente Hotfix", "351912345678", quantidade]
-    if tipo == "carrinha":
-        steps.append("09:30")
     response = ""
     for text in steps:
         response = router.handle(msg(text, phone=phone))
@@ -250,6 +248,55 @@ def test_cadastro_v24_tipo_invalido_nao_avanca_fluxo(db_session, monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("valor", "esperado"),
+    [
+        ("50", "Valor: 50,00 €"),
+        ("50.5", "Valor: 50,50 €"),
+        ("1250.75", "Valor: 1.250,75 €"),
+    ],
+)
+def test_cadastro_v24_resumo_formata_valor_em_euros(db_session, valor, esperado):
+    agent = WhatsappRouterAgent(db_session).pedido_v24_agent
+    response = agent._format_confirmacao_cadastro(
+        {
+            "tipo_solicitacao": TipoEquipamentoPedido.CONTENTOR.value,
+            "quantidade": 2,
+            "precisa_mao_de_obra": False,
+            "nome": "Cliente",
+            "telefone": "351912345678",
+            "valor": valor,
+            "pago": False,
+            "endereco": "Rua",
+        }
+    )
+
+    assert esperado in response
+    assert "Quantidade de contentores: 2" in response
+    assert "Quantidade:" not in response
+
+
+def test_cadastro_v24_resumo_mostra_quantidade_de_carrinhas(db_session):
+    agent = WhatsappRouterAgent(db_session).pedido_v24_agent
+
+    response = agent._format_confirmacao_cadastro(
+        {
+            "tipo_solicitacao": TipoEquipamentoPedido.CARRINHA.value,
+            "quantidade": 1,
+            "precisa_mao_de_obra": True,
+            "horario_agendado": "14:00",
+            "nome": "Cliente",
+            "telefone": "351912345678",
+            "valor": "50",
+            "pago": False,
+            "endereco": "Rua",
+        }
+    )
+
+    assert "Quantidade de carrinhas: 1" in response
+    assert "Horário da carrinha: 14:00" in response
+
+
+@pytest.mark.parametrize(
     ("choice", "expected"),
     [
         ("pedido_mao_obra_sim", True),
@@ -312,8 +359,8 @@ def test_cadastro_v24_carrinha_mao_obra_continua_avancando_para_residuo(db_sessi
     response = router.handle(msg(choice))
     conversa = db_session.query(ConversaWhatsApp).one()
 
-    assert conversa.estado_atual == "v24_cadastro_residuo"
-    assert "Resíduo da carrinha 1/1" in response
+    assert conversa.estado_atual == "v24_cadastro_horario_carrinha"
+    assert "HH:MM" in response
 
 
 def test_cadastro_v24_residuos_multicontentor_usam_mesmo_prompt_interativo(db_session, monkeypatch):
@@ -391,7 +438,7 @@ def test_cadastro_v24_endereco_rejeita_location_sem_coordenadas_sem_apagar_conte
 
     assert conversa.estado_atual == "v24_cadastro_endereco"
     assert conversa.contexto_json == before
-    assert "Nao foi possivel ler a localizacao" in response
+    assert "Não foi possível ler a localização" in response
 
 
 def test_cadastro_v24_endereco_digitado_e_link_maps_continuam_funcionando(db_session, monkeypatch):
@@ -601,6 +648,8 @@ def test_menu_principal_usa_texto_com_emojis_sem_list_message():
     assert result["status"] == "mocked"
     assert result["body"] == MAIN_MENU
     assert "interactive_type" not in result
+    assert "OLT Gestão de Resíduos & Demolições" in result["body"]
+    assert "OLT Entulhos" not in result["body"]
     assert "1. 🟢 Novo pedido" in result["body"]
 
 
@@ -614,20 +663,23 @@ def test_cadastro_v24_carrinha_valida_horario_e_mao_de_obra(db_session, monkeypa
 
     for text in ["novo pedido", "carrinha", "Cliente Carrinha", "351912345678", "1"]:
         response = router.handle(msg(text))
-    assert "HH:MM" in response
+    assert "mão de obra" in response.lower()
+    assert "Sim" in response
+    assert "Não" in response
+    horario = router.handle(msg("1"))
+    assert "HH:MM" in horario
     invalid = router.handle(msg("99:99"))
     assert "Horário inválido" in invalid
-    mao_obra = router.handle(msg("09:30"))
-    assert "mão de obra" in mao_obra.lower()
-    assert "Sim" in mao_obra
-    assert "Não" in mao_obra
-    residuo_prompt = router.handle(msg("1"))
+    residuo_prompt = router.handle(msg("09:30"))
     assert "Entulho Limpo" in residuo_prompt
     for text in ["1", "Hoje", "250", "Não, pendente", "Rua da Carrinha", "Não"]:
         response = router.handle(msg(text))
     assert "Tipo da solicita" in response
     assert "Carrinha" in response
+    assert "Quantidade de carrinhas: 1" in response
     assert "Mão de obra: Sim" in response
+    assert "Horário da carrinha: 09:30" in response
+    assert "Valor: 250,00 €" in response
     response = router.handle(msg("1"))
 
     pedido = db_session.query(Pedido).one()
@@ -667,12 +719,14 @@ def test_cadastro_v24_carrinha_multipla_pergunta_mao_de_obra_uma_vez(db_session,
     liberar_operadores(monkeypatch)
     router = WhatsappRouterAgent(db_session)
 
-    steps = ["novo pedido", "carrinha", "Cliente Carrinhas", "351912345678", "2", "09:30"]
+    steps = ["novo pedido", "carrinha", "Cliente Carrinhas", "351912345678", "2"]
     for text in steps:
         response = router.handle(msg(text))
     assert "mão de obra" in response.lower()
 
     response = router.handle(msg("1"))
+    assert "HH:MM" in response
+    response = router.handle(msg("09:30"))
     assert "Entulho Limpo" in response
     response = router.handle(msg("1"))
     assert "mão de obra" not in response.lower()
@@ -918,7 +972,7 @@ def test_resumo_v32_gestor_ve_blocos_contentores_carrinhas_financeiro_e_menu_sep
     assert "Faturado Global: EUR 180.00" in response
     assert "A receber Global: EUR 100.00" in response
     assert "Total projetado do mes: EUR 280.00" in response
-    assert "Menu principal - OLT Entulhos" not in response
+    assert "Menu principal" not in response
     assert router.pop_pending_messages() == [MAIN_MENU]
 
 
@@ -961,10 +1015,10 @@ def test_resumo_v32_funcionario_oculta_comercial_financeiro_pagamentos_e_carga(d
     assert "Porta lateral amassada" in response
     assert "resolver avaria" in response
     assert "Carrinha | Cliente Funcionario: horario 16:30 • ⚠️ Com Pessoal" in response
-    assert "Menu principal - OLT Entulhos" not in response
+    assert "Menu principal" not in response
     pending = router.pop_pending_messages()
     assert pending == [
-        "Ola, sou o Robo de Gestao de Contentores da OLT. O que vamos fazer agora?\n\n"
+        "Olá, sou o Robô de Gestão de Contentores da OLT Gestão de Resíduos & Demolições. O que vamos fazer agora?\n\n"
         "1. Confirmar entrega de contentor\n"
         "2. Confirmar recolha de contentor\n"
         "3. Confirmar Despejo no Vazadouro"

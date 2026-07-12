@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "OLT Entulhos"
+    app_name: str = "OLT Gestão de Resíduos & Demolições"
     env: str = "development"
 
     database_url: str = "sqlite:///./olt_entulhos.db"

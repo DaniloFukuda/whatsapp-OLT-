@@ -14,7 +14,7 @@ from app.services.contentor_service import ContentorService
 
 
 MAIN_MENU = (
-    "Menu principal - OLT Entulhos\n\n"
+    "Menu principal - OLT Gestão de Resíduos & Demolições\n\n"
     "1. Novo pedido\n"
     "2. Entrega de contentor\n"
     "3. Recolha de contentor\n"
@@ -23,7 +23,7 @@ MAIN_MENU = (
     "6. Resumo dos contentores\n"
     "7. Manutencao / avarias\n"
     "0. Sair\n\n"
-    "Digite o numero da opcao desejada."
+    "Digite o número da opção desejada."
 )
 
 

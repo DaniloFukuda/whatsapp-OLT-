@@ -35,6 +35,8 @@ from app.services.pedido_service import PedidoService
 
 
 ACTIVE_ALUGUER_STATUSES = {StatusAluguer.ATIVO, StatusAluguer.VENCENDO, StatusAluguer.RENOVADO}
+APP_DISPLAY_NAME = "OLT Gestão de Resíduos & Demolições"
+UNAUTHORIZED_MESSAGE = "Telefone não autorizado."
 COMMANDS = {"resumo", "lista", "disponiveis", "alugados", "vencendo", "atrasados"}
 START_COMMANDS = {"iniciar", "cadastrar", "comecar", "começar", "novo"}
 ALTER_COMMANDS = {"alterar", "modificar"}
@@ -47,7 +49,7 @@ RECOLHA_COMMANDS = {"recolha", "recolher", "confirmar recolha", "confirmar recol
 MENU_COMMANDS = {"menu", "inicio", "início"}
 CANCEL_COMMANDS = {"cancelar", "cancela", "sair", "parar", "voltar", "0"}
 MAIN_MENU = (
-    "🤖 Menu principal - OLT Entulhos\n\n"
+    f"🤖 Menu principal - {APP_DISPLAY_NAME}\n\n"
     "1️⃣ 📝 Novo pedido\n"
     "2️⃣ 🚛 Entrega de contentor\n"
     "3️⃣ 📦 Recolha de contentor\n"
@@ -56,11 +58,11 @@ MAIN_MENU = (
     "6️⃣ 📊 Resumo dos contentores\n"
     "7️⃣ 🛠️ Manutencao / avarias\n"
     "0️⃣ ❌ Sair\n\n"
-    "Digite o numero da opcao desejada."
+    "Digite o número da opção desejada."
 )
 # Menu v2.4: cinco caminhos restritos, convertidos em lista interativa pelo cliente.
 MAIN_MENU = (
-    "Menu principal - OLT Entulhos\n\n"
+    f"Menu principal - {APP_DISPLAY_NAME}\n\n"
     "1. Novo pedido\n"
     "2. Entrega de contentor\n"
     "3. Recolha de contentor\n"
@@ -68,15 +70,15 @@ MAIN_MENU = (
     "5. Resumo dos contentores"
 )
 MAIN_MENU = (
-    "🤖 Menu principal - OLT Entulhos\n\n"
+    f"🤖 Menu principal - {APP_DISPLAY_NAME}\n\n"
     "1. 🟢 Novo pedido\n"
     "2. 🚛 Entrega de contentor\n"
     "3. 📦 Recolha de contentor\n"
     "4. ♻️ Confirmar Despejo no Vazadouro\n"
     "5. 📊 Resumo dos contentores\n\n"
-    "Digite o numero da opcao desejada."
+    "Digite o número da opção desejada."
 )
-CANCELLED_MENU_MESSAGE = "Operacao cancelada. Nenhuma alteracao foi salva.\n\n" + MAIN_MENU
+CANCELLED_MENU_MESSAGE = "Operação cancelada. Nenhuma alteração foi salva.\n\n" + MAIN_MENU
 
 
 class WhatsappRouterAgent:
@@ -101,6 +103,9 @@ class WhatsappRouterAgent:
         text = (message.texto or "").strip().lower()
 
         if text in MENU_COMMANDS:
+            if not self._is_authorized(message.telefone):
+                self._pending_messages = []
+                return UNAUTHORIZED_MESSAGE
             if self._has_active_flow(conversa):
                 conversa.estado_atual = "idle"
                 conversa.contexto_json = {}
@@ -108,12 +113,15 @@ class WhatsappRouterAgent:
             return self._initial_menu(message.telefone)
 
         if text in CANCEL_COMMANDS and not (text == "0" and conversa.estado_atual == "v24_entrega_adesivo"):
+            if not self._is_authorized(message.telefone):
+                self._pending_messages = []
+                return UNAUTHORIZED_MESSAGE
             if self._has_active_flow(conversa):
                 conversa.estado_atual = "idle"
                 conversa.contexto_json = {}
                 self.db.commit()
                 return CANCELLED_MENU_MESSAGE
-            return "Nenhuma operacao em andamento para cancelar.\n\n" + self._initial_menu(message.telefone)
+            return "Nenhuma operação em andamento para cancelar.\n\n" + self._initial_menu(message.telefone)
 
         if conversa.estado_atual == "cadastro_expirado":
             if text in {"1", "sim", "continuar"}:
@@ -153,7 +161,7 @@ class WhatsappRouterAgent:
 
         if text in COMMANDS:
             if text == "resumo" and not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             return self._handle_operational_command(text, message.telefone)
 
         if conversa.estado_atual in AluguerAgent.ACTIVE_STATES:
@@ -171,12 +179,12 @@ class WhatsappRouterAgent:
 
         if text == "5":
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             return self._handle_operational_command("resumo", message.telefone)
 
         if text in {"1", "novo pedido", "cadastrar pedido"}:
             if not self._is_authorized(message.telefone):
-                return "Telefone nÃ£o autorizado."
+                return UNAUTHORIZED_MESSAGE
             if text == "1" and self._is_funcionario(message.telefone):
                 return self.entrega_agent.start(conversa)
             if not self._can_create_pedido(message.telefone):
@@ -184,82 +192,82 @@ class WhatsappRouterAgent:
             return self.pedido_v24_agent.start_cadastro(conversa)
         if text in {"2", "confirmar entrega de contentor", "confirmar entrega do lote"}:
             if not self._is_authorized(message.telefone):
-                return "Telefone nÃ£o autorizado."
+                return UNAUTHORIZED_MESSAGE
             if self.pedido_service.pedidos_pendentes_entrega():
                 return self.pedido_v24_agent.start_entrega(conversa)
             return self.entrega_agent.start(conversa)
         if text in {"3", "confirmar recolha de contentor"}:
             if not self._is_authorized(message.telefone):
-                return "Telefone nÃ£o autorizado."
+                return UNAUTHORIZED_MESSAGE
             if self.pedido_service.contentores_para_recolha():
                 return self.pedido_v24_agent.start_recolha(conversa)
             return self.recolha_agent.start(conversa)
         if text in {"4", "confirmar despejo no vazadouro", "confirmar despejo"}:
             if not self._is_authorized(message.telefone):
-                return "Telefone nÃ£o autorizado."
+                return UNAUTHORIZED_MESSAGE
             return self.pedido_v24_agent.start_despejo(conversa)
 
         if text == "6":
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para consultar dados operacionais. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             return self._handle_operational_command("resumo", message.telefone)
         if text in ENTREGA_COMMANDS or (text == "2" and not self._is_funcionario(message.telefone)) or (
             text == "1" and self._is_funcionario(message.telefone)
         ):
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para confirmar entregas. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             return self.entrega_agent.start(conversa)
         if text in RECOLHA_COMMANDS or text == "3" or (text == "2" and self._is_funcionario(message.telefone)):
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para confirmar recolhas. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             return self.recolha_agent.start(conversa)
         if text in START_COMMANDS:
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             if not self._can_create_pedido(message.telefone):
                 return "Seu perfil de motorista nao possui permissao para cadastrar pedidos. Use a opcao de recolha."
             return self.aluguer_agent.start(conversa)
         if text == "1":
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para iniciar alugueres. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             if not self._can_create_pedido(message.telefone):
                 return self.recolha_agent.start(conversa)
             return self.aluguer_agent.start(conversa)
         if text in CONTENTOR_STATUS_COMMANDS:
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para alterar registros. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             return self.contentor_agent.start_alteracao_status(conversa)
         if text in ALTER_COMMANDS:
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para alterar registros. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             return self.gestao_aluguer_agent.start_alteracao(conversa)
         if text == "4":
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para alterar registros. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             return self.gestao_aluguer_agent.start_alteracao(conversa)
         if text in DELETE_COMMANDS:
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             if text == "excluir" and not self.aluguer_service.listar_cadastrados_nos_ultimos_dias(7):
                 return self.contentor_agent.start_exclusao(conversa)
             return self.gestao_aluguer_agent.start_exclusao(conversa)
         if text in CONTENTOR_DELETE_COMMANDS:
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             return self.contentor_agent.start_exclusao(conversa)
         if text == "5":
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para excluir registros. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             return self.gestao_aluguer_agent.start_exclusao(conversa)
         if text in RENEW_COMMANDS:
             if not self._is_authorized(message.telefone):
-                return "Telefone nao autorizado para renovar registros. Contacte o administrador do sistema."
+                return UNAUTHORIZED_MESSAGE
             return self.renovacao_agent.start(conversa)
         if text in {"contentores", "status"}:
             return self.contentor_agent.listar_status()
         if self._is_authorized(message.telefone):
             return self._initial_menu(message.telefone)
-        return "Comando nao reconhecido. Envie 'novo' para registar um aluguer."
+        return UNAUTHORIZED_MESSAGE
 
     def _handle_operational_command(self, command: str, telefone: str | None = None) -> str:
         if command == "resumo":
@@ -717,7 +725,7 @@ class WhatsappRouterAgent:
 
     def _resolver_pendencia(self, tipo: str, text: str, telefone: str) -> str:
         if not self._is_authorized(telefone):
-            return "Telefone nao autorizado para resolver pendencias."
+            return UNAUTHORIZED_MESSAGE
         raw_id = text.split()[-1]
         if not raw_id.isdigit():
             return "Informe o ID do aluguer. Ex: resolver carga 12"
@@ -840,9 +848,8 @@ class WhatsappRouterAgent:
 
     def _detach_embedded_menu(self, response: str, telefone: str) -> str:
         markers = (
-            "🤖 Menu principal - OLT Entulhos",
-            "Menu principal - OLT Entulhos",
-            "ðŸ¤– Menu principal - OLT Entulhos",
+            f"🤖 Menu principal - {APP_DISPLAY_NAME}",
+            f"Menu principal - {APP_DISPLAY_NAME}",
         )
         for marker in markers:
             index = response.find(marker)
@@ -852,6 +859,9 @@ class WhatsappRouterAgent:
         return response
 
     def _queue_initial_menu(self, telefone: str) -> None:
+        if not self._is_authorized(telefone):
+            self._pending_messages = []
+            return
         menu = self._initial_menu(telefone)
         if menu not in self._pending_messages:
             self._pending_messages.append(menu)
@@ -900,7 +910,7 @@ class WhatsappRouterAgent:
     def _initial_menu(self, telefone: str) -> str:
         if self._is_funcionario(telefone):
             return (
-                "Ola, sou o Robo de Gestao de Contentores da OLT. O que vamos fazer agora?\n\n"
+                f"Olá, sou o Robô de Gestão de Contentores da {APP_DISPLAY_NAME}. O que vamos fazer agora?\n\n"
                 "1. Confirmar entrega de contentor\n"
                 "2. Confirmar recolha de contentor\n"
                 "3. Confirmar Despejo no Vazadouro"
