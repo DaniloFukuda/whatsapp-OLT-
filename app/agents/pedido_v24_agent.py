@@ -189,23 +189,18 @@ class PedidoV24Agent:
             ctx["horario_agendado"] = raw
             return self._advance(conversa, "v24_cadastro_mao_obra", ctx, self._mao_obra_prompt())
         if state == "v24_cadastro_mao_obra":
-            if choice in {"1", "sim", "sim, com pessoal", "com pessoal"}:
+            mao_obra = self._parse_mao_obra(choice)
+            if mao_obra is not None:
                 item_atual = dict(ctx.get("item_atual") or {})
-                item_atual["precisa_mao_de_obra"] = True
+                item_atual["precisa_mao_de_obra"] = mao_obra
                 ctx["item_atual"] = item_atual
-                ctx["precisa_mao_de_obra"] = True
+                ctx["precisa_mao_de_obra"] = mao_obra
                 return self._advance(conversa, "v24_cadastro_residuo", ctx, self._residuo_prompt(ctx))
-            if choice in {"2", "nao", "não", "nao, apenas equipamento", "não, apenas equipamento", "apenas equipamento"}:
-                item_atual = dict(ctx.get("item_atual") or {})
-                item_atual["precisa_mao_de_obra"] = False
-                ctx["item_atual"] = item_atual
-                ctx["precisa_mao_de_obra"] = False
-                return self._advance(conversa, "v24_cadastro_residuo", ctx, self._residuo_prompt(ctx))
-            return "Selecione Sim, com pessoal ou Não, apenas equipamento."
+            return self._mao_obra_prompt()
         if state == "v24_cadastro_residuo":
             residue = self._parse_residue(choice)
             if not residue:
-                return "Selecione Entulho Limpo ou Entulho Misto."
+                return self._residuo_prompt(ctx)
             return self._registrar_item_cadastro(conversa, ctx, residue)
         if state == "v24_cadastro_valor":
             try:
@@ -248,6 +243,8 @@ class PedidoV24Agent:
             ctx["forma"] = raw[:80]
             return self._advance(conversa, "v24_cadastro_endereco", ctx, self._endereco_prompt())
         if state == "v24_cadastro_endereco":
+            if message.tipo == "location" and not self._coordinates(message, raw):
+                return "Nao foi possivel ler a localizacao. Reenvie a localizacao nativa ou digite o endereco."
             if not raw or len(raw) > 300:
                 return "O endereço precisa ter entre 1 e 300 caracteres."
             ctx["endereco"] = raw
@@ -541,11 +538,35 @@ class PedidoV24Agent:
     def _parse_residue(self, choice):
         return {
             "1": "Entulho Limpo",
+            "option_1": "Entulho Limpo",
+            "pedido_residuo_limpo": "Entulho Limpo",
             "entulho limpo": "Entulho Limpo",
             "limpo": "Entulho Limpo",
             "2": "Entulho Misto",
+            "option_2": "Entulho Misto",
+            "pedido_residuo_misto": "Entulho Misto",
             "entulho misto": "Entulho Misto",
             "misto": "Entulho Misto",
+        }.get(choice)
+
+    def _parse_mao_obra(self, choice):
+        return {
+            "1": True,
+            "option_1": True,
+            "pedido_mao_obra_sim": True,
+            "sim": True,
+            "✅ sim": True,
+            "sim, com pessoal": True,
+            "com pessoal": True,
+            "2": False,
+            "option_2": False,
+            "pedido_mao_obra_nao": False,
+            "nao": False,
+            "não": False,
+            "❌ nao": False,
+            "nao, apenas equipamento": False,
+            "não, apenas equipamento": False,
+            "apenas equipamento": False,
         }.get(choice)
 
     def _equipamento_label(self, contentor: PedidoContentor) -> str:
@@ -585,8 +606,8 @@ class PedidoV24Agent:
     def _mao_obra_prompt(self):
         return (
             "👷 Este pedido necessita de mão de obra?\n\n"
-            "1️⃣ Sim\n"
-            "2️⃣ Não"
+            "1. Sim\n"
+            "2. Não"
         )
 
     def _residuo_prompt(self, ctx):

@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.agents.whatsapp_router_agent import MAIN_MENU
 from app.integrations.whatsapp.client import send_whatsapp_message
-from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
+from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage, parse_whatsapp_payload
 from app.models.conversa import ConversaWhatsApp
 from app.models.aluguer import ContentorFoto
 from app.models.operador import Operador, PerfilOperador
@@ -44,6 +46,46 @@ def liberar_operadores(monkeypatch):
         monkeypatch.setenv(name, "")
     from app.core.config import get_settings
     get_settings.cache_clear()
+
+
+def avancar_cadastro_v24_ate_mao_obra(router, *, tipo="contentor", quantidade="1", phone="351900009900"):
+    steps = ["novo pedido", tipo, "Cliente Hotfix", "351912345678", quantidade]
+    if tipo == "carrinha":
+        steps.append("09:30")
+    response = ""
+    for text in steps:
+        response = router.handle(msg(text, phone=phone))
+    return response
+
+
+def parsed_location_message(latitude, longitude, *, name=None, address=None, phone="351900009900"):
+    location = {"latitude": latitude, "longitude": longitude}
+    if name is not None:
+        location["name"] = name
+    if address is not None:
+        location["address"] = address
+    return parse_whatsapp_payload(
+        {
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "messages": [
+                                    {
+                                        "from": phone,
+                                        "id": "wamid.location",
+                                        "type": "location",
+                                        "location": location,
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    )[0]
 
 
 def test_service_cria_pedido_com_varios_contentores_e_consome_cotas(db_session):
@@ -205,6 +247,171 @@ def test_cadastro_v24_tipo_invalido_nao_avanca_fluxo(db_session, monkeypatch):
     assert "tipo de solicita" in response.lower()
     assert conversa.estado_atual == "v24_cadastro_tipo_solicitacao"
     assert "tipo_solicitacao" not in conversa.contexto_json
+
+
+@pytest.mark.parametrize(
+    ("choice", "expected"),
+    [
+        ("pedido_mao_obra_sim", True),
+        ("1", True),
+        ("sim", True),
+        ("✅ Sim", True),
+        ("pedido_mao_obra_nao", False),
+        ("2", False),
+        ("não", False),
+        ("nao", False),
+        ("❌ Não", False),
+    ],
+)
+def test_cadastro_v24_mao_obra_aceita_botoes_e_fallbacks(db_session, monkeypatch, choice, expected):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    prompt = avancar_cadastro_v24_ate_mao_obra(router)
+    assert "mão de obra" in prompt.lower()
+    result = send_whatsapp_message("351900009900", prompt, force_mock=True)
+    assert result["interactive_type"] == "button"
+    assert [button["id"] for button in result["buttons"]] == [
+        "pedido_mao_obra_sim",
+        "pedido_mao_obra_nao",
+    ]
+
+    response = router.handle(msg(choice))
+    conversa = db_session.query(ConversaWhatsApp).one()
+
+    assert conversa.estado_atual == "v24_cadastro_residuo"
+    assert conversa.contexto_json["precisa_mao_de_obra"] is expected
+    assert "Resíduo do contentor 1/1" in response
+    assert db_session.query(Pedido).count() == 0
+
+
+def test_cadastro_v24_mao_obra_invalida_mantem_estado_e_reenvia_botoes(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    avancar_cadastro_v24_ate_mao_obra(router)
+    response = router.handle(msg("talvez"))
+    conversa = db_session.query(ConversaWhatsApp).one()
+    result = send_whatsapp_message("351900009900", response, force_mock=True)
+
+    assert conversa.estado_atual == "v24_cadastro_mao_obra"
+    assert "precisa_mao_de_obra" not in conversa.contexto_json
+    assert result["interactive_type"] == "button"
+    assert [button["id"] for button in result["buttons"]] == [
+        "pedido_mao_obra_sim",
+        "pedido_mao_obra_nao",
+    ]
+
+
+@pytest.mark.parametrize("choice", ["pedido_mao_obra_sim", "pedido_mao_obra_nao"])
+def test_cadastro_v24_carrinha_mao_obra_continua_avancando_para_residuo(db_session, monkeypatch, choice):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    avancar_cadastro_v24_ate_mao_obra(router, tipo="carrinha")
+    response = router.handle(msg(choice))
+    conversa = db_session.query(ConversaWhatsApp).one()
+
+    assert conversa.estado_atual == "v24_cadastro_residuo"
+    assert "Resíduo da carrinha 1/1" in response
+
+
+def test_cadastro_v24_residuos_multicontentor_usam_mesmo_prompt_interativo(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    avancar_cadastro_v24_ate_mao_obra(router, quantidade="3")
+    first = router.handle(msg("pedido_mao_obra_nao"))
+    first_buttons = send_whatsapp_message("351900009900", first, force_mock=True)
+    second = router.handle(msg("pedido_residuo_limpo"))
+    second_buttons = send_whatsapp_message("351900009900", second, force_mock=True)
+    third = router.handle(msg("entulho misto"))
+    third_buttons = send_whatsapp_message("351900009900", third, force_mock=True)
+    invalid = router.handle(msg("madeira"))
+    after_invalid = db_session.query(ConversaWhatsApp).one()
+    after_invalid_context = dict(after_invalid.contexto_json)
+    after_invalid_state = after_invalid.estado_atual
+    final_prompt = router.handle(msg("misto"))
+    conversa = db_session.query(ConversaWhatsApp).one()
+
+    assert "Resíduo do contentor 1/3" in first
+    assert "Resíduo do contentor 2/3" in second
+    assert "Resíduo do contentor 3/3" in third
+    assert "Resíduo do contentor 3/3" in invalid
+    assert [button["id"] for button in first_buttons["buttons"]] == [
+        "pedido_residuo_limpo",
+        "pedido_residuo_misto",
+    ]
+    assert first_buttons["buttons"] == second_buttons["buttons"] == third_buttons["buttons"]
+    assert after_invalid_context["residuos"] == ["Entulho Limpo", "Entulho Misto"]
+    assert after_invalid_state == "v24_cadastro_residuo"
+    assert conversa.contexto_json["residuos"] == ["Entulho Limpo", "Entulho Misto", "Entulho Misto"]
+    assert len(conversa.contexto_json["itens"]) == 3
+    assert conversa.estado_atual == "v24_cadastro_data"
+    assert "Quando está planejada" in final_prompt
+
+
+def test_cadastro_v24_endereco_aceita_localizacao_nativa_parseada(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    steps = [
+        "novo pedido", "contentor", "Cliente Localizacao", "351912345678", "1",
+        "não", "limpo", "Hoje", "120", "Não, pendente",
+    ]
+    for text in steps:
+        router.handle(msg(text))
+    response = router.handle(
+        parsed_location_message(38.7223, -9.1393, name="Obra Lisboa", address="Lisboa, Portugal")
+    )
+    conversa = db_session.query(ConversaWhatsApp).one()
+
+    assert conversa.estado_atual == "v24_cadastro_referencia_opcao"
+    assert "ponto de referência" in response
+    assert conversa.contexto_json["endereco"] == (
+        "Obra Lisboa - Lisboa, Portugal - https://www.google.com/maps?q=38.7223,-9.1393"
+    )
+    assert conversa.contexto_json["endereco_latitude"] == 38.7223
+    assert conversa.contexto_json["endereco_longitude"] == -9.1393
+
+
+def test_cadastro_v24_endereco_rejeita_location_sem_coordenadas_sem_apagar_contexto(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    steps = [
+        "novo pedido", "contentor", "Cliente Sem GPS", "351912345678", "1",
+        "não", "limpo", "Hoje", "120", "Não, pendente",
+    ]
+    for text in steps:
+        router.handle(msg(text))
+    before = dict(db_session.query(ConversaWhatsApp).one().contexto_json)
+    response = router.handle(NormalizedWhatsAppMessage(telefone="351900009900", tipo="location"))
+    conversa = db_session.query(ConversaWhatsApp).one()
+
+    assert conversa.estado_atual == "v24_cadastro_endereco"
+    assert conversa.contexto_json == before
+    assert "Nao foi possivel ler a localizacao" in response
+
+
+def test_cadastro_v24_endereco_digitado_e_link_maps_continuam_funcionando(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    steps = [
+        "novo pedido", "contentor", "Cliente Maps", "351912345678", "1",
+        "não", "limpo", "Hoje", "120", "Não, pendente",
+    ]
+    for text in steps:
+        router.handle(msg(text))
+    response = router.handle(msg("https://www.google.com/maps?q=38.7,-9.1"))
+    conversa = db_session.query(ConversaWhatsApp).one()
+
+    assert conversa.estado_atual == "v24_cadastro_referencia_opcao"
+    assert conversa.contexto_json["endereco"] == "https://www.google.com/maps?q=38.7,-9.1"
+    assert conversa.contexto_json["endereco_latitude"] == 38.7
+    assert conversa.contexto_json["endereco_longitude"] == -9.1
+    assert "ponto de referência" in response
 
 
 def test_service_rejeita_pedido_misto_contentor_e_carrinha(db_session):

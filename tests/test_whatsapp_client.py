@@ -131,6 +131,36 @@ def test_send_whatsapp_message_usa_botoes_para_sim_nao_em_mock(monkeypatch):
     }
 
 
+def test_send_whatsapp_message_usa_ids_especificos_para_mao_de_obra(monkeypatch):
+    clear_settings(monkeypatch)
+
+    result = send_whatsapp_message(
+        "556198266551",
+        "Este pedido necessita de mão de obra?\n\n1. Sim\n2. Não",
+    )
+
+    assert result["interactive_type"] == "button"
+    assert result["buttons"] == [
+        {"id": "pedido_mao_obra_sim", "title": "✅ Sim"},
+        {"id": "pedido_mao_obra_nao", "title": "❌ Não"},
+    ]
+
+
+def test_send_whatsapp_message_usa_ids_especificos_para_residuo_contentor(monkeypatch):
+    clear_settings(monkeypatch)
+
+    result = send_whatsapp_message(
+        "556198266551",
+        "Resíduo do contentor 1/3:\n\n1. Entulho Limpo\n2. Entulho Misto",
+    )
+
+    assert result["interactive_type"] == "button"
+    assert result["buttons"] == [
+        {"id": "pedido_residuo_limpo", "title": "Entulho Limpo"},
+        {"id": "pedido_residuo_misto", "title": "Entulho Misto"},
+    ]
+
+
 def test_send_whatsapp_message_usa_botoes_para_duas_opcoes_genericas(monkeypatch):
     clear_settings(monkeypatch)
 

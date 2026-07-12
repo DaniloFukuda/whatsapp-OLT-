@@ -214,13 +214,28 @@ def _buttons_for_body(body: str) -> list[dict[str, str]]:
 
 
 def _options_for_body(body: str) -> list[dict[str, str]]:
+    normalized = _normalize_button_text(body)
+    if "mao de obra" in normalized and "1. sim" in normalized and "2. nao" in normalized:
+        return [
+            {"id": "pedido_mao_obra_sim", "title": "✅ Sim"},
+            {"id": "pedido_mao_obra_nao", "title": "❌ Não"},
+        ]
+    if (
+        ("residuo do contentor" in normalized or "residuo da carrinha" in normalized)
+        and "entulho limpo" in normalized
+        and "entulho misto" in normalized
+    ):
+        return [
+            {"id": "pedido_residuo_limpo", "title": "Entulho Limpo"},
+            {"id": "pedido_residuo_misto", "title": "Entulho Misto"},
+        ]
+
     numbered_options = _numbered_options_for_body(body)
     if 0 < len(numbered_options) <= MAX_LIST_OPTIONS:
         options = _options_from_numbered_options(numbered_options)
         if options:
             return options
 
-    normalized = _normalize_button_text(body)
     if "[sim]" in normalized and "[nao]" in normalized:
         return [{"id": "option_1", "title": "Sim"}, {"id": "option_2", "title": "Nao"}]
 

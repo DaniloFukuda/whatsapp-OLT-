@@ -11,6 +11,8 @@ class NormalizedWhatsAppMessage:
     texto: str | None = None
     latitude: float | None = None
     longitude: float | None = None
+    location_name: str | None = None
+    location_address: str | None = None
     media_id: str | None = None
     mime_type: str | None = None
     filename: str | None = None
@@ -50,6 +52,14 @@ def _parse_message(message: dict[str, Any]) -> NormalizedWhatsAppMessage | None:
         location = message.get("location", {})
         data["latitude"] = location.get("latitude")
         data["longitude"] = location.get("longitude")
+        data["location_name"] = _clean_text(location.get("name"))
+        data["location_address"] = _clean_text(location.get("address"))
+        data["texto"] = _location_text(
+            data["latitude"],
+            data["longitude"],
+            data["location_name"],
+            data["location_address"],
+        )
     elif tipo in {"image", "document"}:
         media = message.get(tipo, {})
         data["media_id"] = media.get("id")
@@ -126,3 +136,50 @@ def _interactive_reply_text(reply: dict[str, Any]) -> str | None:
         if reply_id:
             return reply_id
     return reply.get("title")
+
+
+def _clean_text(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return re.sub(r"\s+", " ", value).strip()
+    return None
+
+
+def _location_text(
+    latitude: Any,
+    longitude: Any,
+    name: str | None,
+    address: str | None,
+    max_chars: int = 300,
+) -> str | None:
+    coords = _location_coords(latitude, longitude)
+    if not coords:
+        return None
+    lat, lon = coords
+    link = f"https://www.google.com/maps?q={lat},{lon}"
+    if name and address:
+        description = f"{name} - {address}"
+    else:
+        description = address or name or "Localizacao enviada pelo WhatsApp"
+    return _location_text_with_limit(description, link, max_chars)
+
+
+def _location_coords(latitude: Any, longitude: Any) -> tuple[str, str] | None:
+    try:
+        lat = float(latitude)
+        lon = float(longitude)
+    except (TypeError, ValueError):
+        return None
+    if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+        return None
+    return f"{lat:g}", f"{lon:g}"
+
+
+def _location_text_with_limit(description: str, link: str, max_chars: int) -> str:
+    separator = " - "
+    description = _clean_text(description) or "Localizacao enviada pelo WhatsApp"
+    available = max_chars - len(separator) - len(link)
+    if available <= 0:
+        return link[-max_chars:]
+    if len(description) > available:
+        description = description[:available].rstrip()
+    return f"{description}{separator}{link}"

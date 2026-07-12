@@ -111,6 +111,11 @@ def test_payload_fake_meta_e_parseado_corretamente():
     assert messages[0].tipo == "location"
     assert messages[0].latitude == 38.7223
     assert messages[0].longitude == -9.1393
+    assert messages[0].location_name == "Obra teste Lisboa"
+    assert messages[0].location_address == "Lisboa, Portugal"
+    assert messages[0].texto == (
+        "Obra teste Lisboa - Lisboa, Portugal - https://www.google.com/maps?q=38.7223,-9.1393"
+    )
 
 
 def test_payload_interactive_button_reply_vira_texto_da_opcao():
@@ -144,6 +149,67 @@ def test_payload_interactive_button_reply_vira_texto_da_opcao():
     assert messages[0].telefone == "556198266551"
     assert messages[0].tipo == "interactive"
     assert messages[0].texto == "1"
+
+
+def test_payload_interactive_button_reply_preserva_id_especifico():
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "from": "556198266551",
+                                    "id": "wamid.button",
+                                    "type": "interactive",
+                                    "interactive": {
+                                        "type": "button_reply",
+                                        "button_reply": {
+                                            "id": "pedido_mao_obra_sim",
+                                            "title": "✅ Sim",
+                                        },
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    messages = parse_whatsapp_payload(payload)
+
+    assert messages[0].texto == "pedido_mao_obra_sim"
+
+
+def test_payload_location_sem_coordenadas_validas_nao_gera_texto():
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "from": "556198266551",
+                                    "id": "wamid.location",
+                                    "type": "location",
+                                    "location": {"name": "Obra sem coordenadas"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    messages = parse_whatsapp_payload(payload)
+
+    assert messages[0].tipo == "location"
+    assert messages[0].texto is None
 
 
 def test_payload_contacts_extrai_nome_e_prefere_wa_id():
