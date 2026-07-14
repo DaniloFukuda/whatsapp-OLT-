@@ -1487,11 +1487,10 @@ def test_comando_resumo_mostra_contadores_operacionais(db_session, monkeypatch):
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo"))
 
     assert "PAINEL DE CONTROLE OPERACIONAL OLT" in response
-    assert "1. VENCEM AMANHA" in response
-    assert "2. RECOLHER HOJE" in response
-    assert "3. RECOLHER AMANHA" in response
-    assert "4. PENDENCIAS ATIVAS" in response
-    assert "5. RESUMO FINANCEIRO DO MES" in response
+    assert "*1. AÇÕES PARA HOJE*" in response
+    assert "*2. AÇÕES AGENDADAS PARA OS PRÓXIMOS DIAS*" in response
+    assert "*3. PENDÊNCIAS ATIVAS*" in response
+    assert "*4. RESUMO FINANCEIRO DO MÊS*" in response
     assert "Resumo dos contentores" not in response
     return
 
@@ -1534,9 +1533,9 @@ def test_resumo_lista_retirada_de_hoje_com_cliente_e_localizacao(db_session, mon
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo"))
 
-    assert "2. RECOLHER HOJE" in response
+    assert "*1. AÇÕES PARA HOJE*" in response
     assert "Cliente Retirada Hoje" not in response
-    assert "Nenhum item para recolher hoje." in response
+    assert "Nenhuma ação para hoje." not in response
 
 
 def test_resumo_lista_retirada_de_amanha_com_cliente(db_session, monkeypatch):
@@ -1545,9 +1544,9 @@ def test_resumo_lista_retirada_de_amanha_com_cliente(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo"))
 
-    assert "3. RECOLHER AMANHA" in response
-    assert "Cliente Retirada Amanha" not in response
-    assert "Nenhum item para recolher amanha." in response
+    assert "*2. AÇÕES AGENDADAS PARA OS PRÓXIMOS DIAS*" in response
+    assert "Cliente Retirada Amanha" in response
+    assert "Recolher Amanhã" in response
 
 
 def test_resumo_mostra_link_wa_me_quando_ha_telefone(db_session, monkeypatch):
@@ -1566,9 +1565,9 @@ def test_resumo_lida_com_ausencia_de_localizacao(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo"))
 
-    assert "Cliente Retirada Amanha" not in response
+    assert "Cliente Retirada Amanha" in response
     assert "localizacao: localizacao nao informada" not in response
-    assert "Nenhum item para recolher amanha." in response
+    assert "Recolher Amanhã" in response
 
 
 def test_resumo_calcula_faturado_total_e_recebido_no_mes(db_session, monkeypatch):
@@ -1586,8 +1585,8 @@ def test_resumo_calcula_faturado_total_e_recebido_no_mes(db_session, monkeypatch
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000012"))
 
-    assert "RESUMO FINANCEIRO DO MES" in response
-    assert "Total projetado do mes: 0,00 €" in response
+    assert "RESUMO FINANCEIRO DO MÊS" in response
+    assert "Total projetado: 300,00 €" in response
     assert "Faturamento do mes corrente:" not in response
 
 
@@ -1606,8 +1605,8 @@ def test_resumo_gestor_mostra_financeiro(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000010"))
 
-    assert "RESUMO FINANCEIRO DO MES" in response
-    assert "Total projetado do mes: 0,00 €" in response
+    assert "RESUMO FINANCEIRO DO MÊS" in response
+    assert "Total projetado: 300,00 €" in response
 
 
 def test_resumo_funcionario_nao_mostra_financeiro(db_session, monkeypatch):
@@ -1625,7 +1624,7 @@ def test_resumo_funcionario_nao_mostra_financeiro(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000011"))
 
-    assert "2. RECOLHER HOJE" in response
+    assert "*2. AÇÕES AGENDADAS PARA OS PRÓXIMOS DIAS*" in response
     assert "Cliente Retirada Hoje" not in response
     assert "Faturamento do mes corrente:" not in response
     assert "Faturado total do mes" not in response
@@ -1641,8 +1640,8 @@ def test_resumo_sem_perfil_explicito_nao_mostra_financeiro(db_session, monkeypat
 
     response = WhatsappRouterAgent(db_session).handle(text_message("resumo", telefone="351900000099"))
 
-    assert "Retiradas hoje:" in response
-    assert "Cliente Retirada Hoje" in response
+    assert "*2. AÇÕES AGENDADAS PARA OS PRÓXIMOS DIAS*" in response
+    assert "Cliente Retirada Amanha" in response
     assert "Faturamento do mes corrente:" not in response
     assert "Faturado total do mes" not in response
     assert "Recebido/pago no mes" not in response

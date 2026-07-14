@@ -112,7 +112,7 @@ def test_resumo_gestor_exibe_e_resolve_pendencia_de_carga(db_session, monkeypatc
     db_session.refresh(aluguer)
 
     assert "PAINEL DE CONTROLE OPERACIONAL OLT" in resumo
-    assert "PENDENCIAS ATIVAS" in resumo
+    assert "PENDÊNCIAS ATIVAS" in resumo
     assert "PENDENCIAS OPERACIONAIS CRITICAS" not in resumo
     assert f"resolver carga {aluguer.id}" not in resumo
     assert "resolvida" in resolvido

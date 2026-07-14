@@ -49,7 +49,10 @@ def liberar_operadores(monkeypatch):
 
 
 def avancar_cadastro_v24_ate_mao_obra(router, *, tipo="contentor", quantidade="1", phone="351900009900"):
-    steps = ["novo pedido", tipo, "Cliente Hotfix", "351912345678", quantidade]
+    if tipo == "carrinha":
+        steps = ["novo pedido", tipo, quantidade, "Cliente Hotfix", "351912345678", "Hoje", "09:30", "limpo"]
+    else:
+        steps = ["novo pedido", tipo, "Cliente Hotfix", "351912345678", quantidade]
     response = ""
     for text in steps:
         response = router.handle(msg(text, phone=phone))
@@ -359,9 +362,9 @@ def test_cadastro_v24_tipo_invalido_nao_avanca_fluxo(db_session, monkeypatch):
 @pytest.mark.parametrize(
     ("valor", "esperado"),
     [
-        ("50", "Valor: 50,00 €"),
-        ("50.5", "Valor: 50,50 €"),
-        ("1250.75", "Valor: 1.250,75 €"),
+        ("50", "Valor total: 50,00 €"),
+        ("50.5", "Valor total: 50,50 €"),
+        ("1250.75", "Valor total: 1.250,75 €"),
     ],
 )
 def test_cadastro_v24_resumo_formata_valor_em_euros(db_session, valor, esperado):
@@ -402,7 +405,7 @@ def test_cadastro_v24_resumo_mostra_quantidade_de_carrinhas(db_session):
     )
 
     assert "Quantidade de carrinhas: 1" in response
-    assert "Horário da carrinha: 14:00" in response
+    assert "Hora da entrega: 14:00" in response
 
 
 @pytest.mark.parametrize(
@@ -424,7 +427,7 @@ def test_cadastro_v24_mao_obra_aceita_botoes_e_fallbacks(db_session, monkeypatch
     router = WhatsappRouterAgent(db_session)
 
     prompt = avancar_cadastro_v24_ate_mao_obra(router)
-    assert "mão de obra" in prompt.lower()
+    assert "pessoal para carregamento" in prompt.lower()
     result = send_whatsapp_message("351900009900", prompt, force_mock=True)
     assert result["interactive_type"] == "button"
     assert [button["id"] for button in result["buttons"]] == [
@@ -468,8 +471,8 @@ def test_cadastro_v24_carrinha_mao_obra_continua_avancando_para_residuo(db_sessi
     response = router.handle(msg(choice))
     conversa = db_session.query(ConversaWhatsApp).one()
 
-    assert conversa.estado_atual == "v24_cadastro_horario_carrinha"
-    assert "HH:MM" in response
+    assert conversa.estado_atual == "v24_cadastro_valor"
+    assert "valor" in response.lower()
 
 
 def test_cadastro_v24_residuos_multicontentor_usam_mesmo_prompt_interativo(db_session, monkeypatch):
@@ -770,25 +773,23 @@ def test_cadastro_v24_carrinha_valida_horario_e_mao_de_obra(db_session, monkeypa
     get_settings.cache_clear()
     router = WhatsappRouterAgent(db_session)
 
-    for text in ["novo pedido", "carrinha", "Cliente Carrinha", "351912345678", "1"]:
+    for text in ["novo pedido", "carrinha", "1", "Cliente Carrinha", "351912345678", "Hoje"]:
         response = router.handle(msg(text))
-    assert "mão de obra" in response.lower()
-    assert "Sim" in response
-    assert "Não" in response
-    horario = router.handle(msg("1"))
-    assert "HH:MM" in horario
+    assert "HH:MM" in response
     invalid = router.handle(msg("99:99"))
     assert "Horário inválido" in invalid
     residuo_prompt = router.handle(msg("09:30"))
     assert "Entulho Limpo" in residuo_prompt
-    for text in ["1", "Hoje", "250", "Não, pendente", "Rua da Carrinha", "Não"]:
+    mao_obra = router.handle(msg("1"))
+    assert "pessoal para carregamento" in mao_obra.lower()
+    for text in ["Sim, com pessoal", "250", "Não, pendente", "Rua da Carrinha", "Não"]:
         response = router.handle(msg(text))
     assert "Tipo da solicita" in response
     assert "Carrinha" in response
     assert "Quantidade de carrinhas: 1" in response
-    assert "Mão de obra: Sim" in response
-    assert "Horário da carrinha: 09:30" in response
-    assert "Valor: 250,00 €" in response
+    assert "Pessoal para carregamento: Sim" in response
+    assert "Hora da entrega: 09:30" in response
+    assert "Valor total: 250,00 €" in response
     response = router.handle(msg("1"))
 
     pedido = db_session.query(Pedido).one()
@@ -799,6 +800,72 @@ def test_cadastro_v24_carrinha_valida_horario_e_mao_de_obra(db_session, monkeypa
     assert item.horario_agendado == "09:30"
     assert item.precisa_mao_de_obra is False
     assert item.residuo_contratado == "Entulho Limpo"
+
+
+def test_cadastro_v24_carrinha_ordem_quantidade_cliente_data_hora_residuo(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+
+    assert "tipo de solicita" in router.handle(msg("novo pedido")).lower()
+    assert "carrinhas" in router.handle(msg("carrinha")).lower()
+    assert "nome do cliente" in router.handle(msg("2")).lower()
+    assert "telefone do cliente" in router.handle(msg("Cliente Ordem")).lower()
+    assert "planejada a entrega" in router.handle(msg("351912345678")).lower()
+    assert "HH:MM" in router.handle(msg("Hoje"))
+    assert "Resíduo da carrinha 1/2" in router.handle(msg("08:45"))
+
+    conversa = db_session.query(ConversaWhatsApp).one()
+    assert conversa.contexto_json["quantidade"] == 2
+    assert conversa.contexto_json["nome"] == "Cliente Ordem"
+
+
+def test_cadastro_v24_corrigir_abre_lista_com_ids_e_edita_quantidade_sem_salvar(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+    steps = [
+        "novo pedido", "carrinha", "1", "Cliente Corrigir", "351912345678",
+        "Hoje", "09:30", "limpo", "Sim, com pessoal", "250",
+        "Sim, já está pago", "MBWay", "Rua", "Não",
+    ]
+    for text in steps:
+        response = router.handle(msg(text))
+    assert "Quantidade de carrinhas: 1" in response
+
+    corrigir = router.handle(msg("Corrigir"))
+    result = send_whatsapp_message("351900009900", corrigir, force_mock=True)
+    assert result["interactive_type"] == "list"
+    assert result["list_rows"][0]["id"] == "corrigir_pedido:quantidade"
+    assert "corrigir_pedido:hora_entrega" in [row["id"] for row in result["list_rows"]]
+
+    prompt = router.handle(msg("corrigir_pedido:quantidade"))
+    assert "carrinhas" in prompt.lower()
+    confirmacao = router.handle(msg("2"))
+    conversa = db_session.query(ConversaWhatsApp).one()
+
+    assert conversa.estado_atual == "v24_cadastro_confirmacao"
+    assert "Quantidade de carrinhas: 2" in confirmacao
+    assert "Cliente: Cliente Corrigir" in confirmacao
+    assert db_session.query(Pedido).count() == 0
+
+
+def test_cadastro_v24_corrigir_pagamento_pendente_limpa_forma(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    router = WhatsappRouterAgent(db_session)
+    steps = [
+        "novo pedido", "carrinha", "1", "Cliente Pagamento", "351912345678",
+        "Hoje", "09:30", "limpo", "Sim, com pessoal", "250",
+        "Sim, já está pago", "MBWay", "Rua", "Não", "Corrigir",
+        "corrigir_pedido:status_pagamento", "Não, pendente",
+    ]
+    for text in steps:
+        response = router.handle(msg(text))
+    conversa = db_session.query(ConversaWhatsApp).one()
+
+    assert conversa.estado_atual == "v24_cadastro_confirmacao"
+    assert conversa.contexto_json["pago"] is False
+    assert conversa.contexto_json["forma"] is None
+    assert "Status do pagamento: Pendente" in response
+    assert "Forma de pagamento:" not in response
 
 
 def test_cadastro_v24_salva_mao_de_obra_false(db_session, monkeypatch):
@@ -828,21 +895,18 @@ def test_cadastro_v24_carrinha_multipla_pergunta_mao_de_obra_uma_vez(db_session,
     liberar_operadores(monkeypatch)
     router = WhatsappRouterAgent(db_session)
 
-    steps = ["novo pedido", "carrinha", "Cliente Carrinhas", "351912345678", "2"]
+    steps = ["novo pedido", "carrinha", "2", "Cliente Carrinhas", "351912345678", "Hoje", "09:30"]
     for text in steps:
         response = router.handle(msg(text))
-    assert "mão de obra" in response.lower()
+    assert "Entulho Limpo" in response
 
     response = router.handle(msg("1"))
-    assert "HH:MM" in response
-    response = router.handle(msg("09:30"))
     assert "Entulho Limpo" in response
-    response = router.handle(msg("1"))
-    assert "mão de obra" not in response.lower()
-    assert "Entulho Limpo" in response
-    for text in ["2", "Hoje", "500", "Não, pendente", "Rua Carrinhas", "Não"]:
+    response = router.handle(msg("2"))
+    assert "pessoal para carregamento" in response.lower()
+    for text in ["Sim, com pessoal", "500", "Não, pendente", "Rua Carrinhas", "Não"]:
         response = router.handle(msg(text))
-    assert response.count("Mão de obra") == 1
+    assert response.count("Pessoal para carregamento") == 1
     response = router.handle(msg("1"))
 
     assert "Pedido #1 criado" in response
@@ -886,6 +950,7 @@ def test_entrega_v24_guarda_lote_no_contexto_ate_gps(db_session, monkeypatch):
     router.handle(msg(kind="image", media="foto-202"))
     router.handle(msg("2"))
     router.handle(msg(kind="location", lat=38.7, lon=-9.1))
+    router.handle(msg("Sim"))
     confirmacao = router.handle(msg("Portao azul"))
     assert "Confirmar entrega" in confirmacao
     response = router.handle(msg("1"))
@@ -933,6 +998,7 @@ def test_entrega_v24_carrinha_aceita_frota_zero_e_grava_so_no_gps(db_session, mo
     assert db_session.query(ContentorFoto).count() == 0
 
     router.handle(msg(kind="location", lat=38.7, lon=-9.1))
+    router.handle(msg("Sim"))
     confirmacao = router.handle(msg("Portao azul"))
     assert "Confirmar entrega" in confirmacao
     response = router.handle(msg("1"))
@@ -972,7 +1038,7 @@ def test_entrega_v24_duas_carrinhas_separa_frota_e_fotos(db_session, monkeypatch
     router.handle(msg("1"))
     router.handle(msg(kind="image", media="foto-carrinha-1b"))
     proximo = router.handle(msg("2"))
-    assert "Ativo 1 de 2 preparado" in proximo
+    assert "Contentor 1 de 2 registrado." in proximo
     assert "Selecione o pedido" not in proximo
     router.handle(msg("77"))
     router.handle(msg(kind="image", media="foto-carrinha-2"))
@@ -980,6 +1046,7 @@ def test_entrega_v24_duas_carrinhas_separa_frota_e_fotos(db_session, monkeypatch
     invalid_gps = router.handle(msg("https://www.google.com/maps?q=38.7,-9.1"))
     assert "localização nativa do WhatsApp" in invalid_gps
     router.handle(msg(kind="location", lat=38.7, lon=-9.1))
+    router.handle(msg("entrega_referencia:sim"))
     confirmacao = router.handle(msg("Portao norte"))
     assert "fotos: 2" in confirmacao
     assert "fotos: 1" in confirmacao
@@ -995,6 +1062,73 @@ def test_entrega_v24_duas_carrinhas_separa_frota_e_fotos(db_session, monkeypatch
         "foto-carrinha-1b",
     ]
     assert [foto.url_midia for foto in pedido.contentores[1].fotos] == ["foto-carrinha-2"]
+
+
+def test_entrega_v24_selecao_de_pedido_usa_lista_com_cliente_inteiro(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    nome_cliente = "Cliente Entrega"
+    pedido = PedidoService(db_session).criar(
+        nome_cliente=nome_cliente,
+        telefone_cliente="351912345678",
+        data_planejada=datetime.now(timezone.utc),
+        valor_global="300",
+        pago=True,
+        forma_pagamento="MBWay",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        residuos=["Entulho Limpo", "Entulho Misto"],
+    )
+    router = WhatsappRouterAgent(db_session)
+
+    body = router.handle(msg("2"))
+    sent = send_whatsapp_message("351900009900", body, force_mock=True)
+    rows = sent["list_rows"]
+    assert sent["interactive_type"] == "list"
+    assert rows == [
+        {
+            "id": f"entrega_pedido:{pedido.id}",
+            "title": nome_cliente,
+            "description": "Quantidade: 2 equipamentos",
+        }
+    ]
+    visible_text = rows[0]["title"] + " " + rows[0]["description"]
+    assert "Contentor" not in visible_text
+    assert pedido.data_planejada.strftime("%d/%m/%Y") not in visible_text
+    assert "entrega_pedido" not in visible_text
+    assert str(pedido.id) not in visible_text
+
+    prompt = router.handle(msg(f"entrega_pedido:{pedido.id}"))
+    assert "número do contentor" in prompt
+
+
+def test_entrega_v24_nome_longo_usa_fallback_seguro_sem_id_interno(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    nome_cliente = "Cliente Empresarial Nome Muito Longo Para Entrega"
+    pedido = PedidoService(db_session).criar(
+        nome_cliente=nome_cliente,
+        telefone_cliente="351912345678",
+        data_planejada=datetime.now(timezone.utc),
+        valor_global="300",
+        pago=True,
+        forma_pagamento="MBWay",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        residuos=["Entulho Limpo", "Entulho Misto"],
+    )
+    router = WhatsappRouterAgent(db_session)
+
+    body = router.handle(msg("2"))
+    sent = send_whatsapp_message("351900009900", body, force_mock=True)
+
+    assert "list_rows" not in sent
+    assert nome_cliente in sent["body"]
+    assert "Quantidade: 2 equipamentos" in sent["body"]
+    assert "entrega_pedido" not in sent["body"]
+    assert f"ID: {pedido.id}" not in sent["body"]
+    assert "Contentor x2" not in sent["body"]
+    assert pedido.data_planejada.strftime("%d/%m/%Y") not in sent["body"]
 
 
 def test_entrega_v24_exige_foto_e_cancela_sem_persistir(db_session, monkeypatch):
@@ -1047,6 +1181,7 @@ def test_entrega_v24_cancelamento_na_confirmacao_nao_persiste(db_session, monkey
     router.handle(msg(kind="image", media="foto-123"))
     router.handle(msg("2"))
     router.handle(msg(kind="location", lat=38.7, lon=-9.1))
+    router.handle(msg("Sim"))
     confirmacao = router.handle(msg("Portao"))
     response = router.handle(msg("2"))
 
@@ -1078,6 +1213,7 @@ def test_entrega_v24_pagamento_pendente_pode_ser_pago_no_local(db_session, monke
     router.handle(msg(kind="image", media="foto-123"))
     router.handle(msg("2"))
     router.handle(msg(kind="location", lat=38.7, lon=-9.1))
+    router.handle(msg("Sim"))
     router.handle(msg("Portao"))
     pergunta_pagamento = router.handle(msg("1"))
     pagamento = router.handle(msg("1"))
@@ -1112,7 +1248,7 @@ def test_entrega_v24_pagamento_pendente_pode_continuar_pendente(db_session, monk
     router.handle(msg(kind="image", media="foto-123"))
     router.handle(msg("2"))
     router.handle(msg(kind="location", lat=38.7, lon=-9.1))
-    router.handle(msg("Portao"))
+    router.handle(msg("Não"))
     pergunta_pagamento = router.handle(msg("1"))
     response = router.handle(msg("2"))
 
@@ -1145,6 +1281,7 @@ def test_entrega_v24_conflito_concorrente_cancela_estado_sem_duplicar_fotos(db_s
     router.handle(msg(kind="image", media="foto-123"))
     router.handle(msg("2"))
     router.handle(msg(kind="location", lat=38.7, lon=-9.1))
+    router.handle(msg("Sim"))
     router.handle(msg("Portao"))
     pedido.contentores[0].status_entrega = StatusEntregaPedido.ENTREGUE.value
     db_session.commit()
@@ -1681,19 +1818,18 @@ def test_despejo_v24_mapeia_indice_para_residuo_do_contexto(db_session, monkeypa
 
     router.handle(msg("4"))
     router.handle(msg("1"))
-    router.handle(msg("1"))
-    router.handle(msg(kind="image", media="foto-despejo"))
-    router.handle(msg("2"))
-    prompt = router.handle(msg("2"))
+    prompt = router.handle(msg("1"))
     conversa = db_session.query(ConversaWhatsApp).one()
 
     assert conversa.contexto_json["residuos_disponiveis"] == ["Entulho Limpo", "Entulho Misto"]
     assert "Entulho Limpo" in prompt
-    router.handle(msg("1"))
-    router.handle(msg("Havia lixo domestico misturado"))
+    foto_prompt = router.handle(msg("despejo_residuo:limpo"))
+    router.handle(msg(kind="image", media="foto-despejo"))
+    router.handle(msg("2"))
     response = router.handle(msg("1"))
 
     db_session.refresh(pedido.contentores[0])
+    assert "Contentor 1" in foto_prompt
     assert "processado no vazadouro" in response
     assert pedido.contentores[0].residuo_efetivo_vazadouro == "Entulho Limpo"
 
@@ -1730,20 +1866,21 @@ def test_despejo_v24_loop_confirma_um_ativo_e_mostra_restantes_sem_novo_cliente(
 
     lista = router.handle(msg("4"))
     ativos = router.handle(msg("1"))
-    foto_prompt = router.handle(msg("1"))
+    residuos = router.handle(msg("1"))
+    foto_prompt = router.handle(msg("despejo_residuo:limpo"))
     router.handle(msg(kind="image", media="foto-despejo-201-a"))
     router.handle(msg("1"))
     router.handle(msg(kind="image", media="foto-despejo-201-a"))
     router.handle(msg("1"))
     router.handle(msg(kind="image", media="foto-despejo-201-b"))
-    router.handle(msg("2"))
-    confirmacao = router.handle(msg("1"))
+    confirmacao = router.handle(msg("2"))
     restantes = router.handle(msg("1"))
 
     db_session.refresh(pedido.contentores[0])
     db_session.refresh(pedido.contentores[1])
     assert "Selecione o pedido para despejo" in lista
     assert "Selecione o ativo descarregado" in ativos
+    assert "Entulho Limpo" in residuos
     assert "Contentor 201" in foto_prompt
     assert "Fotos: 2" in confirmacao
     assert "Contentor 202" in restantes
@@ -1759,6 +1896,135 @@ def test_despejo_v24_loop_confirma_um_ativo_e_mostra_restantes_sem_novo_cliente(
     )
     assert [foto.url_midia for foto in fotos] == ["foto-despejo-201-a", "foto-despejo-201-b"]
     assert router.pop_pending_messages() == []
+
+
+def test_despejo_v24_prompts_usam_ids_interativos_estaveis(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    service = PedidoService(db_session)
+    pedido_misto = service.criar(
+        nome_cliente="Cliente IDs Despejo",
+        telefone_cliente="351912345678",
+        data_planejada=datetime.now(timezone.utc),
+        valor_global="300",
+        pago=True,
+        forma_pagamento="MBWay",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        residuos=["Entulho Limpo", "Entulho Misto"],
+    )
+    service.confirmar_entrega_lote(
+        pedido_misto.id,
+        "motorista",
+        38.7,
+        -9.1,
+        None,
+        [
+            {"contentor_id": pedido_misto.contentores[0].id, "numero_adesivo": "601", "fotos": ["foto-601"]},
+            {"contentor_id": pedido_misto.contentores[1].id, "numero_adesivo": "602", "fotos": ["foto-602"]},
+        ],
+    )
+    for contentor in pedido_misto.contentores:
+        service.confirmar_recolha(contentor.id, "motorista", False, None)
+    router = WhatsappRouterAgent(db_session)
+
+    router.handle(msg("4"))
+    router.handle(msg("1"))
+    residuo_prompt = router.handle(msg("1"))
+    residuo_message = send_whatsapp_message("351900009900", residuo_prompt, force_mock=True)
+
+    assert residuo_message["buttons"] == [
+        {"id": "despejo_residuo:limpo", "title": "Entulho Limpo"},
+        {"id": "despejo_residuo:misto", "title": "Entulho Misto"},
+    ]
+
+    pedido_limpo = service.criar(
+        nome_cliente="Cliente ID Conformidade",
+        telefone_cliente="351912345679",
+        data_planejada=datetime.now(timezone.utc),
+        valor_global="100",
+        pago=True,
+        forma_pagamento="MBWay",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        residuos=["Entulho Limpo"],
+    )
+    service.confirmar_entrega_lote(
+        pedido_limpo.id,
+        "motorista",
+        38.7,
+        -9.1,
+        None,
+        [{"contentor_id": pedido_limpo.contentores[0].id, "numero_adesivo": "603", "fotos": ["foto-603"]}],
+    )
+    service.confirmar_recolha(pedido_limpo.contentores[0].id, "motorista", False, None)
+    router = WhatsappRouterAgent(db_session)
+    outro_telefone = "351900009901"
+
+    router.handle(msg("4", phone=outro_telefone))
+    router.handle(msg("2", phone=outro_telefone))
+    conformidade_prompt = router.handle(msg("1", phone=outro_telefone))
+    conformidade_message = send_whatsapp_message("351900009900", conformidade_prompt, force_mock=True)
+
+    assert conformidade_message["buttons"] == [
+        {"id": "despejo_conformidade:sim", "title": "✅ Sim"},
+        {"id": "despejo_conformidade:nao", "title": "🚨 Não"},
+    ]
+
+
+def test_despejo_v24_cota_esgotada_entre_escolha_e_confirmacao_nao_salva(db_session, monkeypatch):
+    liberar_operadores(monkeypatch)
+    service = PedidoService(db_session)
+    pedido = service.criar(
+        nome_cliente="Cliente Cota Concorrente",
+        telefone_cliente="351912345678",
+        data_planejada=datetime.now(timezone.utc),
+        valor_global="300",
+        pago=True,
+        forma_pagamento="MBWay",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        residuos=["Entulho Limpo", "Entulho Misto"],
+    )
+    service.confirmar_entrega_lote(
+        pedido.id,
+        "motorista",
+        38.7,
+        -9.1,
+        None,
+        [
+            {"contentor_id": pedido.contentores[0].id, "numero_adesivo": "611", "fotos": ["foto-611"]},
+            {"contentor_id": pedido.contentores[1].id, "numero_adesivo": "612", "fotos": ["foto-612"]},
+        ],
+    )
+    for contentor in pedido.contentores:
+        service.confirmar_recolha(contentor.id, "motorista", False, None)
+    router = WhatsappRouterAgent(db_session)
+
+    for item in ["4", "1", "1", "despejo_residuo:limpo"]:
+        router.handle(msg(item))
+    router.handle(msg(kind="image", media="foto-cota-esgotada"))
+    confirmacao = router.handle(msg("2"))
+    service.confirmar_despejo(
+        pedido.contentores[1].id,
+        "Entulho Limpo",
+        operador="outro",
+        pedido_id=pedido.id,
+        fotos=["foto-outro-cota"],
+    )
+    response = router.handle(msg("1"))
+
+    db_session.refresh(pedido.contentores[0])
+    db_session.refresh(pedido.contentores[1])
+    assert "Residuo efetivo: Entulho Limpo" in confirmacao
+    assert "Não existe cota em aberto" in response
+    assert pedido.contentores[0].status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
+    assert pedido.contentores[0].despejo_data_hora is None
+    assert pedido.contentores[0].residuo_efetivo_vazadouro is None
+    fotos = db_session.query(ContentorFoto).filter_by(tipo_foto=TipoFoto.DESPEJO.value).all()
+    assert [foto.url_midia for foto in fotos] == ["foto-outro-cota"]
 
 
 def test_despejo_v24_ultimo_ativo_encerra_fluxo_e_menu_separado(db_session, monkeypatch):
@@ -1787,15 +2053,17 @@ def test_despejo_v24_ultimo_ativo_encerra_fluxo_e_menu_separado(db_session, monk
     service.confirmar_recolha(pedido.contentores[0].id, "motorista", False, None)
     router = WhatsappRouterAgent(db_session)
 
-    for item in ["4", "1", "1"]:
+    for item in ["4", "1", "1", "despejo_conformidade:sim"]:
         router.handle(msg(item))
     router.handle(msg(kind="image", media="foto-despejo-203"))
     router.handle(msg("2"))
-    router.handle(msg("1"))
     response = router.handle(msg("1"))
 
     conversa = db_session.query(ConversaWhatsApp).one()
-    assert "Despejo do pedido concluido" in response
+    assert (
+        "✅ Contentor 203 processado no vazadouro. Pedido do cliente Cliente Ultimo Despejo "
+        "concluído. Nenhum contentor pendente."
+    ) == response
     assert conversa.estado_atual == "idle"
     assert conversa.contexto_json == {}
     assert router.pop_pending_messages() == [MAIN_MENU]
@@ -1923,7 +2191,7 @@ def test_despejo_v24_estado_legado_nao_persiste_sem_confirmacao_final(db_session
     response = WhatsappRouterAgent(db_session).handle(msg("1"))
 
     db_session.refresh(pedido.contentores[0])
-    assert "Confirme o despejo deste ativo" in response
+    assert "Envie a foto do despejo" in response
     assert pedido.contentores[0].status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
     assert db_session.query(ContentorFoto).filter_by(tipo_foto=TipoFoto.DESPEJO.value).count() == 0
 
@@ -1956,23 +2224,20 @@ def test_despejo_v24_divergencia_valida_cria_pendencia_e_rejeita_relato_curto(db
 
     for item in ["4", "1", "1"]:
         router.handle(msg(item))
-    router.handle(msg(kind="image", media="foto-divergencia"))
-    router.handle(msg("2"))
-    residuos = router.handle(msg("2"))
-    router.handle(msg("2"))
+    pergunta = router.handle(msg("despejo_conformidade:nao"))
     curto = router.handle(msg("curto"))
-    confirmacao = router.handle(msg("  havia plastico misturado  "))
-    final = router.handle(msg("1"))
+    final = router.handle(msg("  havia plastico misturado  "))
 
     db_session.refresh(pedido.contentores[0])
-    assert "Entulho Misto" in residuos
+    assert "pelo menos 10" in pergunta
     assert "pelo menos 10" in curto
-    assert "Relato: havia plastico misturado" in confirmacao
-    assert "concluido" in final
-    assert pedido.contentores[0].residuo_efetivo_vazadouro == "Entulho Misto"
+    assert "Divergência registrada" in final
+    assert pedido.contentores[0].residuo_efetivo_vazadouro is None
     assert pedido.contentores[0].carga_errada is True
     assert pedido.contentores[0].relato_carga == "havia plastico misturado"
     assert pedido.contentores[0].status_resolucao_carga == StatusResolucaoPedido.PENDENTE.value
+    assert pedido.contentores[0].status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
+    assert pedido.contentores[0].despejo_data_hora is None
 
 
 def test_despejo_v24_conflito_concorrente_recarrega_restantes_sem_duplicar_fotos(db_session, monkeypatch):
@@ -2005,11 +2270,10 @@ def test_despejo_v24_conflito_concorrente_recarrega_restantes_sem_duplicar_fotos
     service.confirmar_recolha(pedido.contentores[1].id, "motorista", False, None)
     router = WhatsappRouterAgent(db_session)
 
-    for item in ["4", "1", "1"]:
+    for item in ["4", "1", "1", "despejo_residuo:limpo"]:
         router.handle(msg(item))
     router.handle(msg(kind="image", media="foto-nao-salvar"))
     router.handle(msg("2"))
-    router.handle(msg("1"))
     service.confirmar_despejo(
         pedido.contentores[0].id,
         "Entulho Limpo",
@@ -2104,7 +2368,7 @@ def test_resumo_v32_gestor_ve_blocos_contentores_carrinhas_financeiro_e_menu_sep
         ponto_referencia=None,
         residuos=["Entulho Limpo", "Entulho Misto"],
     )
-    entregar_pedido(pedido_contentores, db_session, now - timedelta(days=5), ["11", "12"])
+    entregar_pedido(pedido_contentores, db_session, now - timedelta(days=4), ["11", "12"])
     pedido_carrinha = service.criar(
         nome_cliente="Cliente Carrinha Painel",
         telefone_cliente="351900000222",
@@ -2140,22 +2404,21 @@ def test_resumo_v32_gestor_ve_blocos_contentores_carrinhas_financeiro_e_menu_sep
     response = router.handle(msg("resumo", phone=gestor))
 
     assert "PAINEL DE CONTROLE OPERACIONAL OLT" in response
-    assert "1. VENCEM AMANHA" in response
-    assert "2. RECOLHER HOJE" in response
-    assert "3. RECOLHER AMANHA" in response
-    assert "4. PENDENCIAS ATIVAS" in response
-    assert "5. RESUMO FINANCEIRO DO MES" in response
-    assert response.count("Cliente Agrupado") == 1
-    assert "11, 12" in response
-    assert "Carrinha | Cliente Carrinha Painel: horario 14:00 | Com Pessoal" in response
-    assert "https://www.google.com/maps?q=38.7,-9.1" in response
-    assert "Receita de Contentores ja paga: 100,00 €" in response
-    assert "Receita de Contentores pendente: 0,00 €" in response
-    assert "Receita de Carrinhas ja paga: 80,00 €" in response
-    assert "Receita de Carrinhas pendente: 0,00 €" in response
-    assert "Faturado Global: 180,00 €" in response
-    assert "A receber Global: 100,00 €" in response
-    assert "Total projetado do mes: 280,00 €" in response
+    assert "*1. AÇÕES PARA HOJE*" in response
+    assert "*2. AÇÕES AGENDADAS PARA OS PRÓXIMOS DIAS*" in response
+    assert "*3. PENDÊNCIAS ATIVAS*" in response
+    assert "*4. RESUMO FINANCEIRO DO MÊS*" in response
+    assert "🔄 *Renovações:*" in response
+    assert response.count("Cliente Agrupado") == 2
+    assert "• Cliente Agrupado (2 un) • Valor: 100,00 €" in response
+    assert "Entrar em contacto: https://wa.me/351912345678" in response
+    assert "🚛 *FATURAMENTO CARRINHAS*" in response
+    assert "Pago: 100,00 € | Pendente: 0,00 €" in response
+    assert "Pago: 80,00 € | Pendente: 0,00 €" in response
+    assert "Total faturado — caixa: 180,00 €" in response
+    assert "Total a receber: 0,00 €" in response
+    assert "Total projetado: 180,00 €" in response
+    assert "[Abrir endereço]" not in response
     assert "Menu principal" not in response
     assert router.pop_pending_messages() == [MAIN_MENU]
 
@@ -2194,11 +2457,10 @@ def test_resumo_v32_funcionario_oculta_comercial_financeiro_pagamentos_e_carga(d
     assert "Divergencias de residuo" not in response
     assert "valor" not in response.lower()
     assert "EUR" not in response
-    assert "Avarias em equipamentos" in response
-    assert "Carrinha 16:30" in response
+    assert "Avarias em Equipamentos" in response
+    assert "Equipamento Nº 0" in response
     assert "Porta lateral amassada" in response
-    assert "resolver avaria" in response
-    assert "Carrinha | Cliente Funcionario: horario 16:30 | Com Pessoal" in response
+    assert "https://wa.me/?text=resolver%20avaria%202" in response
     assert "Menu principal" not in response
     pending = router.pop_pending_messages()
     assert pending == [
@@ -2226,7 +2488,7 @@ def test_resumo_v33_agrupa_pedido_sem_duplicar_ativos_fotos_ou_pendencias(db_ses
         ponto_referencia=None,
         residuos=["Entulho Limpo", "Entulho Misto", "Madeira", "Plastico"],
     )
-    entregar_pedido(pedido, db_session, now - timedelta(days=5), ["44", "45", "45", None])
+    entregar_pedido(pedido, db_session, now - timedelta(days=6), ["44", "45", "45", None])
     pedido.contentores[0].entrega_latitude = 0
     pedido.contentores[0].entrega_longitude = 0
     pedido.contentores[1].contentor_avariado = True
@@ -2244,12 +2506,14 @@ def test_resumo_v33_agrupa_pedido_sem_duplicar_ativos_fotos_ou_pendencias(db_ses
 
     response = WhatsappRouterAgent(db_session).handle(msg("resumo", phone=gestor))
 
-    assert response.count("- Contentores | Cliente Sem Duplicar") == 1
-    assert "- Contentores | Cliente Sem Duplicar: 44, 45, Ativo" in response
+    assert response.count("Cliente Sem Duplicar") == 3
+    assert "44" in response
+    assert "45" in response
+    assert "45, 45" not in response
     assert "foto-" not in response
     assert "maps?q=0,0" not in response
-    assert "Avarias em equipamentos" in response
-    assert "resolver avaria" in response
+    assert "Avarias em Equipamentos" in response
+    assert "https://wa.me/?text=resolver%20avaria%202" in response
 
 
 def test_resumo_v33_financeiro_usa_criado_em_e_misto_so_no_global(db_session):
@@ -2309,10 +2573,150 @@ def test_resumo_v33_financeiro_usa_criado_em_e_misto_so_no_global(db_session):
 
     response = WhatsappRouterAgent(db_session).handle(msg("resumo", phone=gestor))
 
-    assert "Receita de Contentores ja paga: 1.000,50 €" in response
-    assert "Receita de Contentores pendente: 0,00 €" in response
-    assert "Receita de Carrinhas ja paga: 0,00 €" in response
-    assert "Receita de Carrinhas pendente: 200,00 €" in response
-    assert "Faturado Global: 1.000,50 €" in response
-    assert "A receber Global: 500,00 €" in response
-    assert "Total projetado do mes: 1.500,50 €" in response
+    assert "📦 *FATURAMENTO CONTENTORES*" in response
+    assert "• Pago: 1.000,50 € | Pendente: 0,00 €" in response
+    assert "🚛 *FATURAMENTO CARRINHAS*" in response
+    assert "• Pago: 0,00 € | Pendente: 200,00 €" in response
+    assert "Total faturado — caixa: 1.000,50 €" in response
+    assert "Total a receber: 200,00 €" in response
+    assert "Total projetado: 1.200,50 €" in response
+
+
+def test_resumo_v4_entregas_hoje_contentor_carrinha_endereco_e_horario_seguro(db_session):
+    gestor = "351900010005"
+    operador(db_session, gestor, PerfilOperador.GESTOR)
+    service = PedidoService(db_session)
+    today = datetime.now(timezone.utc)
+    pedido_contentor = service.criar(
+        nome_cliente="Cliente Entrega Maps",
+        telefone_cliente="351912345680",
+        data_planejada=today,
+        valor_global="120",
+        pago=False,
+        forma_pagamento=None,
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua Maps",
+        ponto_referencia=None,
+        residuos=["Entulho Limpo", "Entulho Misto"],
+        endereco_latitude=38.7,
+        endereco_longitude=-9.1,
+    )
+    pedido_carrinha = service.criar(
+        nome_cliente="Cliente Carrinha Antiga",
+        telefone_cliente="351912345681",
+        data_planejada=today,
+        valor_global="90",
+        pago=False,
+        forma_pagamento=None,
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua Textual",
+        ponto_referencia=None,
+        itens=[{"tipo_equipamento": "CARRINHA", "residuo_contratado": "Entulho Limpo", "horario_agendado": "10:30"}],
+    )
+    pedido_carrinha.contentores[0].horario_agendado = None
+    db_session.commit()
+
+    response = WhatsappRouterAgent(db_session).handle(msg("resumo", phone=gestor))
+
+    assert "📦 *Entrega de Contentores:*" in response
+    assert "• Cliente Entrega Maps (2 un)" in response
+    assert "📍 Abrir endereço: https://www.google.com/maps?q=38.7,-9.1" in response
+    assert "🚛 *Envio de Carrinhas:*" in response
+    assert "• Cliente Carrinha Antiga (1 un)" in response
+    assert "⏰ Horário: Horário não informado" in response
+    assert "📍 Endereço: Rua Textual" in response
+    assert "[Abrir endereço]" not in response
+    assert "None" not in response
+
+
+def test_resumo_v4_financeiro_nao_duplica_multiequipamento_nem_sum_distinct(db_session):
+    gestor = "351900010006"
+    funcionario = "351900010007"
+    operador(db_session, gestor, PerfilOperador.GESTOR)
+    operador(db_session, funcionario, PerfilOperador.FUNCIONARIO)
+    service = PedidoService(db_session)
+    today = datetime.now(timezone.utc)
+    service.criar(
+        nome_cliente="Cliente Multi 450",
+        telefone_cliente="351912345682",
+        data_planejada=today,
+        valor_global="450",
+        pago=True,
+        forma_pagamento="MBWay",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        residuos=["Entulho Limpo", "Entulho Misto", "Madeira"],
+    )
+    for suffix in ("A", "B"):
+        service.criar(
+            nome_cliente=f"Cliente Mesmo Valor {suffix}",
+            telefone_cliente=f"35191234568{3 if suffix == 'A' else 4}",
+            data_planejada=today,
+            valor_global="100",
+            pago=True,
+            forma_pagamento="Dinheiro",
+            pedido_feito_por="gestor",
+            endereco_aproximado="Rua",
+            ponto_referencia=None,
+            residuos=["Entulho Limpo"],
+        )
+    service.criar(
+        nome_cliente="Cliente Carrinha Pendente",
+        telefone_cliente="351912345685",
+        data_planejada=today,
+        valor_global="80",
+        pago=False,
+        forma_pagamento=None,
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        itens=[{"tipo_equipamento": "CARRINHA", "residuo_contratado": "Entulho Limpo", "horario_agendado": "09:00"}],
+    )
+
+    response = WhatsappRouterAgent(db_session).handle(msg("resumo", phone=gestor))
+    funcionario_response = WhatsappRouterAgent(db_session).handle(msg("resumo", phone=funcionario))
+
+    assert "• Pago: 650,00 € | Pendente: 0,00 €" in response
+    assert "• Pago: 0,00 € | Pendente: 80,00 €" in response
+    assert "Total faturado — caixa: 650,00 €" in response
+    assert "Total a receber: 80,00 €" in response
+    assert "Total projetado: 730,00 €" in response
+    assert "RESUMO FINANCEIRO" not in funcionario_response
+    assert "Total faturado" not in funcionario_response
+    assert "Em dívida" not in funcionario_response
+
+
+def test_resumo_v4_secoes_vazias_e_financeiro_zerado(db_session):
+    gestor = "351900010008"
+    funcionario = "351900010009"
+    operador(db_session, gestor, PerfilOperador.GESTOR)
+    operador(db_session, funcionario, PerfilOperador.FUNCIONARIO)
+
+    gestor_response = WhatsappRouterAgent(db_session).handle(msg("resumo", phone=gestor))
+    funcionario_response = WhatsappRouterAgent(db_session).handle(msg("resumo", phone=funcionario))
+
+    assert "• Nenhuma ação para hoje." in gestor_response
+    assert "• Nenhuma ação agendada." in gestor_response
+    assert "• Nenhuma pendência ativa." in gestor_response
+    assert "• Pago: 0,00 € | Pendente: 0,00 €" in gestor_response
+    assert "Entrega de Contentores:" not in gestor_response
+    assert "Envio de Carrinhas:" not in gestor_response
+    assert "None" not in gestor_response
+    assert "RESUMO FINANCEIRO" not in funcionario_response
+
+
+def test_resumo_v4_cabecalho_usa_data_operacional_de_portugal(db_session, monkeypatch):
+    import app.agents.whatsapp_router_agent as router_module
+
+    class FakeDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 7, 14, 0, 30, tzinfo=tz)
+
+    monkeypatch.setattr(router_module, "datetime", FakeDateTime)
+
+    response = WhatsappRouterAgent(db_session)._painel_v32(PerfilOperador.FUNCIONARIO)
+
+    assert "📊 *PAINEL DE CONTROLE OPERACIONAL OLT*" in response
+    assert "📅 Data: 14/07/2026" in response

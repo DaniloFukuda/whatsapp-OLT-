@@ -20,6 +20,9 @@ from app.models.pedido import (
 )
 
 
+RESIDUOS_CANONICOS = ("Entulho Limpo", "Entulho Misto")
+
+
 class PedidoService:
     def __init__(self, db: Session):
         self.db = db
@@ -355,18 +358,83 @@ class PedidoService:
         return contentor
 
     def cotas_restantes(self, pedido_id: int) -> Counter:
+        cotas = self.cotas_residuos(pedido_id)
+        return Counter(
+            {
+                residuo: dados["saldo"]
+                for residuo, dados in cotas.items()
+                if dados["saldo"] > 0
+            }
+        )
+
+    def cotas_residuos(self, pedido_id: int) -> dict[str, dict[str, int]]:
         pedido = self.get(pedido_id)
         if not pedido:
             raise ValueError("Pedido não encontrado.")
-        contratadas = Counter(c.residuo_contratado for c in pedido.contentores)
-        consumidas = Counter(
-            c.residuo_efetivo_vazadouro
-            for c in pedido.contentores
-            if c.status_ciclo == StatusCicloPedido.CONCLUIDO.value
-            and c.residuo_efetivo_vazadouro
-            and contratadas[c.residuo_efetivo_vazadouro] > 0
-        )
-        return contratadas - consumidas
+        contratadas = Counter()
+        consumidas = Counter()
+        for contentor in pedido.contentores:
+            if contentor.residuo_contratado not in RESIDUOS_CANONICOS:
+                raise ValueError("Pedido precisa de revisão: resíduo contratado inválido.")
+            contratadas[contentor.residuo_contratado] += 1
+            if contentor.status_ciclo != StatusCicloPedido.CONCLUIDO.value:
+                continue
+            if not contentor.residuo_efetivo_vazadouro:
+                raise ValueError("Pedido precisa de revisão: despejo concluído sem resíduo efetivo.")
+            if contentor.residuo_efetivo_vazadouro not in RESIDUOS_CANONICOS:
+                raise ValueError("Pedido precisa de revisão: resíduo efetivo inválido.")
+            consumidas[contentor.residuo_efetivo_vazadouro] += 1
+
+        cotas = {}
+        for residuo in RESIDUOS_CANONICOS:
+            contratado = contratadas[residuo]
+            consumido = consumidas[residuo]
+            saldo = contratado - consumido
+            if saldo < 0:
+                raise ValueError("Pedido precisa de revisão: cota de resíduo negativa.")
+            cotas[residuo] = {
+                "contratado": contratado,
+                "consumido": consumido,
+                "saldo": saldo,
+            }
+        return cotas
+
+    def contentores_pendentes_despejo(self, pedido_id: int) -> list[PedidoContentor]:
+        pedido = self.get(pedido_id)
+        if not pedido:
+            return []
+        return [
+            contentor
+            for contentor in pedido.contentores
+            if contentor.status_recolha == StatusRecolhaPedido.RECOLHIDO.value
+            and contentor.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
+        ]
+
+    def registrar_divergencia_despejo(
+        self,
+        contentor_id: int,
+        relato: str,
+        operador: str | None = None,
+        pedido_id: int | None = None,
+    ) -> PedidoContentor:
+        contentor = self.db.get(PedidoContentor, contentor_id)
+        if (
+            not contentor
+            or contentor.status_recolha != StatusRecolhaPedido.RECOLHIDO.value
+            or contentor.status_ciclo != StatusCicloPedido.EM_ANDAMENTO.value
+            or contentor.despejo_data_hora is not None
+        ):
+            raise ValueError("Contentor não disponível para despejo.")
+        if pedido_id is not None and contentor.pedido_id != pedido_id:
+            raise ValueError("Ativo nao pertence ao pedido selecionado.")
+        relato_limpo = (relato or "").strip()
+        if len(relato_limpo) < 10:
+            raise ValueError("O relato da carga precisa ter pelo menos 10 caracteres.")
+        contentor.carga_errada = True
+        contentor.relato_carga = relato_limpo
+        contentor.status_resolucao_carga = StatusResolucaoPedido.PENDENTE.value
+        self.db.commit()
+        return contentor
 
     def confirmar_despejo(
         self,
@@ -379,13 +447,16 @@ class PedidoService:
         fotos: list[str] | None = None,
     ) -> PedidoContentor:
         contentor = self.db.get(PedidoContentor, contentor_id)
-        if not contentor or contentor.status_recolha != StatusRecolhaPedido.RECOLHIDO.value:
+        if (
+            not contentor
+            or contentor.status_recolha != StatusRecolhaPedido.RECOLHIDO.value
+            or contentor.status_ciclo != StatusCicloPedido.EM_ANDAMENTO.value
+            or contentor.despejo_data_hora is not None
+        ):
             raise ValueError("Contentor não disponível para despejo.")
         if pedido_id is not None and contentor.pedido_id != pedido_id:
             raise ValueError("Ativo nao pertence ao pedido selecionado.")
-        if contentor.status_ciclo == StatusCicloPedido.CONCLUIDO.value:
-            raise ValueError("O ciclo deste contentor já foi concluído.")
-        if residuo_efetivo not in {"Entulho Limpo", "Entulho Misto"}:
+        if residuo_efetivo not in RESIDUOS_CANONICOS:
             raise ValueError("Residuo efetivo invalido.")
         fotos_unicas = []
         for foto in fotos or []:
@@ -394,41 +465,45 @@ class PedidoService:
                 fotos_unicas.append(foto_limpa)
         if fotos is not None and not fotos_unicas:
             raise ValueError("Envie pelo menos uma foto do despejo.")
-        cotas = self.cotas_restantes(contentor.pedido_id)
-        if not carga_errada and cotas.get(residuo_efetivo, 0) <= 0:
+        cotas = self.cotas_residuos(contentor.pedido_id)
+        if cotas[residuo_efetivo]["saldo"] <= 0:
             raise ValueError("Não existe cota em aberto para esse tipo de resíduo.")
         relato_limpo = (relato or "").strip()
         if carga_errada and len(relato_limpo) < 10:
             raise ValueError("O relato da carga precisa ter pelo menos 10 caracteres.")
-        contentor.residuo_efetivo_vazadouro = residuo_efetivo
-        contentor.carga_errada = carga_errada
-        contentor.relato_carga = relato_limpo if carga_errada else None
-        contentor.status_resolucao_carga = (
-            StatusResolucaoPedido.PENDENTE.value
-            if carga_errada
-            else StatusResolucaoPedido.NAO_APLICA.value
-        )
-        fotos_existentes = {
-            foto.url_midia
-            for foto in contentor.fotos
-            if foto.tipo_foto == TipoFoto.DESPEJO.value
-        }
-        for foto_url in fotos_unicas:
-            if foto_url in fotos_existentes:
-                continue
-            self.db.add(
-                ContentorFoto(
-                    pedido_contentor_id=contentor.id,
-                    url_midia=foto_url,
-                    tipo_foto=TipoFoto.DESPEJO.value,
-                    url_foto=foto_url,
-                    tipo=TipoFoto.DESPEJO.value.lower(),
-                )
+        try:
+            contentor.residuo_efetivo_vazadouro = residuo_efetivo
+            contentor.carga_errada = carga_errada
+            contentor.relato_carga = relato_limpo if carga_errada else None
+            contentor.status_resolucao_carga = (
+                StatusResolucaoPedido.PENDENTE.value
+                if carga_errada
+                else StatusResolucaoPedido.NAO_APLICA.value
             )
-        contentor.despejo_feito_por = operador
-        contentor.despejo_data_hora = utcnow()
-        contentor.status_ciclo = StatusCicloPedido.CONCLUIDO.value
-        self.db.commit()
+            fotos_existentes = {
+                foto.url_midia
+                for foto in contentor.fotos
+                if foto.tipo_foto == TipoFoto.DESPEJO.value
+            }
+            for foto_url in fotos_unicas:
+                if foto_url in fotos_existentes:
+                    continue
+                self.db.add(
+                    ContentorFoto(
+                        pedido_contentor_id=contentor.id,
+                        url_midia=foto_url,
+                        tipo_foto=TipoFoto.DESPEJO.value,
+                        url_foto=foto_url,
+                        tipo=TipoFoto.DESPEJO.value.lower(),
+                    )
+                )
+            contentor.despejo_feito_por = operador
+            contentor.despejo_data_hora = utcnow()
+            contentor.status_ciclo = StatusCicloPedido.CONCLUIDO.value
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         return contentor
 
     def resolver(self, tipo: str, contentor_id: int) -> PedidoContentor:

@@ -11,8 +11,11 @@ logger = get_logger(__name__)
 
 MAX_BUTTON_OPTIONS = 3
 MAX_LIST_OPTIONS = 5
+MAX_CORRIGIR_LIST_OPTIONS = 12
+MAX_ENTREGA_LIST_OPTIONS = 10
 MAX_BUTTON_TITLE_CHARS = 20
 MAX_LIST_TITLE_CHARS = 24
+MAX_LIST_DESCRIPTION_CHARS = 72
 LIST_BUTTON_TITLE = "Escolher opção"
 LIST_SECTION_TITLE = "Opções"
 OPTION_ID_PREFIX = "option_"
@@ -23,6 +26,17 @@ def send_whatsapp_message(to: str, body: str, force_mock: bool = False) -> dict[
         return send_text_message(to, body, force_mock=force_mock)
 
     options = _options_for_body(body)
+    if _is_entrega_pedido_body(body) and 0 < len(options) <= MAX_ENTREGA_LIST_OPTIONS:
+        if any(len(_clean_option_title(option["title"])) > MAX_LIST_TITLE_CHARS for option in options):
+            return send_text_message(to, _entrega_text_fallback(body), force_mock=force_mock)
+        result = send_list_message(
+            to,
+            _entrega_body_without_options(body),
+            _list_rows_from_options(options)[:MAX_ENTREGA_LIST_OPTIONS],
+            force_mock=force_mock,
+        )
+        return _fallback_to_text_if_needed(to, body, result, force_mock, interactive_type="list")
+
     if 0 < len(options) <= MAX_BUTTON_OPTIONS:
         result = send_button_message(
             to,
@@ -31,6 +45,15 @@ def send_whatsapp_message(to: str, body: str, force_mock: bool = False) -> dict[
             force_mock=force_mock,
         )
         return _fallback_to_text_if_needed(to, body, result, force_mock, interactive_type="button")
+
+    if _is_corrigir_pedido_body(body) and MAX_BUTTON_OPTIONS < len(options) <= MAX_CORRIGIR_LIST_OPTIONS:
+        result = send_list_message(
+            to,
+            _body_without_numbered_options(body),
+            _list_rows_from_options(options)[:MAX_CORRIGIR_LIST_OPTIONS],
+            force_mock=force_mock,
+        )
+        return _fallback_to_text_if_needed(to, body, result, force_mock, interactive_type="list")
 
     if MAX_BUTTON_OPTIONS < len(options) <= MAX_LIST_OPTIONS:
         result = send_list_message(
@@ -91,6 +114,7 @@ def send_list_message(
     rows: list[dict[str, str]],
     force_mock: bool = False,
 ) -> dict[str, Any]:
+    max_rows = MAX_CORRIGIR_LIST_OPTIONS if len(rows) > MAX_LIST_OPTIONS else MAX_LIST_OPTIONS
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
@@ -100,7 +124,7 @@ def send_list_message(
             "body": {"text": body},
             "action": {
                 "button": LIST_BUTTON_TITLE,
-                "sections": [{"title": LIST_SECTION_TITLE, "rows": rows[:MAX_LIST_OPTIONS]}],
+                "sections": [{"title": LIST_SECTION_TITLE, "rows": rows[:max_rows]}],
             },
         },
     }
@@ -109,7 +133,7 @@ def send_list_message(
         body=body,
         payload=payload,
         force_mock=force_mock,
-        list_rows=rows[:MAX_LIST_OPTIONS],
+        list_rows=rows[:max_rows],
         include_type=True,
     )
 
@@ -215,7 +239,11 @@ def _buttons_for_body(body: str) -> list[dict[str, str]]:
 
 def _options_for_body(body: str) -> list[dict[str, str]]:
     normalized = _normalize_button_text(body)
-    if "mao de obra" in normalized and "1. sim" in normalized and "2. nao" in normalized:
+    if (
+        ("mao de obra" in normalized or "pessoal para carregamento" in normalized)
+        and "1. sim" in normalized
+        and "2. nao" in normalized
+    ):
         return [
             {"id": "pedido_mao_obra_sim", "title": "✅ Sim"},
             {"id": "pedido_mao_obra_nao", "title": "❌ Não"},
@@ -229,6 +257,37 @@ def _options_for_body(body: str) -> list[dict[str, str]]:
             {"id": "pedido_residuo_limpo", "title": "Entulho Limpo"},
             {"id": "pedido_residuo_misto", "title": "Entulho Misto"},
         ]
+    if _is_corrigir_pedido_body(body):
+        return _corrigir_pedido_options(body)
+    if _is_entrega_pedido_body(body):
+        return _entrega_pedido_options(body)
+    if (
+        "deseja informar algum ponto de referencia para a entrega" in normalized
+        and "1. sim" in normalized
+        and "2. nao" in normalized
+    ):
+        return [
+            {"id": "entrega_referencia:sim", "title": "Sim"},
+            {"id": "entrega_referencia:nao", "title": "Não"},
+        ]
+    if (
+        "qual residuo caiu no chao" in normalized
+        and "entulho limpo" in normalized
+        and "entulho misto" in normalized
+    ):
+        return [
+            {"id": "despejo_residuo:limpo", "title": "Entulho Limpo"},
+            {"id": "despejo_residuo:misto", "title": "Entulho Misto"},
+        ]
+    if (
+        "o entulho do contentor" in normalized
+        and "sim, tudo certo" in normalized
+        and "misturado/errado" in normalized
+    ):
+        return [
+            {"id": "despejo_conformidade:sim", "title": "✅ Sim"},
+            {"id": "despejo_conformidade:nao", "title": "🚨 Não"},
+        ]
 
     numbered_options = _numbered_options_for_body(body)
     if 0 < len(numbered_options) <= MAX_LIST_OPTIONS:
@@ -240,6 +299,64 @@ def _options_for_body(body: str) -> list[dict[str, str]]:
         return [{"id": "option_1", "title": "Sim"}, {"id": "option_2", "title": "Nao"}]
 
     return []
+
+
+def _is_corrigir_pedido_body(body: str) -> bool:
+    return "qual campo deseja corrigir" in _normalize_button_text(body)
+
+
+def _is_entrega_pedido_body(body: str) -> bool:
+    return "selecione o cliente para iniciar a entrega" in _normalize_button_text(body)
+
+
+def _corrigir_pedido_options(body: str) -> list[dict[str, str]]:
+    id_by_title = {
+        "quantidade de carrinhas": "quantidade",
+        "quantidade de contentores": "quantidade",
+        "nome do cliente": "nome_cliente",
+        "telefone": "telefone",
+        "dia da entrega": "data_entrega",
+        "hora da entrega": "hora_entrega",
+        "tipo de residuo": "tipo_residuo",
+        "pessoal para carregamento": "mao_de_obra",
+        "valor total": "valor_total",
+        "status do pagamento": "status_pagamento",
+        "forma de pagamento": "forma_pagamento",
+        "endereco": "endereco",
+        "ponto de referencia": "ponto_referencia",
+    }
+    options = []
+    for _number, title in _numbered_options_for_body(body):
+        normalized_title = _normalize_button_text(title)
+        field = id_by_title.get(normalized_title)
+        if field:
+            options.append({"id": f"corrigir_pedido:{field}", "title": _clean_option_title(title)})
+    return options
+
+
+def _entrega_pedido_options(body: str) -> list[dict[str, str]]:
+    pattern = re.compile(
+        r"(?ims)^\s*(\d+)\.\s*(?P<title>.+?)\s*\n"
+        r"\s*Quantidade:\s*(?P<quantity>.+?)\s*\n"
+        r"\s*Tipo:\s*(?P<kind>.+?)\s*\n"
+        r"\s*ID:\s*(?P<id>entrega_pedido:\d+)\s*$"
+    )
+    options = []
+    for match in pattern.finditer(body or ""):
+        title = _clean_option_title(match.group("title"))
+        quantity = _clean_option_title(match.group("quantity"))
+        kind = _clean_option_title(match.group("kind"))
+        row_id = match.group("id")
+        if title and quantity and row_id:
+            options.append(
+                {
+                    "id": row_id,
+                    "title": title,
+                    "description": f"Quantidade: {quantity}",
+                    "preserve_title": "1",
+                }
+            )
+    return options
 
 
 def _numbered_options_for_body(body: str) -> list[tuple[str, str]]:
@@ -281,10 +398,17 @@ def _buttons_from_options(options: list[dict[str, str]]) -> list[dict[str, str]]
 def _list_rows_from_options(options: list[dict[str, str]]) -> list[dict[str, str]]:
     rows = []
     for option in options:
-        row_title = _truncate_title(option["title"], MAX_LIST_TITLE_CHARS)
+        if option.get("preserve_title"):
+            row_title = _clean_option_title(option["title"])
+        else:
+            row_title = _truncate_title(option["title"], MAX_LIST_TITLE_CHARS)
         if not row_title:
             return []
-        rows.append({"id": option["id"], "title": row_title})
+        row = {"id": option["id"], "title": row_title}
+        description = option.get("description")
+        if description:
+            row["description"] = _truncate_title(description, MAX_LIST_DESCRIPTION_CHARS)
+        rows.append(row)
     return rows
 
 
@@ -317,6 +441,23 @@ def _body_without_numbered_options(body: str) -> str:
     cleaned = "\n".join(lines).strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned or body
+
+
+def _entrega_body_without_options(body: str) -> str:
+    return (body or "").split("\n\n", 1)[0].strip() or body
+
+
+def _entrega_text_fallback(body: str) -> str:
+    lines = []
+    for line in (body or "").splitlines():
+        if re.match(r"^\s*ID:\s*entrega_pedido:\d+\s*$", line):
+            continue
+        if re.match(r"^\s*Tipo:\s*.+$", line):
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned or _entrega_body_without_options(body)
 
 
 def _normalize_button_text(value: str) -> str:

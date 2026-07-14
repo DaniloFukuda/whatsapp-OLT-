@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
@@ -15,13 +16,14 @@ from app.core.config import get_settings
 from app.core.phone import normalize_phone, whatsapp_link
 from app.core.time import utcnow
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
-from app.models.aluguer import AluguerContentor, StatusAluguer, StatusEntrega
+from app.models.aluguer import AluguerContentor, StatusAluguer, StatusCiclo, StatusEntrega, StatusResolucao
 from app.models.conversa import ConversaWhatsApp
 from app.models.contentor import StatusContentor
 from app.models.operador import PerfilOperador
 from app.models.pedido import (
     Pedido,
     PedidoContentor,
+    StatusCicloPedido,
     StatusEntregaPedido,
     StatusPagamento,
     StatusRecolhaPedido,
@@ -291,6 +293,381 @@ class WhatsappRouterAgent:
         return "Comando nao reconhecido. Envie 'novo' para registar um aluguer."
 
     def _painel_v32(self, perfil: PerfilOperador) -> str:
+        return self._painel_v4(perfil)
+
+    def _painel_v4(self, perfil: PerfilOperador) -> str:
+        today = datetime.now(self._timezone()).date()
+        tomorrow = today + timedelta(days=1)
+        pedidos = self._pedidos_v32()
+        alugueres = self._alugueres_v4()
+        linhas = [
+            "📊 *PAINEL DE CONTROLE OPERACIONAL OLT*",
+            f"📅 Data: {today:%d/%m/%Y}",
+            "",
+            self._painel_v4_acoes_hoje(pedidos, alugueres, today, perfil),
+            "",
+            self._painel_v4_proximos_dias(pedidos, alugueres, tomorrow),
+            "",
+            self._painel_v4_pendencias(pedidos, alugueres, today, perfil),
+        ]
+        if perfil == PerfilOperador.GESTOR:
+            linhas.extend(["", self._painel_v4_financeiro(pedidos, alugueres, today)])
+        return "\n".join(linhas)
+
+    def _painel_v4_acoes_hoje(self, pedidos: list[Pedido], alugueres: list[AluguerContentor], today, perfil: PerfilOperador) -> str:
+        blocos = []
+        entregas = self._pedidos_por_entrega(pedidos, today, TipoEquipamentoPedido.CONTENTOR.value)
+        if entregas:
+            blocos.append("📦 *Entrega de Contentores:*\n" + "\n".join(
+                self._format_entrega_hoje(pedido, itens, incluir_horario=False)
+                for pedido, itens in entregas
+            ))
+        carrinhas = self._pedidos_por_entrega(pedidos, today, TipoEquipamentoPedido.CARRINHA.value)
+        if carrinhas:
+            blocos.append("🚛 *Envio de Carrinhas:*\n" + "\n".join(
+                self._format_entrega_hoje(pedido, itens, incluir_horario=True)
+                for pedido, itens in carrinhas
+            ))
+        if perfil == PerfilOperador.GESTOR:
+            renovacoes = self._contentores_vencendo_amanha(pedidos, today)
+            renovacoes_legadas = self._alugueres_por_vencimento(alugueres, today + timedelta(days=1))
+            if renovacoes:
+                blocos.append("🔄 *Renovações:*\n" + "\n".join(
+                    self._format_renovacao(pedido, itens) for pedido, itens in renovacoes
+                ))
+            if renovacoes_legadas:
+                bloco = "🔄 *Renovações:*" if not renovacoes else ""
+                linhas = [bloco] if bloco else []
+                linhas.extend(self._format_renovacao_aluguer(aluguer) for aluguer in renovacoes_legadas)
+                blocos.append("\n".join(linhas))
+        conteudo = "\n\n".join(blocos) if blocos else "• Nenhuma ação para hoje."
+        return "🟢 *1. AÇÕES PARA HOJE*\n" + conteudo
+
+    def _painel_v4_proximos_dias(self, pedidos: list[Pedido], alugueres: list[AluguerContentor], tomorrow) -> str:
+        blocos = []
+        recolhas = self._contentores_para_recolha_em(pedidos, tomorrow)
+        recolhas_legadas = self._alugueres_por_vencimento(alugueres, tomorrow)
+        if recolhas or recolhas_legadas:
+            linhas = [f"• {pedido.nome_cliente} ({len(itens)} un)" for pedido, itens in recolhas]
+            linhas.extend(f"• {aluguer.nome_cliente} (1 un)" for aluguer in recolhas_legadas)
+            blocos.append("📦 *Recolher Amanhã:*\n" + "\n".join(
+                linhas
+            ))
+        carrinhas = self._pedidos_por_entrega(pedidos, tomorrow, TipoEquipamentoPedido.CARRINHA.value)
+        if carrinhas:
+            blocos.append("🚛 *Carrinhas para Amanhã:*\n" + "\n".join(
+                self._format_carrinha_amanha(pedido, itens) for pedido, itens in carrinhas
+            ))
+        conteudo = "\n\n".join(blocos) if blocos else "• Nenhuma ação agendada."
+        return "🔵 *2. AÇÕES AGENDADAS PARA OS PRÓXIMOS DIAS*\n" + conteudo
+
+    def _painel_v4_pendencias(self, pedidos: list[Pedido], alugueres: list[AluguerContentor], today, perfil: PerfilOperador) -> str:
+        blocos = []
+        vencidos = self._contentores_vencidos(pedidos, today)
+        vencidos_legados = self._alugueres_vencidos(alugueres, today)
+        if vencidos or vencidos_legados:
+            linhas = [
+                self._format_contentor_vencido(pedido, data_entrega, itens, today)
+                for pedido, data_entrega, itens in vencidos
+            ]
+            linhas.extend(self._format_aluguer_vencido(aluguer, today) for aluguer in vencidos_legados)
+            blocos.append("⏳ *Contentores com Prazo Vencido:*\n" + "\n".join(
+                linhas
+            ))
+        if perfil == PerfilOperador.GESTOR:
+            pendentes = self._pedidos_pagamento_pendente(pedidos)
+            pendentes_legados = self._alugueres_pagamento_pendente(alugueres)
+            if pendentes or pendentes_legados:
+                linhas = [self._format_pagamento_pendente(pedido) for pedido in pendentes]
+                linhas.extend(self._format_pagamento_pendente_aluguer(aluguer) for aluguer in pendentes_legados)
+                blocos.append("💳 *Pagamentos Pendentes:*\n" + "\n".join(
+                    linhas
+                ))
+        avarias = self._avarias_ativas(pedidos)
+        avarias_legadas = self._alugueres_avarias_ativas(alugueres)
+        if avarias or avarias_legadas:
+            linhas = [self._format_avaria(item) for item in avarias]
+            linhas.extend(self._format_avaria_aluguer(aluguer) for aluguer in avarias_legadas)
+            blocos.append("🛠️ *Avarias em Equipamentos:*\n" + "\n".join(
+                linhas
+            ))
+        conteudo = "\n\n".join(blocos) if blocos else "• Nenhuma pendência ativa."
+        return "🚨 *3. PENDÊNCIAS ATIVAS*\n" + conteudo
+
+    def _painel_v4_financeiro(self, pedidos: list[Pedido], alugueres: list[AluguerContentor], today) -> str:
+        totais = self._financeiro_mes(pedidos, today)
+        for aluguer in alugueres:
+            criado_em = self._local_date(aluguer.criado_em)
+            if criado_em.year != today.year or criado_em.month != today.month:
+                continue
+            status = "pago" if aluguer.pago else "pendente"
+            totais[f"contentores_{status}"] += Decimal(str(aluguer.valor or 0))
+        faturado = totais["contentores_pago"] + totais["carrinhas_pago"]
+        receber = totais["contentores_pendente"] + totais["carrinhas_pendente"]
+        sep = "════════════════════════"
+        return "\n".join(
+            [
+                "💶 *4. RESUMO FINANCEIRO DO MÊS*",
+                sep,
+                "📦 *FATURAMENTO CONTENTORES*",
+                f"• Pago: {self._money(totais['contentores_pago'])} | Pendente: {self._money(totais['contentores_pendente'])}",
+                "",
+                "🚛 *FATURAMENTO CARRINHAS*",
+                f"• Pago: {self._money(totais['carrinhas_pago'])} | Pendente: {self._money(totais['carrinhas_pendente'])}",
+                sep,
+                f"🟢 Total faturado — caixa: {self._money(faturado)}",
+                f"🟡 Total a receber: {self._money(receber)}",
+                f"📊 Total projetado: {self._money(faturado + receber)}",
+                sep,
+            ]
+        )
+
+    def _alugueres_v4(self) -> list[AluguerContentor]:
+        return (
+            self.db.query(AluguerContentor)
+            .filter(AluguerContentor.is_deleted.is_(False))
+            .order_by(AluguerContentor.data_vencimento, AluguerContentor.nome_cliente, AluguerContentor.id)
+            .all()
+        )
+
+    def _alugueres_por_vencimento(self, alugueres: list[AluguerContentor], target_date) -> list[AluguerContentor]:
+        return [
+            aluguer for aluguer in alugueres
+            if aluguer.status_entrega == StatusEntrega.ENTREGUE.value
+            and aluguer.status_ciclo == StatusCiclo.EM_ANDAMENTO.value
+            and aluguer.status not in {StatusAluguer.CANCELADO, StatusAluguer.RECOLHIDO}
+            and self._local_date(aluguer.data_vencimento) == target_date
+        ]
+
+    def _alugueres_vencidos(self, alugueres: list[AluguerContentor], today) -> list[AluguerContentor]:
+        return [
+            aluguer for aluguer in alugueres
+            if aluguer.status_entrega == StatusEntrega.ENTREGUE.value
+            and aluguer.status_ciclo == StatusCiclo.EM_ANDAMENTO.value
+            and aluguer.status not in {StatusAluguer.CANCELADO, StatusAluguer.RECOLHIDO}
+            and self._local_date(aluguer.data_vencimento) < today
+        ]
+
+    def _alugueres_pagamento_pendente(self, alugueres: list[AluguerContentor]) -> list[AluguerContentor]:
+        return [
+            aluguer for aluguer in alugueres
+            if not aluguer.pago
+            and aluguer.status not in {StatusAluguer.CANCELADO}
+        ]
+
+    def _alugueres_avarias_ativas(self, alugueres: list[AluguerContentor]) -> list[AluguerContentor]:
+        return [
+            aluguer for aluguer in alugueres
+            if aluguer.contentor_avariado
+            and aluguer.status_resolucao_avaria == StatusResolucao.PENDENTE.value
+        ]
+
+    def _pedidos_por_entrega(self, pedidos: list[Pedido], target_date, tipo: str) -> list[tuple[Pedido, list[PedidoContentor]]]:
+        resultado = []
+        for pedido in pedidos:
+            if self._local_date(pedido.data_planejada) != target_date:
+                continue
+            itens = [
+                item for item in pedido.contentores
+                if item.tipo_equipamento == tipo
+                and item.status_entrega == StatusEntregaPedido.PENDENTE.value
+                and item.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
+            ]
+            if itens:
+                resultado.append((pedido, self._sort_itens(itens)))
+        return sorted(resultado, key=lambda entry: (entry[0].data_planejada, self._primeiro_horario(entry[1]), entry[0].nome_cliente, entry[0].id))
+
+    def _contentores_para_recolha_em(self, pedidos: list[Pedido], target_date) -> list[tuple[Pedido, list[PedidoContentor]]]:
+        resultado = []
+        entrega_alvo = target_date - timedelta(days=5)
+        for pedido in pedidos:
+            itens = [
+                item for item in pedido.contentores
+                if self._is_contentor_para_recolha(item)
+                and item.entrega_data_hora
+                and self._local_date(item.entrega_data_hora) == entrega_alvo
+                and item.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
+            ]
+            if itens:
+                resultado.append((pedido, self._sort_itens(itens)))
+        return sorted(resultado, key=lambda entry: (entry[0].nome_cliente, entry[0].id))
+
+    def _contentores_vencendo_amanha(self, pedidos: list[Pedido], today) -> list[tuple[Pedido, list[PedidoContentor]]]:
+        entrega_alvo = today - timedelta(days=4)
+        resultado = []
+        for pedido in pedidos:
+            itens = [
+                item for item in pedido.contentores
+                if self._is_contentor_para_recolha(item)
+                and item.entrega_data_hora
+                and self._local_date(item.entrega_data_hora) == entrega_alvo
+                and item.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
+            ]
+            if itens:
+                resultado.append((pedido, self._sort_itens(itens)))
+        return sorted(resultado, key=lambda entry: (entry[0].nome_cliente, entry[0].id))
+
+    def _contentores_vencidos(self, pedidos: list[Pedido], today) -> list[tuple[Pedido, object, list[PedidoContentor]]]:
+        grupos = []
+        limite = today - timedelta(days=5)
+        for pedido in pedidos:
+            por_data = {}
+            for item in pedido.contentores:
+                if not (
+                    self._is_contentor_para_recolha(item)
+                    and item.entrega_data_hora
+                    and self._local_date(item.entrega_data_hora) < limite
+                    and item.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
+                ):
+                    continue
+                data_entrega = self._local_date(item.entrega_data_hora)
+                por_data.setdefault(data_entrega, []).append(item)
+            for data_entrega, itens in por_data.items():
+                grupos.append((pedido, data_entrega, self._sort_itens(itens)))
+        return sorted(grupos, key=lambda entry: (entry[1], entry[0].nome_cliente, entry[0].id))
+
+    def _pedidos_pagamento_pendente(self, pedidos: list[Pedido]) -> list[Pedido]:
+        return sorted(
+            [pedido for pedido in pedidos if pedido.status_pagamento == StatusPagamento.PENDENTE.value],
+            key=lambda pedido: (pedido.nome_cliente, pedido.id),
+        )
+
+    def _avarias_ativas(self, pedidos: list[Pedido]) -> list[PedidoContentor]:
+        itens = [
+            item for pedido in pedidos for item in pedido.contentores
+            if item.contentor_avariado
+            and item.status_resolucao_avaria == StatusResolucaoPedido.PENDENTE.value
+        ]
+        return sorted(itens, key=lambda item: (item.pedido.nome_cliente, self._equipamento_numero(item), item.id))
+
+    def _financeiro_mes(self, pedidos: list[Pedido], today) -> dict[str, Decimal]:
+        totais = {
+            "contentores_pago": Decimal("0"),
+            "contentores_pendente": Decimal("0"),
+            "carrinhas_pago": Decimal("0"),
+            "carrinhas_pendente": Decimal("0"),
+        }
+        for pedido in pedidos:
+            criado_em = self._local_date(pedido.criado_em)
+            if criado_em.year != today.year or criado_em.month != today.month:
+                continue
+            tipos = {
+                item.tipo_equipamento for item in pedido.contentores
+                if item.tipo_equipamento in {
+                    TipoEquipamentoPedido.CONTENTOR.value,
+                    TipoEquipamentoPedido.CARRINHA.value,
+                }
+            }
+            if len(tipos) != 1:
+                continue
+            tipo = "contentores" if tipos == {TipoEquipamentoPedido.CONTENTOR.value} else "carrinhas"
+            status = "pago" if pedido.status_pagamento == StatusPagamento.PAGO.value else "pendente"
+            totais[f"{tipo}_{status}"] += Decimal(str(pedido.valor_global or 0))
+        return totais
+
+    def _format_entrega_hoje(self, pedido: Pedido, itens: list[PedidoContentor], incluir_horario: bool) -> str:
+        linhas = [f"• {pedido.nome_cliente} ({len(itens)} un)"]
+        if incluir_horario:
+            linhas.append(f"  ⏰ Horário: {self._horarios_label(itens)}")
+        linhas.append(f"  {self._endereco_linha(pedido)}")
+        return "\n".join(linhas)
+
+    def _format_carrinha_amanha(self, pedido: Pedido, itens: list[PedidoContentor]) -> str:
+        return f"• {pedido.nome_cliente} ({len(itens)} un) • ⏰ {self._horarios_label(itens)}"
+
+    def _format_renovacao(self, pedido: Pedido, itens: list[PedidoContentor]) -> str:
+        linhas = [f"• {pedido.nome_cliente} ({len(itens)} un) • Valor: {self._money(pedido.valor_global)}"]
+        linhas.append(f"  💬 {self._contacto_linha('Entrar em contacto', pedido.telefone_cliente)}")
+        return "\n".join(linhas)
+
+    def _format_renovacao_aluguer(self, aluguer: AluguerContentor) -> str:
+        linhas = [f"• {aluguer.nome_cliente} (1 un) • Valor: {self._money(aluguer.valor)}"]
+        linhas.append(f"  💬 {self._contacto_linha('Entrar em contacto', aluguer.telefone_cliente)}")
+        return "\n".join(linhas)
+
+    def _format_pagamento_pendente(self, pedido: Pedido) -> str:
+        linhas = [f"• {pedido.nome_cliente} • Em dívida: {self._money(pedido.valor_global)}"]
+        linhas.append(f"  👤 {self._contacto_linha('Cobrar cliente', pedido.telefone_cliente)}")
+        return "\n".join(linhas)
+
+    def _format_pagamento_pendente_aluguer(self, aluguer: AluguerContentor) -> str:
+        linhas = [f"• {aluguer.nome_cliente} • Em dívida: {self._money(aluguer.valor)}"]
+        linhas.append(f"  👤 {self._contacto_linha('Cobrar cliente', aluguer.telefone_cliente)}")
+        return "\n".join(linhas)
+
+    def _format_contentor_vencido(self, pedido: Pedido, data_entrega, itens: list[PedidoContentor], today) -> str:
+        numeros = self._format_lista_numeros(self._unique_sorted(self._equipamento_numero(item) for item in itens))
+        dias = (today - (data_entrega + timedelta(days=5))).days
+        sufixo = "dia" if dias == 1 else "dias"
+        return "\n".join([f"• {pedido.nome_cliente}", f"  Nºs: {numeros}", f"  Vencido há {dias} {sufixo}"])
+
+    def _format_aluguer_vencido(self, aluguer: AluguerContentor, today) -> str:
+        dias = (today - self._local_date(aluguer.data_vencimento)).days
+        sufixo = "dia" if dias == 1 else "dias"
+        return "\n".join([f"• {aluguer.nome_cliente}", f"  Nºs: {aluguer.numero_contentor}", f"  Vencido há {dias} {sufixo}"])
+
+    def _format_avaria(self, item: PedidoContentor) -> str:
+        comando = quote(f"resolver avaria {item.id}")
+        return "\n".join(
+            [
+                f"• {item.pedido.nome_cliente}",
+                f"  Equipamento Nº {self._equipamento_numero(item)}",
+                f"  📝 Dano: {item.relato_avaria or 'sem relato'}",
+                f"  💬 Resolver: https://wa.me/?text={comando}",
+            ]
+        )
+
+    def _format_avaria_aluguer(self, aluguer: AluguerContentor) -> str:
+        comando = quote(f"resolver avaria {aluguer.id}")
+        return "\n".join(
+            [
+                f"• {aluguer.nome_cliente}",
+                f"  Equipamento Nº {aluguer.numero_contentor}",
+                f"  📝 Dano: {aluguer.relato_avaria or 'sem relato'}",
+                f"  💬 Resolver: https://wa.me/?text={comando}",
+            ]
+        )
+
+    def _endereco_linha(self, pedido: Pedido) -> str:
+        url = self._endereco_url(pedido)
+        if url:
+            return f"📍 Abrir endereço: {url}"
+        endereco = (pedido.endereco_aproximado or "").strip()
+        return f"📍 Endereço: {endereco}" if endereco else "📍 Endereço não informado"
+
+    def _endereco_url(self, pedido: Pedido) -> str:
+        endereco = (pedido.endereco_aproximado or "").strip()
+        if endereco.startswith(("http://", "https://")):
+            return endereco
+        if pedido.endereco_latitude is not None and pedido.endereco_longitude is not None:
+            return f"https://www.google.com/maps?q={pedido.endereco_latitude},{pedido.endereco_longitude}"
+        return ""
+
+    def _contacto_linha(self, label: str, telefone: str | None) -> str:
+        telefone_normalizado = normalize_phone(telefone) if telefone else ""
+        if telefone_normalizado and len(telefone_normalizado) >= 9:
+            return f"{label}: https://wa.me/{telefone_normalizado}"
+        return f"{label}: telefone não informado"
+
+    def _horarios_label(self, itens: list[PedidoContentor]) -> str:
+        horarios = self._unique_sorted(item.horario_agendado for item in itens if item.horario_agendado)
+        return ", ".join(horarios) if horarios else "Horário não informado"
+
+    def _primeiro_horario(self, itens: list[PedidoContentor]) -> str:
+        horarios = self._unique_sorted(item.horario_agendado for item in itens if item.horario_agendado)
+        return horarios[0] if horarios else ""
+
+    def _sort_itens(self, itens: list[PedidoContentor]) -> list[PedidoContentor]:
+        return sorted(itens, key=lambda item: (self._equipamento_numero(item), item.id))
+
+    def _equipamento_numero(self, item: PedidoContentor) -> str:
+        return str(item.numero_adesivo_contentor or item.id)
+
+    def _format_lista_numeros(self, numeros: list[str]) -> str:
+        if len(numeros) <= 1:
+            return numeros[0] if numeros else "não informado"
+        return ", ".join(numeros[:-1]) + f" e {numeros[-1]}"
+
         today = self._local_date(utcnow())
         tomorrow = today + timedelta(days=1)
         pedidos = self._pedidos_v32()

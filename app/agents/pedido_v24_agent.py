@@ -38,8 +38,8 @@ class PedidoV24Agent:
             conversa,
             "v24_entrega_pedido",
             {"ids": [p.id for p in pedidos]},
-            "Selecione o pedido pendente:\n\n"
-            + "\n".join(f"{i}. {self._pedido_entrega_label(p)}" for i, p in enumerate(pedidos, 1)),
+            "Selecione o cliente para iniciar a entrega.\n\n"
+            + "\n".join(self._pedido_entrega_option(p, i) for i, p in enumerate(pedidos, 1)),
         )
 
     def start_recolha(self, conversa: ConversaWhatsApp) -> str:
@@ -79,24 +79,14 @@ class PedidoV24Agent:
             phone = self._phone_from_message(message, "")
             if phone:
                 ctx["telefone"] = phone
-                return self._advance(
-                    conversa,
-                    "v24_cadastro_quantidade",
-                    ctx,
-                    self._quantidade_prompt(ctx),
-                )
+                return self._after_cliente(conversa, ctx)
             return self._advance(conversa, "v24_cadastro_telefone", ctx, "Qual é o telefone do cliente?")
         if state == "v24_cadastro_telefone" and message.contact_phone:
             phone = self._phone_from_message(message, raw)
             if not phone:
                 return "O telefone informado não é válido."
             ctx["telefone"] = phone
-            return self._advance(
-                conversa,
-                "v24_cadastro_quantidade",
-                ctx,
-                self._quantidade_prompt(ctx),
-            )
+            return self._after_cliente(conversa, ctx)
 
         if state == "v24_cadastro_nome":
             if len(raw) < 2:
@@ -108,17 +98,14 @@ class PedidoV24Agent:
             if len(phone) < 9:
                 return "O telefone informado não é válido."
             ctx["telefone"] = phone
-            return self._advance(
-                conversa,
-                "v24_cadastro_quantidade",
-                ctx,
-                self._quantidade_prompt(ctx),
-            )
+            return self._after_cliente(conversa, ctx)
         if state == "v24_cadastro_tipo_solicitacao":
             tipo = self._parse_tipo_solicitacao(choice)
             if not tipo:
                 return self._tipo_solicitacao_prompt()
             ctx["tipo_solicitacao"] = tipo
+            if tipo == TipoEquipamentoPedido.CARRINHA.value:
+                return self._advance(conversa, "v24_cadastro_quantidade", ctx, self._quantidade_prompt(ctx))
             return self._advance(conversa, "v24_cadastro_nome", ctx, "Qual é o nome do cliente?")
         if state == "v24_cadastro_data":
             now = datetime.now(self._lisbon_timezone())
@@ -133,6 +120,8 @@ class PedidoV24Agent:
             else:
                 return "Selecione Hoje, Amanhã ou Outra data."
             ctx["data"] = planned.isoformat()
+            if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value:
+                return self._advance(conversa, "v24_cadastro_horario_carrinha", ctx, self._horario_carrinha_prompt())
             return self._advance(conversa, "v24_cadastro_valor", ctx, "Qual é o valor global do pedido?")
         if state == "v24_cadastro_data_manual":
             try:
@@ -140,6 +129,8 @@ class PedidoV24Agent:
             except ValueError:
                 return "Data inválida. Use o formato DD/MM/AAAA."
             ctx["data"] = planned.isoformat()
+            if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value:
+                return self._advance(conversa, "v24_cadastro_horario_carrinha", ctx, self._horario_carrinha_prompt())
             return self._advance(conversa, "v24_cadastro_valor", ctx, "Qual é o valor global do pedido?")
         if state == "v24_cadastro_quantidade":
             if not raw.isdigit() or not 1 <= int(raw) <= 50:
@@ -147,6 +138,8 @@ class PedidoV24Agent:
             ctx["quantidade"] = int(raw)
             ctx["itens"] = []
             ctx["residuos"] = []
+            if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value:
+                return self._advance(conversa, "v24_cadastro_nome", ctx, "Qual é o nome do cliente?")
             return self._advance(conversa, "v24_cadastro_tipo_equipamento", ctx, self._tipo_equipamento_prompt(ctx))
         if state == "v24_cadastro_tipo_equipamento":
             legacy_residue = None if choice in {"1", "2"} else self._parse_residue(choice)
@@ -174,12 +167,20 @@ class PedidoV24Agent:
             item_atual["horario_agendado"] = raw
             ctx["item_atual"] = item_atual
             ctx["horario_agendado"] = raw
+            if ctx.get("editing_field") == "hora_entrega":
+                return self._apply_atomic_edit(conversa, ctx, "hora_entrega", raw)
+            if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value and not ctx.get("residuos"):
+                return self._advance(conversa, "v24_cadastro_residuo", ctx, self._residuo_prompt(ctx))
             if "precisa_mao_de_obra" in ctx:
                 return self._advance(conversa, "v24_cadastro_residuo", ctx, self._residuo_prompt(ctx))
             return self._advance(conversa, "v24_cadastro_mao_obra", ctx, self._mao_obra_prompt())
         if state == "v24_cadastro_mao_obra":
             mao_obra = self._parse_mao_obra(choice)
             if mao_obra is not None:
+                if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value and ctx.get("itens"):
+                    ctx["precisa_mao_de_obra"] = mao_obra
+                    ctx.pop("item_atual", None)
+                    return self._advance(conversa, "v24_cadastro_valor", ctx, "Qual é o valor comercial total?")
                 item_atual = dict(ctx.get("item_atual") or {})
                 tipo_item = item_atual.get("tipo_equipamento") or ctx.get("tipo_solicitacao")
                 if tipo_item:
@@ -267,16 +268,52 @@ class PedidoV24Agent:
                 ctx["_confirmado"] = True
                 return self._finish_cadastro(conversa, ctx)
             if choice in {"2", "corrigir"}:
-                conversa.estado_atual = "v24_cadastro_tipo_solicitacao"
-                conversa.contexto_json = {}
-                self.db.commit()
-                return "Vamos corrigir o pedido desde o inicio.\n\n" + self._tipo_solicitacao_prompt()
+                return self._advance(conversa, "v24_cadastro_corrigir", ctx, self._corrigir_prompt(ctx))
             if choice in {"3", "cancelar"}:
                 return self._idle(conversa, "Pedido cancelado. Nenhum pedido foi criado.")
             return "Escolha 1 para confirmar, 2 para corrigir ou 3 para cancelar."
+        if state == "v24_cadastro_corrigir":
+            field = self._parse_corrigir_field(choice, ctx)
+            if not field:
+                return self._corrigir_prompt(ctx)
+            if field == "forma_pagamento" and not ctx.get("pago"):
+                return self._advance(
+                    conversa,
+                    "v24_cadastro_confirmacao",
+                    ctx,
+                    "A forma de pagamento só pode ser corrigida quando o pedido estiver pago.\n\n"
+                    + self._format_confirmacao_cadastro(ctx),
+                )
+            ctx["editing_field"] = field
+            return self._advance(conversa, self._edit_state_for(field), ctx, self._edit_prompt(field, ctx))
+        if state == "v24_cadastro_edicao_texto":
+            field = ctx.get("editing_field")
+            return self._apply_atomic_edit(conversa, ctx, field, raw, message)
+        if state == "v24_cadastro_edicao_opcao":
+            field = ctx.get("editing_field")
+            return self._apply_atomic_edit(conversa, ctx, field, choice, message)
+        if state == "v24_cadastro_edicao_data":
+            field = ctx.get("editing_field")
+            if choice in {"1", "hoje"}:
+                value = datetime.now(self._lisbon_timezone()).isoformat()
+            elif choice in {"2", "amanha"}:
+                value = (datetime.now(self._lisbon_timezone()) + timedelta(days=1)).isoformat()
+            else:
+                try:
+                    value = datetime.strptime(raw, "%d/%m/%Y").replace(tzinfo=self._lisbon_timezone()).isoformat()
+                except ValueError:
+                    return "Data inválida. Use Hoje, Amanhã ou DD/MM/AAAA."
+            return self._apply_atomic_edit(conversa, ctx, field, value)
+        if state == "v24_cadastro_edicao_referencia_opcao":
+            if choice in {"1", "sim"}:
+                ctx["editing_field"] = "ponto_referencia_texto"
+                return self._advance(conversa, "v24_cadastro_edicao_texto", ctx, "Qual é o novo ponto de referência?")
+            if choice in {"2", "nao"}:
+                return self._apply_atomic_edit(conversa, ctx, "ponto_referencia", None)
+            return "Selecione Sim ou Não."
 
         if state == "v24_entrega_pedido":
-            pedido_id = self._selected_id(raw, ctx["ids"])
+            pedido_id = self._selected_entrega_pedido_id(raw, ctx["ids"])
             pedido = self.service.get(pedido_id) if pedido_id else None
             if not pedido:
                 return "Selecione um pedido da lista."
@@ -340,26 +377,45 @@ class PedidoV24Agent:
                 return self._advance(conversa, "v24_entrega_foto", ctx, "Envie a próxima foto deste contentor.")
             if choice not in {"2", "proximo passo", "➡️ proximo passo"}:
                 return "Selecione Outra Foto ou Próximo Passo."
+            registrado = ctx["indice"] + 1
+            total = len(ctx["contentores"])
             ctx["indice"] += 1
-            if ctx["indice"] < len(ctx["contentores"]):
-                progresso = f"✅ Ativo {ctx['indice']} de {len(ctx['contentores'])} preparado."
+            if ctx["indice"] < total:
+                progresso = f"Contentor {registrado} de {total} registrado."
                 return self._advance(
                     conversa,
                     "v24_entrega_adesivo",
                     ctx,
                     f"{progresso}\n\nVamos registrar o próximo.\n\n{self._entrega_numero_prompt(ctx)}",
                 )
-            return self._advance(conversa, "v24_entrega_gps", ctx, "Compartilhe a localização GPS da obra.")
+            return self._advance(
+                conversa,
+                "v24_entrega_gps",
+                ctx,
+                f"Contentor {registrado} de {total} registrado.\n\nCompartilhe a localização GPS da obra.",
+            )
         if state == "v24_entrega_gps":
             coords = self._coordinates(message, raw) if message.tipo == "location" else None
             if not coords:
                 return "Compartilhe a localização nativa do WhatsApp para confirmar a entrega."
             ctx["latitude"], ctx["longitude"] = coords
-            return self._advance(conversa, "v24_entrega_referencia", ctx, "Qual é o ponto de referência? Envie “Não” se não houver.")
+            return self._advance(
+                conversa,
+                "v24_entrega_referencia_opcao",
+                ctx,
+                "Deseja informar algum ponto de referência para a entrega?\n\n1. Sim\n2. Não",
+            )
+        if state == "v24_entrega_referencia_opcao":
+            if choice in {"1", "sim", "entrega_referencia:sim"}:
+                return self._advance(conversa, "v24_entrega_referencia", ctx, "Digite o ponto de referência.")
+            if choice in {"2", "nao", "entrega_referencia:nao"}:
+                ctx["referencia_entrega"] = None
+                return self._advance(conversa, "v24_entrega_confirmacao", ctx, self._entrega_confirmacao_prompt(ctx))
+            return "Selecione Sim ou Não."
         if state == "v24_entrega_referencia":
-            if len(raw) > 50:
+            if not 1 <= len(raw) <= 50:
                 return "O ponto de referência deve ter no máximo 50 caracteres."
-            ctx["referencia_entrega"] = None if choice == "nao" else raw
+            ctx["referencia_entrega"] = raw
             return self._advance(conversa, "v24_entrega_confirmacao", ctx, self._entrega_confirmacao_prompt(ctx))
         if state == "v24_entrega_confirmacao":
             if choice in {"1", "confirmar entrega", "✅ confirmar entrega"}:
@@ -506,11 +562,12 @@ class PedidoV24Agent:
                     "fotos_despejo": [],
                     "residuo_contratado": contentor.residuo_contratado,
                     "residuo_efetivo": None,
+                    "residuo_assumido": None,
                     "carga_errada": None,
                     "relato_carga": None,
                 }
             )
-            return self._advance(conversa, "v24_despejo_foto", ctx, self._despejo_foto_prompt(ctx))
+            return self._despejo_decisao_residuo(conversa, ctx)
         if state == "v24_despejo_contentor":
             contentor_id = self._selected_id(raw, ctx["ids"])
             if not contentor_id:
@@ -525,11 +582,12 @@ class PedidoV24Agent:
                     "fotos_despejo": [],
                     "residuo_contratado": contentor.residuo_contratado,
                     "residuo_efetivo": None,
+                    "residuo_assumido": None,
                     "carga_errada": None,
                     "relato_carga": None,
                 }
             )
-            return self._advance(conversa, "v24_despejo_foto", ctx, "Envie a foto do entulho espalhado no chão.")
+            return self._despejo_decisao_residuo(conversa, ctx)
         if state == "v24_despejo_foto":
             photo = self._photo(message)
             if not photo:
@@ -549,33 +607,43 @@ class PedidoV24Agent:
                 return "Selecione Outra Foto ou Próximo Passo."
             if not ctx.get("fotos_despejo"):
                 return "Envie pelo menos uma imagem para continuar."
-            return self._advance(conversa, "v24_despejo_conformidade", ctx, self._despejo_conformidade_prompt(ctx))
+            return self._advance(conversa, "v24_despejo_confirmacao", ctx, self._despejo_confirmacao_prompt(ctx))
         if state in {"v24_despejo_residuo", "v24_despejo_conformidade", "v24_despejo_relato"}:
             self._hydrate_legacy_despejo_context(ctx)
         if state == "v24_despejo_residuo":
             available = ctx.get("residuos_disponiveis") or []
             residue = None
+            if choice == "despejo_residuo:limpo":
+                residue = "Entulho Limpo"
+            elif choice == "despejo_residuo:misto":
+                residue = "Entulho Misto"
             if choice.isdigit() and 1 <= int(choice) <= len(available):
                 residue = available[int(choice) - 1]
             if not residue:
                 residue = next((r for r in available if self._norm(r) == choice), None)
             if residue and "pedido_id" in ctx:
                 ctx["residuo_efetivo"] = residue
-                ctx["carga_errada"] = True
-                return self._advance(conversa, "v24_despejo_relato", ctx, "Descreva a divergencia com pelo menos 10 caracteres.")
+                ctx["carga_errada"] = False
+                ctx["relato_carga"] = None
+                return self._advance(conversa, "v24_despejo_foto", ctx, self._despejo_foto_prompt(ctx))
             if not residue:
                 return "Selecione um tipo de resíduo com cota em aberto."
             self.service.confirmar_despejo(ctx["contentor_id"], residue, operador=conversa.telefone)
             return self._idle(conversa, "✅ Despejo auditado e ciclo concluído.")
         if state == "v24_despejo_conformidade":
             if "pedido_id" in ctx:
+                if choice == "despejo_conformidade:sim":
+                    choice = "1"
+                elif choice == "despejo_conformidade:nao":
+                    choice = "2"
                 if choice in {"1", "sim", "sim, corresponde", "âœ… sim, corresponde", "sim, tudo certo", "âœ… sim, tudo certo"}:
-                    ctx["residuo_efetivo"] = ctx["residuo_contratado"]
+                    ctx["residuo_efetivo"] = ctx.get("residuo_assumido") or ctx["residuo_contratado"]
                     ctx["carga_errada"] = False
                     ctx["relato_carga"] = None
-                    return self._advance(conversa, "v24_despejo_confirmacao", ctx, self._despejo_confirmacao_prompt(ctx))
+                    return self._advance(conversa, "v24_despejo_foto", ctx, self._despejo_foto_prompt(ctx))
                 if choice in {"2", "nao", "nao, existe divergencia", "âŒ nao, existe divergencia", "nao, esta misturado/errado", "ðŸš¨ nao, esta misturado/errado"}:
-                    return self._despejo_residuo_efetivo_prompt(conversa, ctx)
+                    ctx["carga_errada"] = True
+                    return self._advance(conversa, "v24_despejo_relato", ctx, "Descreva a divergencia com pelo menos 10 caracteres.")
                 return "Selecione se o material corresponde ao residuo contratado."
             residue = ctx["residuo_assumido"]
             if choice in {"1", "sim, tudo certo", "✅ sim, tudo certo"}:
@@ -589,8 +657,27 @@ class PedidoV24Agent:
                 relato = raw.strip()
                 if len(relato) < 10:
                     return "O relato da carga precisa ter pelo menos 10 caracteres."
-                ctx["relato_carga"] = relato
-                return self._advance(conversa, "v24_despejo_confirmacao", ctx, self._despejo_confirmacao_prompt(ctx))
+                try:
+                    self.service.registrar_divergencia_despejo(
+                        ctx["contentor_id"],
+                        relato,
+                        operador=conversa.telefone,
+                        pedido_id=ctx.get("pedido_id"),
+                    )
+                except ValueError as exc:
+                    self._limpar_despejo_atual(ctx)
+                    return self._idle(conversa, str(exc))
+                self._limpar_despejo_atual(ctx)
+                pendentes = self._despejo_pendentes_por_pedido(ctx["pedido_id"])
+                if pendentes:
+                    return self._advance(
+                        conversa,
+                        "v24_despejo_ativo",
+                        ctx,
+                        "Divergência registrada para resolução por gestor. O contentor permanece pendente.\n\n"
+                        + self._despejo_selecao_prompt(ctx, pendentes),
+                    )
+                return self._idle(conversa, "Divergência registrada para resolução por gestor. O contentor permanece pendente.")
             if len(raw) < 10:
                 return "O relato da carga precisa ter pelo menos 10 caracteres."
             self.service.confirmar_despejo(
@@ -620,7 +707,7 @@ class PedidoV24Agent:
                 pedido_id=ctx.get("pedido_id"),
                 fotos=fotos,
             )
-        except ValueError:
+        except ValueError as exc:
             pendentes = self._despejo_pendentes_por_pedido(ctx["pedido_id"])
             self._limpar_despejo_atual(ctx)
             if pendentes:
@@ -628,10 +715,10 @@ class PedidoV24Agent:
                     conversa,
                     "v24_despejo_ativo",
                     ctx,
-                    "Esse ativo foi atualizado por outro operador.\n\n"
+                    f"Esse ativo foi atualizado por outro operador. {exc}\n\n"
                     + self._despejo_selecao_prompt(ctx, pendentes),
                 )
-            return self._idle(conversa, "✅ Esse pedido ja nao possui ativos pendentes de despejo.")
+            return self._idle(conversa, str(exc))
 
         despejos = list(ctx.get("despejos") or [])
         despejos.append({"contentor_id": contentor_id, "fotos": len(fotos), "carga_errada": bool(ctx.get("carga_errada"))})
@@ -644,10 +731,17 @@ class PedidoV24Agent:
                 conversa,
                 "v24_despejo_ativo",
                 ctx,
-                f"✅ {label} processado no vazadouro.\n\nSelecione a proxima unidade deste cliente:\n\n"
+                f"✅ {label} processado no vazadouro.\nRestam {len(pendentes)} contentores pendentes neste pedido.\n\n"
+                "Selecione a proxima unidade deste cliente:\n\n"
                 + self._despejo_selecao_prompt(ctx, pendentes),
             )
-        return self._idle(conversa, f"✅ {label} processado no vazadouro. Despejo do pedido concluido.")
+        pedido = self.service.get(ctx["pedido_id"])
+        cliente = pedido.nome_cliente if pedido else ctx["pedido_id"]
+        numero = contentor.numero_adesivo_contentor or contentor.id
+        return self._idle(
+            conversa,
+            f"✅ Contentor {numero} processado no vazadouro. Pedido do cliente {cliente} concluído. Nenhum contentor pendente.",
+        )
 
     def _limpar_despejo_atual(self, ctx):
         for key in (
@@ -655,9 +749,11 @@ class PedidoV24Agent:
             "fotos_despejo",
             "residuo_contratado",
             "residuo_efetivo",
+            "residuo_assumido",
             "carga_errada",
             "relato_carga",
             "residuos_disponiveis",
+            "saldo_cotas_visualizado",
         ):
             ctx.pop(key, None)
 
@@ -681,16 +777,47 @@ class PedidoV24Agent:
             and contentor.status_ciclo == "EM_ANDAMENTO"
         )
 
+    def _despejo_decisao_residuo(self, conversa, ctx) -> str:
+        try:
+            cotas = self.service.cotas_residuos(ctx["pedido_id"])
+        except ValueError as exc:
+            self._limpar_despejo_atual(ctx)
+            return self._idle(conversa, str(exc))
+        saldo_limpo = cotas["Entulho Limpo"]["saldo"]
+        saldo_misto = cotas["Entulho Misto"]["saldo"]
+        ctx["saldo_cotas_visualizado"] = {
+            "limpo": saldo_limpo,
+            "misto": saldo_misto,
+        }
+        if saldo_limpo <= 0 and saldo_misto <= 0:
+            self._limpar_despejo_atual(ctx)
+            return self._idle(conversa, "Não existem cotas de resíduo pendentes para este pedido.")
+        if saldo_limpo > 0 and saldo_misto > 0:
+            ctx["residuos_disponiveis"] = ["Entulho Limpo", "Entulho Misto"]
+            return self._advance(
+                conversa,
+                "v24_despejo_residuo",
+                ctx,
+                "Qual resíduo caiu no chão?\n\n1. 🟢 Entulho Limpo\n2. 🟠 Entulho Misto",
+            )
+        residuo = "Entulho Limpo" if saldo_limpo > 0 else "Entulho Misto"
+        ctx["residuo_assumido"] = residuo
+        ctx["residuo_efetivo"] = None
+        return self._advance(conversa, "v24_despejo_conformidade", ctx, self._despejo_conformidade_prompt(ctx))
+
     def _despejo_foto_prompt(self, ctx) -> str:
         contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
         label = self._equipamento_label(contentor) if contentor else "equipamento"
         return f"Envie a foto do despejo do {label} no vazadouro."
 
     def _despejo_conformidade_prompt(self, ctx) -> str:
+        contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
+        numero = contentor.numero_adesivo_contentor if contentor and contentor.numero_adesivo_contentor else ctx["contentor_id"]
+        residuo = ctx.get("residuo_assumido") or ctx["residuo_contratado"]
         return (
-            f"O material descarregado corresponde a {ctx['residuo_contratado']}?\n\n"
-            "1. ✅ Sim, corresponde\n"
-            "2. ❌ Não, existe divergência"
+            f"O entulho do Contentor {numero} corresponde a {residuo}?\n\n"
+            "1. ✅ Sim, tudo certo\n"
+            "2. 🚨 Não, está misturado/errado"
         )
 
     def _despejo_residuo_efetivo_prompt(self, conversa, ctx):
@@ -749,6 +876,7 @@ class PedidoV24Agent:
             return
         ctx["pedido_id"] = contentor.pedido_id
         ctx.setdefault("residuo_contratado", contentor.residuo_contratado)
+        ctx.setdefault("residuo_assumido", ctx.get("residuo_assumido") or ctx.get("residuo_contratado"))
         ctx.setdefault("residuo_efetivo", ctx.get("residuo_assumido"))
         ctx.setdefault("carga_errada", None)
         ctx.setdefault("relato_carga", None)
@@ -964,6 +1092,11 @@ class PedidoV24Agent:
         tipo_label = self._tipo_label(ctx.get("tipo_solicitacao"))
         return self._idle(conversa, f"✅ Pedido #{pedido.id} criado com {len(pedido.contentores)} {tipo_label.lower()}(es).")
 
+    def _after_cliente(self, conversa, ctx):
+        if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value:
+            return self._advance(conversa, "v24_cadastro_data", ctx, self._data_prompt())
+        return self._advance(conversa, "v24_cadastro_quantidade", ctx, self._quantidade_prompt(ctx))
+
     def _registrar_item_cadastro(self, conversa, ctx, residue):
         tipo = ctx.get("tipo_solicitacao") or TipoEquipamentoPedido.CONTENTOR.value
         item = {
@@ -981,13 +1114,192 @@ class PedidoV24Agent:
         ctx["residuos"] = [*(ctx.get("residuos") or []), residue]
         ctx.pop("item_atual", None)
         if len(ctx["itens"]) < ctx["quantidade"]:
+            if tipo == TipoEquipamentoPedido.CARRINHA.value:
+                return self._advance(conversa, "v24_cadastro_residuo", ctx, self._residuo_prompt(ctx))
             return self._advance(conversa, "v24_cadastro_tipo_equipamento", ctx, self._tipo_equipamento_prompt(ctx))
+        if tipo == TipoEquipamentoPedido.CARRINHA.value:
+            return self._advance(conversa, "v24_cadastro_mao_obra", ctx, self._mao_obra_prompt())
         return self._advance(
             conversa,
             "v24_cadastro_data",
             ctx,
-            "Quando está planejada a entrega?\n\n1. Hoje\n2. Amanhã\n3. Outra data",
+            self._data_prompt(),
         )
+
+    def _corrigir_prompt(self, ctx):
+        fields = self._corrigir_fields(ctx)
+        linhas = ["Qual campo deseja corrigir?"]
+        linhas.extend(f"{index}. {title}" for index, (field, title) in enumerate(fields, 1))
+        return "\n".join(linhas)
+
+    def _corrigir_fields(self, ctx):
+        is_carrinha = ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value
+        fields = [
+            ("quantidade", "Quantidade de carrinhas" if is_carrinha else "Quantidade de contentores"),
+            ("nome_cliente", "Nome do cliente"),
+            ("telefone", "Telefone"),
+            ("data_entrega", "Dia da entrega"),
+        ]
+        if is_carrinha:
+            fields.append(("hora_entrega", "Hora da entrega"))
+        fields.extend(
+            [
+                ("tipo_residuo", "Tipo de resíduo"),
+                ("mao_de_obra", "Pessoal para carregamento"),
+                ("valor_total", "Valor total"),
+                ("status_pagamento", "Status do pagamento"),
+            ]
+        )
+        if ctx.get("pago"):
+            fields.append(("forma_pagamento", "Forma de pagamento"))
+        fields.extend([("endereco", "Endereço"), ("ponto_referencia", "Ponto de referência")])
+        return fields
+
+    def _parse_corrigir_field(self, choice, ctx=None):
+        if choice.startswith("corrigir_pedido:"):
+            return choice.split(":", 1)[1]
+        if choice.startswith("option_") and choice.removeprefix("option_").isdigit() or choice.isdigit():
+            number = choice.removeprefix("option_")
+            index = int(number) - 1
+            fields = [field for field, _title in self._corrigir_fields(ctx or {})]
+            return fields[index] if 0 <= index < len(fields) else None
+        return {
+            "quantidade": "quantidade",
+            "nome do cliente": "nome_cliente",
+            "telefone": "telefone",
+            "dia da entrega": "data_entrega",
+            "hora da entrega": "hora_entrega",
+            "tipo de residuo": "tipo_residuo",
+            "pessoal para carregamento": "mao_de_obra",
+            "valor total": "valor_total",
+            "status do pagamento": "status_pagamento",
+            "forma de pagamento": "forma_pagamento",
+            "endereco": "endereco",
+            "ponto de referencia": "ponto_referencia",
+        }.get(choice)
+
+    def _edit_state_for(self, field):
+        if field == "data_entrega":
+            return "v24_cadastro_edicao_data"
+        if field == "ponto_referencia":
+            return "v24_cadastro_edicao_referencia_opcao"
+        if field in {"tipo_residuo", "mao_de_obra", "status_pagamento", "forma_pagamento"}:
+            return "v24_cadastro_edicao_opcao"
+        if field == "hora_entrega":
+            return "v24_cadastro_horario_carrinha"
+        return "v24_cadastro_edicao_texto"
+
+    def _edit_prompt(self, field, ctx):
+        return {
+            "quantidade": self._quantidade_prompt(ctx),
+            "nome_cliente": "Qual é o nome do cliente?",
+            "telefone": "Qual é o telefone do cliente?",
+            "data_entrega": self._data_prompt().replace("3. Outra data", "ou envie DD/MM/AAAA"),
+            "hora_entrega": self._horario_carrinha_prompt(),
+            "tipo_residuo": self._residuo_prompt({"residuos": [], "quantidade": 1, "tipo_solicitacao": ctx.get("tipo_solicitacao")}),
+            "mao_de_obra": self._mao_obra_prompt(),
+            "valor_total": "Qual é o valor comercial total?",
+            "status_pagamento": "O pedido já está pago?\n\n1. Sim, já está pago\n2. Não, pendente",
+            "forma_pagamento": "Selecione a forma de pagamento:\n\n1. MBWay\n2. Transferência\n3. Dinheiro\n4. Outro",
+            "endereco": self._endereco_prompt(),
+            "ponto_referencia": "Deseja informar algum ponto de referência?\n\n1. Sim\n2. Não",
+        }[field]
+
+    def _apply_atomic_edit(self, conversa, ctx, field, value, message=None):
+        if field == "quantidade":
+            if not str(value).isdigit() or not 1 <= int(value) <= 50:
+                return "Informe uma quantidade entre 1 e 50."
+            ctx["quantidade"] = int(value)
+            self._ajustar_itens_quantidade(ctx)
+        elif field == "nome_cliente":
+            if message and message.contact_name:
+                ctx["nome"] = message.contact_name.strip()
+                phone = self._phone_from_message(message, "")
+                if phone:
+                    ctx["telefone"] = phone
+            elif len(str(value).strip()) >= 2:
+                ctx["nome"] = str(value).strip()
+            else:
+                return "Informe o nome completo do cliente."
+        elif field == "telefone":
+            phone = self._phone_from_message(message, value) if message else re.sub(r"\D", "", str(value))
+            if not phone:
+                return "O telefone informado não é válido."
+            ctx["telefone"] = phone
+        elif field == "data_entrega":
+            ctx["data"] = value
+        elif field == "hora_entrega":
+            if not self._horario_valido(value):
+                return "Horário inválido. Envie no formato HH:MM, por exemplo 14:00 ou 09:30."
+            ctx["horario_agendado"] = value
+            for item in ctx.get("itens") or []:
+                item["horario_agendado"] = value
+        elif field == "tipo_residuo":
+            residue = self._parse_residue(value)
+            if not residue:
+                return self._residuo_prompt({"residuos": [], "quantidade": 1, "tipo_solicitacao": ctx.get("tipo_solicitacao")})
+            ctx["residuos"] = [residue for _ in range(ctx.get("quantidade") or 1)]
+            for item in ctx.get("itens") or []:
+                item["residuo_contratado"] = residue
+        elif field == "mao_de_obra":
+            mao_obra = self._parse_mao_obra(value)
+            if mao_obra is None:
+                return self._mao_obra_prompt()
+            ctx["precisa_mao_de_obra"] = mao_obra
+        elif field == "valor_total":
+            try:
+                ctx["valor"] = str(float(str(value).replace(",", ".")))
+            except ValueError:
+                return "Valor inválido."
+        elif field == "status_pagamento":
+            if value in {"1", "sim", "sim, ja esta pago"}:
+                ctx["pago"] = True
+                ctx["editing_field"] = "forma_pagamento"
+                return self._advance(conversa, "v24_cadastro_edicao_opcao", ctx, self._edit_prompt("forma_pagamento", ctx))
+            if value in {"2", "nao", "nao, pendente"}:
+                ctx["pago"] = False
+                ctx["forma"] = None
+            else:
+                return "Selecione uma das opções de pagamento."
+        elif field == "forma_pagamento":
+            forma = self._parse_forma_pagamento(value)
+            if not forma:
+                return "Selecione uma forma de pagamento."
+            ctx["forma"] = forma
+        elif field == "endereco":
+            if message and message.tipo == "location" and not self._coordinates(message, str(value)):
+                return "Não foi possível ler a localização. Reenvie a localização nativa ou digite o endereço."
+            if not str(value).strip() or len(str(value).strip()) > 300:
+                return "O endereço precisa ter entre 1 e 300 caracteres."
+            ctx["endereco"] = str(value).strip()
+            coords = self._coordinates(message, str(value)) if message else self._coordinates(None, str(value))
+            if coords:
+                ctx["endereco_latitude"], ctx["endereco_longitude"] = coords
+        elif field == "ponto_referencia":
+            ctx["referencia"] = None
+        elif field == "ponto_referencia_texto":
+            if not 1 <= len(str(value).strip()) <= 50:
+                return "O ponto de referência deve ter no máximo 50 caracteres."
+            ctx["referencia"] = str(value).strip()
+        else:
+            return self._corrigir_prompt(ctx)
+        ctx.pop("editing_field", None)
+        ctx.pop("_confirmado", None)
+        return self._advance(conversa, "v24_cadastro_confirmacao", ctx, self._format_confirmacao_cadastro(ctx))
+
+    def _ajustar_itens_quantidade(self, ctx):
+        itens = list(ctx.get("itens") or [])
+        quantidade = ctx.get("quantidade") or len(itens)
+        if not itens:
+            return
+        if len(itens) > quantidade:
+            ctx["itens"] = itens[:quantidade]
+            ctx["residuos"] = [item.get("residuo_contratado") for item in ctx["itens"]]
+            return
+        while len(itens) < quantidade:
+            itens.append(dict(itens[-1]))
+        ctx["itens"] = itens
+        ctx["residuos"] = [item.get("residuo_contratado") for item in itens]
 
     def _parse_residue(self, choice):
         return {
@@ -1001,6 +1313,18 @@ class PedidoV24Agent:
             "pedido_residuo_misto": "Entulho Misto",
             "entulho misto": "Entulho Misto",
             "misto": "Entulho Misto",
+        }.get(choice)
+
+    def _parse_forma_pagamento(self, choice):
+        return {
+            "1": "MBWay",
+            "mbway": "MBWay",
+            "2": "Transferência",
+            "transferencia": "Transferência",
+            "3": "Dinheiro",
+            "dinheiro": "Dinheiro",
+            "4": "Outro",
+            "outro": "Outro",
         }.get(choice)
 
     def _parse_mao_obra(self, choice):
@@ -1034,6 +1358,25 @@ class PedidoV24Agent:
             tipo = "Equipamento"
         data = pedido.data_planejada.strftime("%d/%m/%Y") if pedido.data_planejada else "sem data"
         return f"#{pedido.id} — {pedido.nome_cliente} — {tipo} x{len(pendentes)} — {data}"
+
+    def _pedido_entrega_option(self, pedido, index: int) -> str:
+        pendentes = [item for item in pedido.contentores if item.status_entrega == "PENDENTE"]
+        tipos = {item.tipo_equipamento for item in pendentes}
+        if tipos == {TipoEquipamentoPedido.CARRINHA.value}:
+            tipo = "Carrinha"
+        elif tipos == {TipoEquipamentoPedido.CONTENTOR.value}:
+            tipo = "Contentor"
+        else:
+            tipo = "Equipamento"
+        quantidade = len(pendentes)
+        plural = "equipamento" if quantidade == 1 else "equipamentos"
+        data = pedido.data_planejada.strftime("%d/%m/%Y") if pedido.data_planejada else "sem data"
+        return (
+            f"{index}. {pedido.nome_cliente}\n"
+            f"   Quantidade: {quantidade} {plural}\n"
+            f"   Tipo: {tipo} x{quantidade} - {data}\n"
+            f"   ID: entrega_pedido:{pedido.id}"
+        )
 
     def _pedido_recolha_label(self, pedido) -> str:
         pendentes = self._recolha_pendentes(pedido)
@@ -1093,6 +1436,9 @@ class PedidoV24Agent:
     def _horario_carrinha_prompt(self):
         return "Qual o horário agendado da carrinha? Envie no formato HH:MM. Ex: 14:00"
 
+    def _data_prompt(self):
+        return "Quando está planejada a entrega?\n\n1. Hoje\n2. Amanhã\n3. Outra data"
+
     def _quantidade_prompt(self, ctx):
         if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value:
             return "🔢 Quantas carrinhas são necessárias para este pedido?"
@@ -1100,9 +1446,9 @@ class PedidoV24Agent:
 
     def _mao_obra_prompt(self):
         return (
-            "👷 Este pedido necessita de mão de obra?\n\n"
-            "1. Sim\n"
-            "2. Não"
+            "O cliente solicitou pessoal para carregamento do resíduo?\n\n"
+            "1. Sim, com pessoal\n"
+            "2. Não, apenas equipamento"
         )
 
     def _residuo_prompt(self, ctx):
@@ -1111,7 +1457,7 @@ class PedidoV24Agent:
             equipamento = f"da carrinha {index}/{ctx['quantidade']}"
         else:
             equipamento = f"do contentor {index}/{ctx['quantidade']}"
-        return f"Resíduo {equipamento}:\n\n1. Entulho Limpo\n2. Entulho Misto"
+        return f"Resíduo {equipamento}:\n\n1. 🟢 Entulho Limpo\n2. 🟠 Entulho Misto"
 
     def _format_confirmacao_cadastro(self, ctx):
         tipo = self._tipo_label(ctx.get("tipo_solicitacao"))
@@ -1121,22 +1467,34 @@ class PedidoV24Agent:
             if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value
             else "Quantidade de contentores"
         )
+        data = datetime.fromisoformat(ctx["data"]).strftime("%d/%m/%Y") if ctx.get("data") else "Não informada"
+        residuos = ", ".join(ctx.get("residuos") or []) or "Não informado"
+        referencia = ctx.get("referencia") or "Não informado"
         linhas = [
             "Confirme os dados do pedido:",
             "",
             f"Tipo da solicitação: {tipo}",
             f"{quantidade_label}: {ctx.get('quantidade')}",
-            f"Mão de obra: {mao_obra}",
+            f"Cliente: {ctx.get('nome')}",
+            f"Telefone: {ctx.get('telefone')}",
+            f"Dia da entrega: {data}",
         ]
         if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value:
-            linhas.append(f"Horário da carrinha: {ctx.get('horario_agendado') or 'sem horário'}")
+            linhas.append(f"Hora da entrega: {ctx.get('horario_agendado') or 'sem horário'}")
         linhas.extend(
             [
-                f"Cliente: {ctx.get('nome')}",
-                f"Telefone: {ctx.get('telefone')}",
-                f"Valor: {self._format_money(ctx.get('valor'))}",
-                f"Pagamento: {'Pago' if ctx.get('pago') else 'Pendente'}",
+                f"Tipo de resíduo: {residuos}",
+                f"Pessoal para carregamento: {mao_obra}",
+                f"Valor total: {self._format_money(ctx.get('valor'))}",
+                f"Status do pagamento: {'Pago' if ctx.get('pago') else 'Pendente'}",
+            ]
+        )
+        if ctx.get("pago"):
+            linhas.append(f"Forma de pagamento: {ctx.get('forma') or 'Não informada'}")
+        linhas.extend(
+            [
                 f"Endereço: {ctx.get('endereco')}",
+                f"Ponto de referência: {referencia}",
                 "",
                 "1. Confirmar e salvar",
                 "2. Corrigir",
@@ -1205,6 +1563,14 @@ class PedidoV24Agent:
         match = re.search(r"#?(\d+)", value)
         return int(match.group(1)) if match and int(match.group(1)) in ids else None
 
+    def _selected_entrega_pedido_id(self, raw, ids):
+        value = self._norm(raw)
+        match = re.fullmatch(r"entrega_pedido:(\d+)", value)
+        if match:
+            pedido_id = int(match.group(1))
+            return pedido_id if pedido_id in ids else None
+        return self._selected_id(raw, ids)
+
     def _photo(self, message):
         return message.media_id or message.filename or message.message_id if message.tipo == "image" else None
 
@@ -1214,7 +1580,7 @@ class PedidoV24Agent:
         return phone if len(phone) >= 9 else None
 
     def _coordinates(self, message, raw):
-        if message.tipo == "location" and message.latitude is not None and message.longitude is not None:
+        if message and message.tipo == "location" and message.latitude is not None and message.longitude is not None:
             return float(message.latitude), float(message.longitude)
         match = re.search(r"(?:q=|@|!3d)(-?\d{1,2}\.\d+)[,!3d]*[,\s!4d]+(-?\d{1,3}\.\d+)", raw)
         return (float(match.group(1)), float(match.group(2))) if match else None
