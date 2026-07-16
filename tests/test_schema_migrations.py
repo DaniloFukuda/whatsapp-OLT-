@@ -194,6 +194,14 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
         pedido_row = connection.execute(
             text("SELECT precisa_mao_de_obra FROM pedidos WHERE id = 1")
         ).mappings().one()
+        whatsapp_processed_columns = {
+            row["name"]
+            for row in connection.execute(text("PRAGMA table_info(whatsapp_processed_messages)")).mappings()
+        }
+        whatsapp_processed_indexes = {
+            row["name"]
+            for row in connection.execute(text("PRAGMA index_list(whatsapp_processed_messages)")).mappings()
+        }
 
     assert {
         "email_cliente",
@@ -248,6 +256,15 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
         "despejo_data_hora",
     } <= pedido_contentores_columns
     assert {"precisa_mao_de_obra"} <= pedidos_columns
+    assert {
+        "id",
+        "message_id",
+        "status",
+        "criado_em",
+        "atualizado_em",
+        "concluido_em",
+    } <= whatsapp_processed_columns
+    assert "ix_whatsapp_processed_messages_message_id" in whatsapp_processed_indexes
     assert contentor_row["is_deleted"] == 0
     assert contentor_row["justificativa_exclusao"] is None
     assert pedido_row["precisa_mao_de_obra"] == 0

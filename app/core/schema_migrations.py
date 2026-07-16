@@ -69,6 +69,29 @@ def ensure_alugueres_contentor_schema(engine: Engine) -> None:
         connection.execute(
             text(
                 """
+                CREATE TABLE IF NOT EXISTS whatsapp_processed_messages (
+                    id INTEGER PRIMARY KEY,
+                    message_id VARCHAR(255) NOT NULL,
+                    status VARCHAR(20) NOT NULL,
+                    criado_em DATETIME NOT NULL,
+                    atualizado_em DATETIME NOT NULL,
+                    concluido_em DATETIME,
+                    CONSTRAINT uq_whatsapp_processed_messages_message_id UNIQUE (message_id)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_whatsapp_processed_messages_message_id
+                ON whatsapp_processed_messages (message_id)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
                 CREATE TABLE IF NOT EXISTS operadores (
                     telefone_whatsapp VARCHAR(50) PRIMARY KEY,
                     nome_operador VARCHAR(255) NOT NULL,
