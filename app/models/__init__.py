@@ -15,6 +15,7 @@ from app.models.pedido import (
     TipoEquipamentoPedido,
 )
 from app.models.whatsapp_dedup import WhatsAppProcessedMessage
+from app.models.whatsapp_phone_queue import WhatsAppPhoneQueueItem
 
 __all__ = [
     "AluguerContentor",
@@ -38,4 +39,5 @@ __all__ = [
     "TipoFoto",
     "TipoEquipamentoPedido",
     "WhatsAppProcessedMessage",
+    "WhatsAppPhoneQueueItem",
 ]
