@@ -9,6 +9,7 @@ from app.core.db import get_db
 from app.integrations.whatsapp.client import send_whatsapp_message
 from app.integrations.whatsapp.parser import parse_whatsapp_payload
 from app.services.whatsapp_dedup_service import WhatsAppMessageDedupService
+from app.services.whatsapp_phone_queue_service import WhatsAppPhoneQueueService
 
 router = APIRouter(prefix="/webhook", tags=["webhook"])
 logger = get_logger(__name__)
@@ -34,10 +35,15 @@ def receive_whatsapp_webhook(
 ) -> dict:
     router_agent = WhatsappRouterAgent(db)
     dedup = WhatsAppMessageDedupService(db)
+    phone_queue = WhatsAppPhoneQueueService(db)
     sent_messages = []
     force_mock = (x_olt_mock_whatsapp or "").strip().lower() in {"1", "true", "yes", "sim"}
     for message in parse_whatsapp_payload(payload):
         message_id = (message.message_id or "").strip()
+        dedup_claimed = False
+        queue_id: int | None = None
+        owner_token: str | None = None
+        queue_acquired = False
         claim = dedup.claim(message_id)
         if not claim.should_process:
             logger.info(
@@ -47,14 +53,51 @@ def receive_whatsapp_webhook(
                 message.tipo,
             )
             continue
+        dedup_claimed = bool(message_id)
         try:
+            queue_id = phone_queue.enqueue(message.telefone, message_id or None)
+            logger.info("WhatsApp webhook message queued message_id=%s queue_id=%s type=%s", message_id, queue_id, message.tipo)
+            lease = phone_queue.wait_turn(queue_id)
+            owner_token = lease.owner_token
+            queue_acquired = True
+            logger.info("WhatsApp webhook queue acquired message_id=%s queue_id=%s type=%s", message_id, queue_id, message.tipo)
             response = router_agent.handle(message)
             sent_messages.append(send_whatsapp_message(message.telefone, response, force_mock=force_mock))
             for pending in router_agent.pop_pending_messages():
                 sent_messages.append(send_whatsapp_message(message.telefone, pending, force_mock=force_mock))
-            dedup.mark_completed(message_id)
+            if not phone_queue.complete(queue_id, owner_token):
+                raise RuntimeError(f"falha ao concluir item da fila WhatsApp: {queue_id}")
+            logger.info("WhatsApp webhook queue completed message_id=%s queue_id=%s type=%s", message_id, queue_id, message.tipo)
+            if dedup_claimed:
+                dedup.mark_completed(message_id)
         except Exception:
-            dedup.mark_failed(message_id)
+            if queue_id is not None:
+                try:
+                    if queue_acquired and owner_token:
+                        phone_queue.fail(queue_id, owner_token)
+                        logger.info(
+                            "WhatsApp webhook queue released after failure message_id=%s queue_id=%s type=%s",
+                            message_id,
+                            queue_id,
+                            message.tipo,
+                        )
+                    else:
+                        phone_queue.cancel_pending(queue_id)
+                        logger.info(
+                            "WhatsApp webhook queue pending cancelled after failure message_id=%s queue_id=%s type=%s",
+                            message_id,
+                            queue_id,
+                            message.tipo,
+                        )
+                except Exception:
+                    logger.exception(
+                        "WhatsApp webhook queue cleanup failed message_id=%s queue_id=%s type=%s",
+                        message_id,
+                        queue_id,
+                        message.tipo,
+                    )
+            if dedup_claimed:
+                dedup.mark_failed(message_id)
             logger.exception(
                 "WhatsApp webhook message processing failed message_id=%s type=%s",
                 message_id,

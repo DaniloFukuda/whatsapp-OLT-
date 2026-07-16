@@ -28,6 +28,7 @@ from app.models.pedido import (
     TipoEquipamentoPedido,
 )
 from app.models.whatsapp_dedup import WhatsAppProcessedMessage
+from app.models.whatsapp_phone_queue import WhatsAppPhoneQueueItem
 from app.services.pedido_service import PedidoService
 from app.services.whatsapp_dedup_service import (
     PROCESSING_CLAIM_TTL,
@@ -708,6 +709,22 @@ def _dedup_statuses(session):
     }
 
 
+def _active_queue_count(session):
+    return session.query(WhatsAppPhoneQueueItem).count()
+
+
+def _registrar_ordem_router(monkeypatch):
+    router_events = []
+    original_handle = WhatsappRouterAgent.handle
+
+    def wrapped_handle(self, message):
+        router_events.append(message.message_id)
+        return original_handle(self, message)
+
+    monkeypatch.setattr(WhatsappRouterAgent, "handle", wrapped_handle)
+    return router_events
+
+
 def test_concorrencia_realista_mesmo_telefone_3_e_1_sessoes_independentes(tmp_path, monkeypatch):
     _liberar_operadores(monkeypatch)
     monkeypatch.setenv("ENV", "test")
@@ -715,6 +732,7 @@ def test_concorrencia_realista_mesmo_telefone_3_e_1_sessoes_independentes(tmp_pa
     app, SessionLocal, db_path, session_ids, bind_urls = _concorrencia_realista_app(tmp_path)
     _criar_pedido_recolha_em_session(SessionLocal)
     first_reached, release_first = _pausar_primeiro_start_recolha(monkeypatch)
+    router_events = _registrar_ordem_router(monkeypatch)
     results = {}
     second_done = threading.Event()
 
@@ -729,10 +747,15 @@ def test_concorrencia_realista_mesmo_telefone_3_e_1_sessoes_independentes(tmp_pa
         args=(app, _webhook_payload("1", message_id="wamid.realista.1"), results, "segunda", second_done),
     )
     t2.start()
-    assert second_done.wait(timeout=5)
-    release_first.set()
+    try:
+        assert not second_done.wait(timeout=0.2)
+        assert router_events == ["wamid.realista.3"]
+    finally:
+        release_first.set()
     t1.join(timeout=10)
     t2.join(timeout=10)
+    assert not t1.is_alive()
+    assert not t2.is_alive()
 
     assert "error" not in results.get("primeira", {})
     assert "error" not in results.get("segunda", {})
@@ -746,24 +769,19 @@ def test_concorrencia_realista_mesmo_telefone_3_e_1_sessoes_independentes(tmp_pa
         conversas = session.query(ConversaWhatsApp).filter_by(telefone=PHONE).all()
         assert len(conversas) == 1
         conversa = conversas[0]
-        assert conversa.estado_atual == "v24_recolha_pedido"
+        assert conversa.estado_atual == "v24_recolha_ativo"
         assert conversa.contexto_json["ids"]
-        assert "pedido_id" not in conversa.contexto_json
+        assert conversa.contexto_json["pedido_id"] == conversa.contexto_json["ids"][0]
         statuses = _dedup_statuses(session)
         assert statuses["wamid.realista.3"] == STATUS_COMPLETED
         assert statuses["wamid.realista.1"] == STATUS_COMPLETED
+        assert _active_queue_count(session) == 0
 
     primeira_body = results["primeira"]["json"]["messages"][0]["body"]
     segunda_body = results["segunda"]["json"]["messages"][0]["body"]
     assert "Selecione o pedido para recolha" in primeira_body
-    assert "tipo de solicitacao" in PedidoV24Agent(None)._norm(segunda_body)
-
-    with SessionLocal() as session:
-        router = WhatsappRouterAgent(session)
-        response = router.handle(_msg("1", message_id="m-continuar-realista"))
-        conversa = session.query(ConversaWhatsApp).filter_by(telefone=PHONE).one()
-        assert conversa.estado_atual == "v24_recolha_ativo"
-        assert "Selecione o ativo" in response
+    assert "Selecione o ativo" in segunda_body
+    assert router_events == ["wamid.realista.3", "wamid.realista.1"]
 
 
 def test_concorrencia_realista_duas_mensagens_3_mesmo_telefone(tmp_path, monkeypatch):
@@ -773,6 +791,7 @@ def test_concorrencia_realista_duas_mensagens_3_mesmo_telefone(tmp_path, monkeyp
     app, SessionLocal, db_path, session_ids, bind_urls = _concorrencia_realista_app(tmp_path)
     _criar_pedido_recolha_em_session(SessionLocal, adesivo_base=800)
     first_reached, release_first = _pausar_primeiro_start_recolha(monkeypatch)
+    router_events = _registrar_ordem_router(monkeypatch)
     results = {}
     second_done = threading.Event()
 
@@ -787,10 +806,15 @@ def test_concorrencia_realista_duas_mensagens_3_mesmo_telefone(tmp_path, monkeyp
         args=(app, _webhook_payload("3", message_id="wamid.duplo3.b"), results, "segunda", second_done),
     )
     t2.start()
-    assert second_done.wait(timeout=5)
-    release_first.set()
+    try:
+        assert not second_done.wait(timeout=0.2)
+        assert router_events == ["wamid.duplo3.a"]
+    finally:
+        release_first.set()
     t1.join(timeout=10)
     t2.join(timeout=10)
+    assert not t1.is_alive()
+    assert not t2.is_alive()
 
     assert "error" not in results.get("primeira", {})
     assert "error" not in results.get("segunda", {})
@@ -799,15 +823,19 @@ def test_concorrencia_realista_duas_mensagens_3_mesmo_telefone(tmp_path, monkeyp
     assert str(db_path) in bind_urls[0]
 
     bodies = [results[label]["json"]["messages"][0]["body"] for label in ("primeira", "segunda")]
-    assert all("Selecione o pedido para recolha" in body for body in bodies)
+    assert "Selecione o pedido para recolha" in bodies[0]
+    assert "Selecione um pedido da lista" in bodies[1]
+    assert router_events == ["wamid.duplo3.a", "wamid.duplo3.b"]
 
     with SessionLocal() as session:
         conversa = session.query(ConversaWhatsApp).filter_by(telefone=PHONE).one()
         assert conversa.estado_atual == "v24_recolha_pedido"
         assert conversa.contexto_json["ids"]
+        assert "pedido_id" not in conversa.contexto_json
         statuses = _dedup_statuses(session)
         assert statuses["wamid.duplo3.a"] == STATUS_COMPLETED
         assert statuses["wamid.duplo3.b"] == STATUS_COMPLETED
+        assert _active_queue_count(session) == 0
         router = WhatsappRouterAgent(session)
         response = router.handle(_msg("1", message_id="m-selecionar-duplo3"))
         session.refresh(conversa)
