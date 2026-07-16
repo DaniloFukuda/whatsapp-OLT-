@@ -1,3 +1,4 @@
+import hashlib
 import re
 import unicodedata
 from typing import Any
@@ -6,6 +7,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.integrations.whatsapp.errors import build_meta_error, build_transport_error
 
 logger = get_logger(__name__)
 
@@ -174,26 +176,22 @@ def _send_payload(
         response = httpx.post(url, headers=headers, json=payload, timeout=15)
     except httpx.HTTPError as exc:
         safe_error = _redact_token(str(exc), settings.whatsapp_access_token)
-        logger.exception("WhatsApp API request failed to=%s error=%s", to, safe_error)
-        return {"to": to, "body": body, "status": "error", "error": safe_error}
+        api_error = build_transport_error(message=safe_error, is_interactive=_is_interactive_payload(payload))
+        _log_api_error(api_error, to, "request_failed")
+        result = api_error.to_result(to=to, body=body)
+        result["error"] = safe_error
+        return result
 
     response_body = _safe_json(response)
     if response.status_code >= 400:
-        safe_response_text = _redact_token(response.text, settings.whatsapp_access_token)
         safe_response_body = _redact_token(response_body, settings.whatsapp_access_token)
-        logger.error(
-            "WhatsApp API error to=%s status_code=%s response=%s",
-            to,
-            response.status_code,
-            safe_response_text,
+        api_error = build_meta_error(
+            http_status=response.status_code,
+            response_body=safe_response_body,
+            is_interactive=_is_interactive_payload(payload),
         )
-        return {
-            "to": to,
-            "body": body,
-            "status": "error",
-            "status_code": response.status_code,
-            "response": safe_response_body,
-        }
+        _log_api_error(api_error, to, "http_error")
+        return api_error.to_result(to=to, body=body)
 
     message_id = _extract_message_id(response_body)
     logger.info("WhatsApp API message sent to=%s message_id=%s", to, message_id)
@@ -219,10 +217,23 @@ def _fallback_to_text_if_needed(
     if result.get("status") != "error":
         return result
 
+    if not result.get("fallback_allowed"):
+        logger.warning(
+            "WhatsApp interactive fallback suppressed type=%s recipient_hash=%s "
+            "category=%s retryable=%s recipient_scoped=%s",
+            interactive_type,
+            _recipient_hash(to),
+            result.get("error_class"),
+            result.get("retryable"),
+            result.get("recipient_scoped"),
+        )
+        return result
+
     logger.warning(
-        "WhatsApp interactive %s failed to=%s; falling back to numbered text",
+        "WhatsApp interactive %s failed recipient_hash=%s category=%s; falling back to numbered text",
         interactive_type,
-        to,
+        _recipient_hash(to),
+        result.get("error_class"),
     )
     fallback_result = send_text_message(to, original_body, force_mock=force_mock)
     fallback_result["fallback_from"] = interactive_type
@@ -477,6 +488,10 @@ def _should_mock(settings) -> bool:
     )
 
 
+def _is_interactive_payload(payload: dict[str, Any]) -> bool:
+    return payload.get("type") == "interactive"
+
+
 def _safe_json(response: httpx.Response) -> dict[str, Any]:
     try:
         data = response.json()
@@ -493,6 +508,26 @@ def _extract_message_id(response_body: dict[str, Any]) -> str | None:
     if not isinstance(first_message, dict):
         return None
     return first_message.get("id")
+
+
+def _log_api_error(api_error, to: str, event: str) -> None:
+    logger.error(
+        "WhatsApp API %s recipient_hash=%s status_code=%s meta_code=%s "
+        "category=%s retryable=%s fallback_allowed=%s recipient_scoped=%s fbtrace_id=%s",
+        event,
+        _recipient_hash(to),
+        api_error.http_status,
+        api_error.meta_code,
+        api_error.category.value,
+        api_error.retryable,
+        api_error.fallback_allowed,
+        api_error.recipient_scoped,
+        api_error.fbtrace_id,
+    )
+
+
+def _recipient_hash(value: str) -> str:
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:10]
 
 
 def _redact_token(value: Any, token: str) -> Any:
