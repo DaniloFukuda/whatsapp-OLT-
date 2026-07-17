@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str = ""
     whatsapp_business_account_id: str = ""
     whatsapp_api_version: str = "v25.0"
+    whatsapp_outbox_min_recipient_interval_seconds: float = 1.0
+    whatsapp_outbox_max_attempts: int = 5
+    whatsapp_outbox_backoff_base_seconds: float = 30.0
+    whatsapp_outbox_backoff_max_seconds: float = 900.0
+    whatsapp_outbox_lease_seconds: float = 60.0
+    whatsapp_outbox_worker_interval_seconds: float = 1.0
+    whatsapp_outbox_sent_retention_days: int = 30
 
     owner_name: str = "Lucas"
     owner_whatsapp: str = ""

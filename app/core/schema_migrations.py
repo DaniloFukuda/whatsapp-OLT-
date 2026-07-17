@@ -108,6 +108,69 @@ def ensure_alugueres_contentor_schema(engine: Engine) -> None:
         connection.execute(
             text(
                 """
+                CREATE TABLE IF NOT EXISTS whatsapp_outbox_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recipient_key VARCHAR(64) NOT NULL,
+                    recipient VARCHAR(50) NOT NULL,
+                    message_type VARCHAR(30) NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status VARCHAR(20) NOT NULL,
+                    attempts INTEGER DEFAULT 0 NOT NULL,
+                    max_attempts INTEGER NOT NULL,
+                    available_at DATETIME NOT NULL,
+                    lease_until DATETIME,
+                    lease_owner VARCHAR(64),
+                    dedup_key VARCHAR(255),
+                    last_http_status INTEGER,
+                    last_meta_code INTEGER,
+                    last_error_category VARCHAR(60),
+                    last_error_at DATETIME,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    sent_at DATETIME,
+                    CONSTRAINT uq_whatsapp_outbox_messages_dedup_key UNIQUE (dedup_key)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_whatsapp_outbox_status_available_at
+                ON whatsapp_outbox_messages (status, available_at)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_whatsapp_outbox_recipient_key
+                ON whatsapp_outbox_messages (recipient_key)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_whatsapp_outbox_recipient_status_id
+                ON whatsapp_outbox_messages (recipient_key, status, id)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS whatsapp_outbox_control (
+                    key VARCHAR(80) PRIMARY KEY,
+                    value_datetime DATETIME,
+                    updated_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
                 CREATE INDEX IF NOT EXISTS ix_whatsapp_phone_queue_phone_key
                 ON whatsapp_phone_queue (phone_key)
                 """
