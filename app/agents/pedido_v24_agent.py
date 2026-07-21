@@ -19,6 +19,8 @@ from app.services.pedido_service import PedidoService
 
 class PedidoV24Agent:
     PREFIX = "v24_"
+    _CONFIRMATION_STATE = "v24_cadastro_confirmacao"
+    _CONFIRMING_STATE = "v24_confirmando"
 
     def __init__(self, db: Session):
         self.db = db
@@ -1078,19 +1080,45 @@ class PedidoV24Agent:
 
     def _finish_cadastro(self, conversa, ctx):
         if not ctx.get("_confirmado"):
-            return self._advance(conversa, "v24_cadastro_confirmacao", ctx, self._format_confirmacao_cadastro(ctx))
-        pedido = self.service.criar(
-            nome_cliente=ctx["nome"], telefone_cliente=ctx["telefone"],
-            data_planejada=datetime.fromisoformat(ctx["data"]), valor_global=ctx["valor"],
-            pago=ctx["pago"], forma_pagamento=ctx.get("forma"),
-            pedido_feito_por=conversa.telefone, endereco_aproximado=ctx["endereco"],
-            ponto_referencia=ctx.get("referencia"), itens=ctx.get("itens") or [],
-            endereco_latitude=ctx.get("endereco_latitude"),
-            endereco_longitude=ctx.get("endereco_longitude"),
-            precisa_mao_de_obra=ctx.get("precisa_mao_de_obra"),
-        )
+            return self._advance(
+                conversa,
+                self._CONFIRMATION_STATE,
+                ctx,
+                self._format_confirmacao_cadastro(ctx),
+            )
+        try:
+            if not self._reservar_confirmacao(conversa):
+                self.db.rollback()
+                return "Este pedido já foi confirmado ou está sendo processado."
+            pedido = self.service.criar_transacional(
+                nome_cliente=ctx["nome"], telefone_cliente=ctx["telefone"],
+                data_planejada=datetime.fromisoformat(ctx["data"]), valor_global=ctx["valor"],
+                pago=ctx["pago"], forma_pagamento=ctx.get("forma"),
+                pedido_feito_por=conversa.telefone, endereco_aproximado=ctx["endereco"],
+                ponto_referencia=ctx.get("referencia"), itens=ctx.get("itens") or [],
+                endereco_latitude=ctx.get("endereco_latitude"),
+                endereco_longitude=ctx.get("endereco_longitude"),
+                precisa_mao_de_obra=ctx.get("precisa_mao_de_obra"),
+            )
+            self._aplicar_idle(conversa)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         tipo_label = self._tipo_label(ctx.get("tipo_solicitacao"))
-        return self._idle(conversa, f"✅ Pedido #{pedido.id} criado com {len(pedido.contentores)} {tipo_label.lower()}(es).")
+        return f"✅ Pedido #{pedido.id} criado com {len(pedido.contentores)} {tipo_label.lower()}(es)."
+
+    def _reservar_confirmacao(self, conversa) -> bool:
+        atualizados = (
+            self.db.query(ConversaWhatsApp)
+            .filter(ConversaWhatsApp.id == conversa.id)
+            .filter(ConversaWhatsApp.estado_atual == self._CONFIRMATION_STATE)
+            .update(
+                {ConversaWhatsApp.estado_atual: self._CONFIRMING_STATE},
+                synchronize_session="evaluate",
+            )
+        )
+        return atualizados == 1
 
     def _after_cliente(self, conversa, ctx):
         if ctx.get("tipo_solicitacao") == TipoEquipamentoPedido.CARRINHA.value:
@@ -1547,10 +1575,13 @@ class PedidoV24Agent:
         return response
 
     def _idle(self, conversa, response):
-        conversa.estado_atual = "idle"
-        conversa.contexto_json = {}
+        self._aplicar_idle(conversa)
         self.db.commit()
         return response
+
+    def _aplicar_idle(self, conversa):
+        conversa.estado_atual = "idle"
+        conversa.contexto_json = {}
 
     def _selected_id(self, raw, ids):
         value = self._norm(raw)

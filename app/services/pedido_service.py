@@ -45,6 +45,44 @@ class PedidoService:
         endereco_longitude: float | None = None,
         precisa_mao_de_obra: bool | None = None,
     ) -> Pedido:
+        pedido = self.criar_transacional(
+            nome_cliente=nome_cliente,
+            telefone_cliente=telefone_cliente,
+            data_planejada=data_planejada,
+            valor_global=valor_global,
+            pago=pago,
+            forma_pagamento=forma_pagamento,
+            pedido_feito_por=pedido_feito_por,
+            endereco_aproximado=endereco_aproximado,
+            ponto_referencia=ponto_referencia,
+            residuos=residuos,
+            itens=itens,
+            endereco_latitude=endereco_latitude,
+            endereco_longitude=endereco_longitude,
+            precisa_mao_de_obra=precisa_mao_de_obra,
+        )
+        self.db.commit()
+        self.db.refresh(pedido)
+        return pedido
+
+    def criar_transacional(
+        self,
+        *,
+        nome_cliente: str,
+        telefone_cliente: str,
+        data_planejada: datetime,
+        valor_global: Decimal | str | float,
+        pago: bool,
+        forma_pagamento: str | None,
+        pedido_feito_por: str,
+        endereco_aproximado: str,
+        ponto_referencia: str | None,
+        residuos: list[str] | None = None,
+        itens: list[dict] | None = None,
+        endereco_latitude: float | None = None,
+        endereco_longitude: float | None = None,
+        precisa_mao_de_obra: bool | None = None,
+    ) -> Pedido:
         itens_normalizados = self._normalizar_itens(residuos=residuos, itens=itens)
         if not itens_normalizados:
             raise ValueError("O pedido precisa de pelo menos um item.")
@@ -78,20 +116,20 @@ class PedidoService:
             endereco_longitude=endereco_longitude,
             ponto_referencia=ponto_referencia.strip() if ponto_referencia else None,
             precisa_mao_de_obra=pedido_precisa_mao_de_obra,
-            contentores=[
-                PedidoContentor(
-                    tipo_equipamento=item["tipo_equipamento"],
-                    horario_agendado=item["horario_agendado"],
-                    precisa_mao_de_obra=False,
-                    residuo_contratado=item["residuo_contratado"],
-                )
-                for item in itens_normalizados
-            ],
+            contentores=[self._criar_item(item) for item in itens_normalizados],
         )
         self.db.add(pedido)
-        self.db.commit()
-        self.db.refresh(pedido)
+        self.db.flush()
         return pedido
+
+    @staticmethod
+    def _criar_item(item: dict) -> PedidoContentor:
+        return PedidoContentor(
+            tipo_equipamento=item["tipo_equipamento"],
+            horario_agendado=item["horario_agendado"],
+            precisa_mao_de_obra=False,
+            residuo_contratado=item["residuo_contratado"],
+        )
 
     def _normalizar_itens(
         self,
