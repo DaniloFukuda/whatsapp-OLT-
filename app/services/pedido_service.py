@@ -267,6 +267,26 @@ class PedidoService:
         ponto_referencia: str | None,
         entregas: list[dict] | None = None,
     ) -> Pedido:
+        pedido = self.confirmar_entrega_lote_transacional(
+            pedido_id,
+            operador,
+            latitude,
+            longitude,
+            ponto_referencia,
+            entregas,
+        )
+        self.db.commit()
+        return pedido
+
+    def confirmar_entrega_lote_transacional(
+        self,
+        pedido_id: int,
+        operador: str,
+        latitude: float,
+        longitude: float,
+        ponto_referencia: str | None,
+        entregas: list[dict] | None = None,
+    ) -> Pedido:
         pedido = self.get(pedido_id)
         if not pedido:
             raise ValueError("Pedido não encontrado.")
@@ -303,36 +323,63 @@ class PedidoService:
                 raise ValueError("Um dos adesivos ja esta em um ciclo ativo.")
         elif any(not c.numero_adesivo_contentor for c in pendentes):
             raise ValueError("Todos os contentores precisam do número do adesivo.")
+        if (
+            latitude is None
+            or longitude is None
+            or not -90 <= latitude <= 90
+            or not -180 <= longitude <= 180
+        ):
+            raise ValueError("A localização GPS da entrega é inválida.")
         if ponto_referencia and len(ponto_referencia) > 50:
             raise ValueError("O ponto de referência deve ter no máximo 50 caracteres.")
         agora = utcnow()
         for contentor in pendentes:
             entrega = entregas_por_id.get(contentor.id)
-            if entrega:
-                numero = str(entrega["numero_adesivo"]).strip()
-                contentor.numero_adesivo_contentor = (
-                    None
-                    if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value and numero == "0"
-                    else numero
-                )
-            contentor.status_entrega = StatusEntregaPedido.ENTREGUE.value
-            contentor.entrega_feita_por = operador
-            contentor.entrega_latitude = latitude
-            contentor.entrega_longitude = longitude
-            contentor.entrega_ponto_referencia = ponto_referencia
-            contentor.entrega_data_hora = agora
-            for foto_url in (entrega or {}).get("fotos") or []:
-                self.db.add(
-                    ContentorFoto(
-                        pedido_contentor_id=contentor.id,
-                        url_midia=foto_url,
-                        tipo_foto=TipoFoto.ENTREGA.value,
-                        url_foto=foto_url,
-                        tipo=TipoFoto.ENTREGA.value.lower(),
-                    )
-                )
-        self.db.commit()
+            self._aplicar_entrega_item(
+                contentor,
+                entrega,
+                operador,
+                latitude,
+                longitude,
+                ponto_referencia,
+                agora,
+            )
+        self.db.flush()
         return pedido
+
+    def _aplicar_entrega_item(
+        self,
+        contentor: PedidoContentor,
+        entrega: dict | None,
+        operador: str,
+        latitude: float,
+        longitude: float,
+        ponto_referencia: str | None,
+        agora: datetime,
+    ) -> None:
+        if entrega:
+            numero = str(entrega["numero_adesivo"]).strip()
+            contentor.numero_adesivo_contentor = (
+                None
+                if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value and numero == "0"
+                else numero
+            )
+        contentor.status_entrega = StatusEntregaPedido.ENTREGUE.value
+        contentor.entrega_feita_por = operador
+        contentor.entrega_latitude = latitude
+        contentor.entrega_longitude = longitude
+        contentor.entrega_ponto_referencia = ponto_referencia
+        contentor.entrega_data_hora = agora
+        for foto_url in (entrega or {}).get("fotos") or []:
+            self.db.add(
+                ContentorFoto(
+                    pedido_contentor_id=contentor.id,
+                    url_midia=foto_url,
+                    tipo_foto=TipoFoto.ENTREGA.value,
+                    url_foto=foto_url,
+                    tipo=TipoFoto.ENTREGA.value.lower(),
+                )
+            )
 
     def registrar_pagamento(self, pedido_id: int, forma: str) -> None:
         pedido = self.get(pedido_id)
