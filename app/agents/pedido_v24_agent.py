@@ -1025,7 +1025,12 @@ class PedidoV24Agent:
 
     def _confirmar_entrega_preparada(self, conversa, ctx):
         try:
-            pedido = self.service.confirmar_entrega_lote(
+            if conversa.estado_atual != "v24_entrega_confirmacao":
+                raise ValueError("A entrega não está pronta para confirmação.")
+            campos_obrigatorios = {"pedido_id", "latitude", "longitude", "referencia_entrega", "entregas"}
+            if not campos_obrigatorios.issubset(ctx):
+                raise ValueError("Os dados da entrega estão incompletos. Reinicie a entrega.")
+            pedido = self.service.confirmar_entrega_lote_transacional(
                 ctx["pedido_id"],
                 conversa.telefone,
                 ctx["latitude"],
@@ -1033,18 +1038,25 @@ class PedidoV24Agent:
                 ctx["referencia_entrega"],
                 ctx.get("entregas") or [],
             )
+            if pedido.status_pagamento == StatusPagamento.PENDENTE.value:
+                conversa.estado_atual = "v24_entrega_pagou"
+                conversa.contexto_json = {"pedido_id": ctx["pedido_id"]}
+                response = (
+                    "O cliente realizou o pagamento no local?\n\n"
+                    "1. ✅ Sim, foi pago\n"
+                    "2. 🕒 Não, continua pendente"
+                )
+            else:
+                self._aplicar_idle(conversa)
+                response = "✅ Entrega confirmada com sucesso para todos os ativos processados."
+            self.db.commit()
         except ValueError as exc:
-            return self._idle(conversa, f"⚠️ {exc}")
-        if pedido.status_pagamento == StatusPagamento.PENDENTE.value:
-            return self._advance(
-                conversa,
-                "v24_entrega_pagou",
-                ctx,
-                "O cliente realizou o pagamento no local?\n\n"
-                "1. ✅ Sim, foi pago\n"
-                "2. 🕒 Não, continua pendente",
-            )
-        return self._idle(conversa, "✅ Entrega confirmada com sucesso para todos os ativos processados.")
+            self.db.rollback()
+            return f"⚠️ {exc}"
+        except Exception:
+            self.db.rollback()
+            raise
+        return response
 
     def _entrega_confirmacao_prompt(self, ctx):
         pedido = self.service.get(ctx["pedido_id"])

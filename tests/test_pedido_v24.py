@@ -1272,13 +1272,16 @@ def test_entrega_v24_conflito_concorrente_cancela_estado_sem_duplicar_fotos(db_s
     router.handle(msg(kind="location", lat=38.7, lon=-9.1))
     router.handle(msg("Sim"))
     router.handle(msg("Portao"))
+    conversa_antes = db_session.query(ConversaWhatsApp).one()
+    contexto_antes = dict(conversa_antes.contexto_json)
     pedido.contentores[0].status_entrega = StatusEntregaPedido.ENTREGUE.value
     db_session.commit()
     response = router.handle(msg("1"))
 
     conversa = db_session.query(ConversaWhatsApp).one()
     assert "lista de ativos pendentes mudou" in response.lower()
-    assert conversa.estado_atual == "idle"
+    assert conversa.estado_atual == "v24_entrega_confirmacao"
+    assert conversa.contexto_json == contexto_antes
     assert db_session.query(ContentorFoto).count() == 0
 
 
