@@ -39,6 +39,7 @@ from app.services.pedido_service import PedidoService
 ACTIVE_ALUGUER_STATUSES = {StatusAluguer.ATIVO, StatusAluguer.VENCENDO, StatusAluguer.RENOVADO}
 APP_DISPLAY_NAME = "OLT Gestão de Resíduos & Demolições"
 UNAUTHORIZED_MESSAGE = "Telefone não autorizado."
+FORBIDDEN_MESSAGE = "Operação não permitida."
 COMMANDS = {"resumo", "lista", "disponiveis", "alugados", "vencendo", "atrasados"}
 START_COMMANDS = {"iniciar", "cadastrar", "comecar", "começar", "novo"}
 ALTER_COMMANDS = {"alterar", "modificar"}
@@ -50,6 +51,16 @@ ENTREGA_COMMANDS = {"entrega", "entregar", "entrega de contentor", "confirmar en
 RECOLHA_COMMANDS = {"recolha", "recolher", "confirmar recolha", "confirmar recolha de contentor"}
 MENU_COMMANDS = {"menu", "inicio", "início"}
 CANCEL_COMMANDS = {"cancelar", "cancela", "sair", "parar", "voltar", "0"}
+COMMAND_FAMILY_OPERATIONAL_QUERY = "operational_query"
+COMMAND_FAMILY_COMMERCIAL_QUERY = "commercial_query"
+COMMAND_FAMILY_ADMIN_MUTATION = "admin_mutation"
+COMMAND_FAMILY_RESOLUTION = "resolution"
+COMMAND_PROFILES = {
+    COMMAND_FAMILY_OPERATIONAL_QUERY: {PerfilOperador.FUNCIONARIO, PerfilOperador.GESTOR},
+    COMMAND_FAMILY_COMMERCIAL_QUERY: {PerfilOperador.GESTOR},
+    COMMAND_FAMILY_ADMIN_MUTATION: {PerfilOperador.GESTOR},
+    COMMAND_FAMILY_RESOLUTION: {PerfilOperador.GESTOR},
+}
 MAIN_MENU = (
     f"🤖 Menu principal - {APP_DISPLAY_NAME}\n\n"
     "1️⃣ 📝 Novo pedido\n"
@@ -101,8 +112,13 @@ class WhatsappRouterAgent:
 
     def handle(self, message: NormalizedWhatsAppMessage) -> str:
         self._pending_messages = []
-        conversa = self._get_or_create_conversa(message.telefone)
         text = (message.texto or "").strip().lower()
+        if not self._is_authorized(message.telefone):
+            return UNAUTHORIZED_MESSAGE
+        perfil = self.operador_service.obter_perfil(message.telefone)
+        if perfil is None:
+            return UNAUTHORIZED_MESSAGE
+        conversa = self._get_or_create_conversa(message.telefone)
 
         if text in MENU_COMMANDS:
             if not self._is_authorized(message.telefone):
@@ -161,26 +177,37 @@ class WhatsappRouterAgent:
             return self.aluguer_agent.timeout_prompt(conversa)
 
         if text.startswith("resolver carga"):
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_RESOLUTION):
+                return FORBIDDEN_MESSAGE
             return self._resolver_pendencia("carga", text, message.telefone)
         if text.startswith("resolver avaria"):
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_RESOLUTION):
+                return FORBIDDEN_MESSAGE
             return self._resolver_pendencia("avaria", text, message.telefone)
 
         if text in COMMANDS:
-            if text == "resumo" and not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
+            family = self._classify_top_level_command(text)
+            if family and not self._can_execute_command(perfil, family):
+                return FORBIDDEN_MESSAGE
             return self._handle_operational_command(text, message.telefone)
 
         if conversa.estado_atual in AluguerAgent.ACTIVE_STATES:
             return self._finalize_response(self.aluguer_agent.handle(conversa, message), conversa, message.telefone)
         if conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES:
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
+                return FORBIDDEN_MESSAGE
             return self._finalize_response(self.gestao_aluguer_agent.handle(conversa, message), conversa, message.telefone)
         if conversa.estado_atual in EntregaAgent.ACTIVE_STATES:
             return self._finalize_response(self.entrega_agent.handle(conversa, message), conversa, message.telefone)
         if conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES:
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
+                return FORBIDDEN_MESSAGE
             return self._finalize_response(self.renovacao_agent.handle(conversa, message), conversa, message.telefone)
         if conversa.estado_atual in RecolhaAgent.ACTIVE_STATES:
             return self._finalize_response(self.recolha_agent.handle(conversa, message), conversa, message.telefone)
         if conversa.estado_atual in ContentorAgent.ACTIVE_STATES:
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
+                return FORBIDDEN_MESSAGE
             return self._finalize_response(self.contentor_agent.handle(conversa, message), conversa, message.telefone)
 
         if text == "5":
@@ -240,40 +267,62 @@ class WhatsappRouterAgent:
                 return self.recolha_agent.start(conversa)
             return self.aluguer_agent.start(conversa)
         if text in CONTENTOR_STATUS_COMMANDS:
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
+                return FORBIDDEN_MESSAGE
             return self.contentor_agent.start_alteracao_status(conversa)
         if text in ALTER_COMMANDS:
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
+                return FORBIDDEN_MESSAGE
             return self.gestao_aluguer_agent.start_alteracao(conversa)
         if text == "4":
             if not self._is_authorized(message.telefone):
                 return UNAUTHORIZED_MESSAGE
             return self.gestao_aluguer_agent.start_alteracao(conversa)
         if text in DELETE_COMMANDS:
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
+                return FORBIDDEN_MESSAGE
             if text == "excluir" and not self.aluguer_service.listar_cadastrados_nos_ultimos_dias(7):
                 return self.contentor_agent.start_exclusao(conversa)
             return self.gestao_aluguer_agent.start_exclusao(conversa)
         if text in CONTENTOR_DELETE_COMMANDS:
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
+                return FORBIDDEN_MESSAGE
             return self.contentor_agent.start_exclusao(conversa)
         if text == "5":
             if not self._is_authorized(message.telefone):
                 return UNAUTHORIZED_MESSAGE
             return self.gestao_aluguer_agent.start_exclusao(conversa)
         if text in RENEW_COMMANDS:
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
+                return FORBIDDEN_MESSAGE
             return self.renovacao_agent.start(conversa)
         if text in {"contentores", "status"}:
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_OPERATIONAL_QUERY):
+                return FORBIDDEN_MESSAGE
             return self.contentor_agent.listar_status()
         if self._is_authorized(message.telefone):
             return self._initial_menu(message.telefone)
         return UNAUTHORIZED_MESSAGE
+
+    def _classify_top_level_command(self, text: str) -> str | None:
+        if text in {"lista", "disponiveis", "contentores", "status", "resumo"}:
+            return COMMAND_FAMILY_OPERATIONAL_QUERY
+        if text in {"alugados", "vencendo", "atrasados"}:
+            return COMMAND_FAMILY_COMMERCIAL_QUERY
+        if (
+            text in ALTER_COMMANDS
+            or text in DELETE_COMMANDS
+            or text in RENEW_COMMANDS
+            or text in CONTENTOR_STATUS_COMMANDS
+            or text in CONTENTOR_DELETE_COMMANDS
+        ):
+            return COMMAND_FAMILY_ADMIN_MUTATION
+        if text.startswith("resolver carga") or text.startswith("resolver avaria"):
+            return COMMAND_FAMILY_RESOLUTION
+        return None
+
+    def _can_execute_command(self, perfil: PerfilOperador, family: str) -> bool:
+        return perfil in COMMAND_PROFILES[family]
 
     def _handle_operational_command(self, command: str, telefone: str | None = None) -> str:
         if command == "resumo":

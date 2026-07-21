@@ -34,6 +34,18 @@ def liberar_operadores(monkeypatch):
     get_settings.cache_clear()
 
 
+def autorizar_gestor_no_banco(db_session, telefone: str = "351900000000"):
+    db_session.add(
+        Operador(
+            telefone_whatsapp=telefone,
+            nome_operador="Gestor de teste",
+            perfil=PerfilOperador.GESTOR,
+            ativo=True,
+        )
+    )
+    db_session.commit()
+
+
 def preparar_operacao_demo(db_session):
     SeedService(db_session).seed_contentores_iniciais()
     now = utcnow()
@@ -1700,6 +1712,7 @@ def test_numero_nao_autorizado_nao_recebe_resumo_detalhado(db_session, monkeypat
 
 
 def test_comando_lista_mostra_todos_os_contentores_com_status(db_session):
+    autorizar_gestor_no_banco(db_session)
     preparar_operacao_demo(db_session)
 
     response = WhatsappRouterAgent(db_session).handle(text_message("lista"))
@@ -1714,6 +1727,7 @@ def test_comando_lista_mostra_todos_os_contentores_com_status(db_session):
 
 
 def test_comando_disponiveis_lista_apenas_contentores_disponiveis(db_session):
+    autorizar_gestor_no_banco(db_session)
     preparar_operacao_demo(db_session)
 
     response = WhatsappRouterAgent(db_session).handle(text_message("disponiveis"))
@@ -1726,6 +1740,7 @@ def test_comando_disponiveis_lista_apenas_contentores_disponiveis(db_session):
 
 
 def test_comando_alugados_lista_cliente_vencimento_e_status(db_session):
+    autorizar_gestor_no_banco(db_session)
     aluguer_amanha, aluguer_atrasado, aluguer_regular = preparar_operacao_demo(db_session)
 
     response = WhatsappRouterAgent(db_session).handle(text_message("alugados"))
@@ -1737,6 +1752,7 @@ def test_comando_alugados_lista_cliente_vencimento_e_status(db_session):
 
 
 def test_comando_vencendo_lista_alugueres_que_vencem_amanha(db_session):
+    autorizar_gestor_no_banco(db_session)
     aluguer_amanha, _, _ = preparar_operacao_demo(db_session)
 
     response = WhatsappRouterAgent(db_session).handle(text_message("vencendo"))
@@ -1748,6 +1764,7 @@ def test_comando_vencendo_lista_alugueres_que_vencem_amanha(db_session):
 
 
 def test_comando_atrasados_lista_alugueres_ativos_em_atraso(db_session):
+    autorizar_gestor_no_banco(db_session)
     _, aluguer_atrasado, _ = preparar_operacao_demo(db_session)
 
     response = WhatsappRouterAgent(db_session).handle(text_message("atrasados"))
