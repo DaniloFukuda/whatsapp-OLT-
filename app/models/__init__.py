@@ -2,6 +2,7 @@ from app.models.aluguer import AluguerContentor, ContentorFoto, EventoAluguer, S
 from app.models.cliente import Cliente
 from app.models.contentor import Contentor, StatusContentor
 from app.models.conversa import ConversaWhatsApp
+from app.models.mensagem_webhook import MensagemWebhook, StatusMensagemWebhook
 from app.models.operador import Operador, PerfilOperador
 from app.models.pedido import (
     Pedido,
@@ -21,12 +22,14 @@ __all__ = [
     "Contentor",
     "ContentorFoto",
     "ConversaWhatsApp",
+    "MensagemWebhook",
     "EventoAluguer",
     "Operador",
     "PerfilOperador",
     "StatusAluguer",
     "StatusContentor",
     "StatusEntrega",
+    "StatusMensagemWebhook",
     "Pedido",
     "PedidoContentor",
     "StatusCicloPedido",

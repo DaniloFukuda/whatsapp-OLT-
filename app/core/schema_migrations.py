@@ -69,6 +69,31 @@ def ensure_alugueres_contentor_schema(engine: Engine) -> None:
         connection.execute(
             text(
                 """
+                CREATE TABLE IF NOT EXISTS mensagens_webhook (
+                    message_id VARCHAR(512) PRIMARY KEY,
+                    payload_hash VARCHAR(64) NOT NULL,
+                    telefone VARCHAR(50),
+                    status VARCHAR(32) NOT NULL
+                        CHECK (status IN ('PROCESSANDO', 'CONCLUIDA', 'FALHOU_REPROCESSAVEL', 'FALHOU_DEFINITIVA')),
+                    tentativas INTEGER DEFAULT 1 NOT NULL,
+                    recebido_em DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    atualizado_em DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    concluido_em DATETIME,
+                    codigo_erro VARCHAR(80),
+                    resposta_enviada BOOLEAN DEFAULT 0 NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_mensagens_webhook_atualizado_em "
+                "ON mensagens_webhook (atualizado_em)"
+            )
+        )
+        connection.execute(
+            text(
+                """
                 CREATE TABLE IF NOT EXISTS operadores (
                     telefone_whatsapp VARCHAR(50) PRIMARY KEY,
                     nome_operador VARCHAR(255) NOT NULL,
