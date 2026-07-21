@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
+import app.services.operador_service as operador_service_module
 from app.agents.aluguer_agent import AluguerAgent
 from app.agents.recolha_agent import RecolhaAgent
 from app.agents.whatsapp_router_agent import (
@@ -27,11 +29,15 @@ def text_message(texto: str, telefone: str = "351900000000") -> NormalizedWhatsA
 
 
 def liberar_operadores(monkeypatch):
-    monkeypatch.setenv("WHATSAPP_OWNER_PHONE", "")
-    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONE", "")
-    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONES", "")
-    monkeypatch.setenv("OWNER_WHATSAPP", "")
-    get_settings.cache_clear()
+    telefones = {"351900000000", "35190000073", "35190000074"}
+    telefones.update(f"351900000{suffix:03d}" for suffix in range(1, 100))
+    telefones.update(f"351900001{suffix:03d}" for suffix in range(100))
+    telefones.update(f"351900002{suffix:03d}" for suffix in range(100))
+    settings = SimpleNamespace(
+        authorized_operator_phone="",
+        authorized_operator_phones=",".join(sorted(telefones)),
+    )
+    monkeypatch.setattr(operador_service_module, "get_settings", lambda: settings)
 
 
 def autorizar_gestor_no_banco(db_session, telefone: str = "351900000000"):

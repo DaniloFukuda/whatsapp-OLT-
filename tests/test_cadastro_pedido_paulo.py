@@ -1,5 +1,7 @@
+from types import SimpleNamespace
+
+import app.services.operador_service as operador_service_module
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
-from app.core.config import get_settings
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.aluguer import AluguerContentor, ContentorFoto, StatusEntrega
 from app.models.contentor import Contentor, StatusContentor
@@ -33,14 +35,16 @@ def location_message(latitude: float, longitude: float, telefone: str = "3519000
 
 
 def liberar_operadores(monkeypatch):
-    for env_name in (
-        "WHATSAPP_OWNER_" + "PHONE",
-        "AUTHORIZED_OPERATOR_" + "PHONE",
-        "AUTHORIZED_OPERATOR_" + "PHONES",
-        "OWNER_" + "WHATSAPP",
-    ):
-        monkeypatch.setenv(env_name, "")
-    get_settings.cache_clear()
+    settings = SimpleNamespace(
+        authorized_operator_phone="",
+        authorized_operator_phones=",".join(
+            (
+                "351900009000", "351900009001", "351900009002", "351900009003",
+                "351900009004", "351900009005", "351900009010", "351900009099",
+            )
+        ),
+    )
+    monkeypatch.setattr(operador_service_module, "get_settings", lambda: settings)
 
 
 def avancar_ate_valor(router: WhatsappRouterAgent, telefone: str = "351900009000"):

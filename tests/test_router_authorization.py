@@ -13,6 +13,7 @@ from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.contentor import Contentor, StatusContentor
 from app.models.conversa import ConversaWhatsApp
 from app.models.operador import Operador, PerfilOperador
+from app.services.seed_service import SeedService
 
 
 UNAUTHORIZED_PHONE = "351911000001"
@@ -379,3 +380,86 @@ def test_olt_auth_040_unknown_command_does_not_reveal_internal_menu(db_session, 
     assert "perfil" not in response.lower()
     assert CONTENTOR_SENTINEL not in response
     assert db_session.query(ConversaWhatsApp).filter_by(telefone=UNAUTHORIZED_PHONE).count() == 0
+
+
+def test_olt_operator_029_existing_conversation_does_not_survive_operator_inactivation(
+    db_session, active_manager
+):
+    """OLT-OPERATOR-029"""
+    conversation = ConversaWhatsApp(
+        telefone=MANAGER_PHONE,
+        estado_atual="estado_administrativo_preexistente",
+        contexto_json={"sentinela": "NAO_ALTERAR"},
+    )
+    db_session.add(conversation)
+    db_session.commit()
+    original_updated_at = conversation.atualizado_em
+    active_manager.ativo = False
+    db_session.commit()
+
+    response = WhatsappRouterAgent(db_session).handle(message("menu", MANAGER_PHONE))
+    db_session.refresh(conversation)
+
+    assert response == UNAUTHORIZED_MESSAGE
+    assert conversation.estado_atual == "estado_administrativo_preexistente"
+    assert conversation.contexto_json == {"sentinela": "NAO_ALTERAR"}
+    assert conversation.atualizado_em == original_updated_at
+
+
+def test_olt_operator_034_simulated_bootstrap_does_not_open_access(
+    db_session, controlled_fallback
+):
+    """OLT-OPERATOR-034"""
+    controlled_fallback.authorized_operator_phone = ""
+    controlled_fallback.authorized_operator_phones = ""
+    SeedService(db_session).seed_contentores_iniciais()
+
+    response = WhatsappRouterAgent(db_session).handle(message("menu", UNAUTHORIZED_PHONE))
+
+    assert response == UNAUTHORIZED_MESSAGE
+    assert db_session.query(Operador).count() == 0
+    assert db_session.query(ConversaWhatsApp).count() == 0
+
+
+def test_olt_operator_036_block_does_not_disclose_fallback_value(
+    db_session, controlled_fallback
+):
+    """OLT-OPERATOR-036"""
+    fallback_sentinel = "351911999936"
+    controlled_fallback.authorized_operator_phone = fallback_sentinel
+
+    response = WhatsappRouterAgent(db_session).handle(message("menu", UNAUTHORIZED_PHONE))
+
+    assert response == UNAUTHORIZED_MESSAGE
+    assert fallback_sentinel not in response
+    assert "fallback" not in response.lower()
+
+
+def test_olt_operator_037_block_does_not_disclose_operator_table(db_session, active_manager):
+    """OLT-OPERATOR-037"""
+    response = WhatsappRouterAgent(db_session).handle(message("menu", UNAUTHORIZED_PHONE))
+
+    assert response == UNAUTHORIZED_MESSAGE
+    assert "operador" not in response.lower()
+    assert "tabela" not in response.lower()
+    assert "perfil" not in response.lower()
+
+
+def test_router_uses_one_access_decision_per_message(db_session, active_manager):
+    router = WhatsappRouterAgent(db_session)
+    router.operador_service.decidir_acesso = MagicMock(
+        wraps=router.operador_service.decidir_acesso
+    )
+    router.operador_service.verificar_autorizacao = MagicMock(
+        side_effect=AssertionError("wrapper de autorização não deve ser chamado")
+    )
+    router.operador_service.obter_perfil = MagicMock(
+        side_effect=AssertionError("wrapper de perfil não deve ser chamado")
+    )
+
+    response = router.handle(message("menu", MANAGER_PHONE))
+
+    assert "Menu principal" in response
+    router.operador_service.decidir_acesso.assert_called_once_with(MANAGER_PHONE)
+    router.operador_service.verificar_autorizacao.assert_not_called()
+    router.operador_service.obter_perfil.assert_not_called()

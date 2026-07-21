@@ -1,5 +1,7 @@
+from types import SimpleNamespace
+
+import app.services.operador_service as operador_service_module
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
-from app.core.config import get_settings
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.aluguer import AluguerContentor, ContentorFotoRecolha, StatusCiclo, StatusEntrega, StatusResolucao
 from app.models.contentor import StatusContentor
@@ -22,19 +24,15 @@ def image_message(media_id: str = "media-recolha-1", telefone: str = "3519000091
 
 
 def liberar_operadores(monkeypatch):
-    monkeypatch.setenv("WHATSAPP_OWNER_PHONE", "")
-    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONE", "")
-    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONES", "")
-    monkeypatch.setenv("OWNER_WHATSAPP", "")
-    get_settings.cache_clear()
+    autorizar_gestor(monkeypatch, "351900009100")
 
 
 def autorizar_gestor(monkeypatch, telefone: str):
-    monkeypatch.setenv("WHATSAPP_OWNER_PHONE", "")
-    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONE", telefone)
-    monkeypatch.setenv("AUTHORIZED_OPERATOR_PHONES", "")
-    monkeypatch.setenv("OWNER_WHATSAPP", "")
-    get_settings.cache_clear()
+    settings = SimpleNamespace(
+        authorized_operator_phone=telefone,
+        authorized_operator_phones="",
+    )
+    monkeypatch.setattr(operador_service_module, "get_settings", lambda: settings)
 
 
 def criar_aluguer_entregue(db_session, pago: bool = True) -> AluguerContentor:

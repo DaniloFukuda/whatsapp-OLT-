@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
+import app.services.operador_service as operador_service_module
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.agents.whatsapp_router_agent import MAIN_MENU
 from app.integrations.whatsapp.client import send_whatsapp_message
@@ -41,11 +43,18 @@ def contact_msg(name=None, contact_phone=None, *, phone="351900009900"):
 
 
 def liberar_operadores(monkeypatch):
-    for name in ("WHATSAPP_OWNER_PHONE", "AUTHORIZED_OPERATOR_PHONE",
-                 "AUTHORIZED_OPERATOR_PHONES", "OWNER_WHATSAPP"):
-        monkeypatch.setenv(name, "")
-    from app.core.config import get_settings
-    get_settings.cache_clear()
+    settings = SimpleNamespace(
+        authorized_operator_phone="",
+        authorized_operator_phones=",".join(
+            (
+                "351900000000", "351900000222", "351900000333", "351900009900",
+                "351900009901", "351900010001", "351900010002", "351900010003",
+                "351900010004", "351900010005", "351900010006", "351900010007",
+                "351900010008", "351900010009",
+            )
+        ),
+    )
+    monkeypatch.setattr(operador_service_module, "get_settings", lambda: settings)
 
 
 def avancar_cadastro_v24_ate_mao_obra(router, *, tipo="contentor", quantidade="1", phone="351900009900"):
@@ -230,11 +239,7 @@ def test_service_lista_ativos_por_status_operacional(db_session):
 
 
 def test_fluxo_cadastro_v24_cria_lote(db_session, monkeypatch):
-    for name in ("WHATSAPP_OWNER_PHONE", "AUTHORIZED_OPERATOR_PHONE",
-                 "AUTHORIZED_OPERATOR_PHONES", "OWNER_WHATSAPP"):
-        monkeypatch.setenv(name, "")
-    from app.core.config import get_settings
-    get_settings.cache_clear()
+    liberar_operadores(monkeypatch)
     router = WhatsappRouterAgent(db_session)
 
     steps = [
@@ -766,11 +771,7 @@ def test_menu_principal_usa_texto_com_emojis_sem_list_message():
 
 
 def test_cadastro_v24_carrinha_valida_horario_e_mao_de_obra(db_session, monkeypatch):
-    for name in ("WHATSAPP_OWNER_PHONE", "AUTHORIZED_OPERATOR_PHONE",
-                 "AUTHORIZED_OPERATOR_PHONES", "OWNER_WHATSAPP"):
-        monkeypatch.setenv(name, "")
-    from app.core.config import get_settings
-    get_settings.cache_clear()
+    liberar_operadores(monkeypatch)
     router = WhatsappRouterAgent(db_session)
 
     for text in ["novo pedido", "carrinha", "1", "Cliente Carrinha", "351912345678", "Hoje"]:
@@ -869,11 +870,7 @@ def test_cadastro_v24_corrigir_pagamento_pendente_limpa_forma(db_session, monkey
 
 
 def test_cadastro_v24_salva_mao_de_obra_false(db_session, monkeypatch):
-    for name in ("WHATSAPP_OWNER_PHONE", "AUTHORIZED_OPERATOR_PHONE",
-                 "AUTHORIZED_OPERATOR_PHONES", "OWNER_WHATSAPP"):
-        monkeypatch.setenv(name, "")
-    from app.core.config import get_settings
-    get_settings.cache_clear()
+    liberar_operadores(monkeypatch)
     router = WhatsappRouterAgent(db_session)
 
     steps = [
@@ -919,11 +916,7 @@ def test_cadastro_v24_carrinha_multipla_pergunta_mao_de_obra_uma_vez(db_session,
 
 
 def test_entrega_v24_guarda_lote_no_contexto_ate_gps(db_session, monkeypatch):
-    for name in ("WHATSAPP_OWNER_PHONE", "AUTHORIZED_OPERATOR_PHONE",
-                 "AUTHORIZED_OPERATOR_PHONES", "OWNER_WHATSAPP"):
-        monkeypatch.setenv(name, "")
-    from app.core.config import get_settings
-    get_settings.cache_clear()
+    liberar_operadores(monkeypatch)
     pedido = PedidoService(db_session).criar(
         nome_cliente="Cliente Entrega", telefone_cliente="351912345678",
         data_planejada=datetime.now(timezone.utc), valor_global="300",
@@ -965,11 +958,7 @@ def test_entrega_v24_guarda_lote_no_contexto_ate_gps(db_session, monkeypatch):
 
 
 def test_entrega_v24_carrinha_aceita_frota_zero_e_grava_so_no_gps(db_session, monkeypatch):
-    for name in ("WHATSAPP_OWNER_PHONE", "AUTHORIZED_OPERATOR_PHONE",
-                 "AUTHORIZED_OPERATOR_PHONES", "OWNER_WHATSAPP"):
-        monkeypatch.setenv(name, "")
-    from app.core.config import get_settings
-    get_settings.cache_clear()
+    liberar_operadores(monkeypatch)
     pedido = PedidoService(db_session).criar(
         nome_cliente="Cliente Carrinha Entrega", telefone_cliente="351912345678",
         data_planejada=datetime.now(timezone.utc), valor_global="300",
@@ -1332,11 +1321,7 @@ def test_service_rejeita_entrega_com_ativo_de_outro_pedido(db_session):
 
 
 def test_recolha_v24_lista_contentor_e_carrinha_com_labels(db_session, monkeypatch):
-    for name in ("WHATSAPP_OWNER_PHONE", "AUTHORIZED_OPERATOR_PHONE",
-                 "AUTHORIZED_OPERATOR_PHONES", "OWNER_WHATSAPP"):
-        monkeypatch.setenv(name, "")
-    from app.core.config import get_settings
-    get_settings.cache_clear()
+    liberar_operadores(monkeypatch)
     pedido = criar_pedido_legado_misto(
         db_session,
         nome="Cliente Recolha Hibrida",
@@ -1785,11 +1770,7 @@ def test_recolha_v24_mais_de_tres_ativos_usa_lista_interativa(db_session, monkey
 
 
 def test_despejo_v24_mapeia_indice_para_residuo_do_contexto(db_session, monkeypatch):
-    for name in ("WHATSAPP_OWNER_PHONE", "AUTHORIZED_OPERATOR_PHONE",
-                 "AUTHORIZED_OPERATOR_PHONES", "OWNER_WHATSAPP"):
-        monkeypatch.setenv(name, "")
-    from app.core.config import get_settings
-    get_settings.cache_clear()
+    liberar_operadores(monkeypatch)
     service = PedidoService(db_session)
     pedido = service.criar(
         nome_cliente="Cliente Despejo", telefone_cliente="351912345678",

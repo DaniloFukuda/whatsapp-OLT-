@@ -113,37 +113,32 @@ class WhatsappRouterAgent:
     def handle(self, message: NormalizedWhatsAppMessage) -> str:
         self._pending_messages = []
         text = (message.texto or "").strip().lower()
-        if not self._is_authorized(message.telefone):
+        decisao = self.operador_service.decidir_acesso(message.telefone)
+        if not decisao.autorizado:
             return UNAUTHORIZED_MESSAGE
-        perfil = self.operador_service.obter_perfil(message.telefone)
+        perfil = decisao.perfil
         if perfil is None:
             return UNAUTHORIZED_MESSAGE
         conversa = self._get_or_create_conversa(message.telefone)
 
         if text in MENU_COMMANDS:
-            if not self._is_authorized(message.telefone):
-                self._pending_messages = []
-                return UNAUTHORIZED_MESSAGE
             if self._has_active_flow(conversa):
                 conversa.estado_atual = "idle"
                 conversa.contexto_json = {}
                 self.db.commit()
-            return self._initial_menu(message.telefone)
+            return self._initial_menu(perfil)
 
         if text in CANCEL_COMMANDS and not (text == "0" and conversa.estado_atual == "v24_entrega_adesivo"):
-            if not self._is_authorized(message.telefone):
-                self._pending_messages = []
-                return UNAUTHORIZED_MESSAGE
             if self._has_active_flow(conversa):
                 is_v24_flow = conversa.estado_atual.startswith(PedidoV24Agent.PREFIX)
                 conversa.estado_atual = "idle"
                 conversa.contexto_json = {}
                 self.db.commit()
                 if is_v24_flow:
-                    self._queue_initial_menu(message.telefone)
+                    self._queue_initial_menu(perfil)
                     return "Operação cancelada. Nenhuma alteração foi salva."
                 return CANCELLED_MENU_MESSAGE
-            return "Nenhuma operação em andamento para cancelar.\n\n" + self._initial_menu(message.telefone)
+            return "Nenhuma operação em andamento para cancelar.\n\n" + self._initial_menu(perfil)
 
         if conversa.estado_atual == "cadastro_expirado":
             if text in {"1", "sim", "continuar"}:
@@ -167,6 +162,7 @@ class WhatsappRouterAgent:
                 self.pedido_v24_agent.handle(conversa, message),
                 conversa,
                 message.telefone,
+                perfil,
                 append_menu_on_success=True,
             )
 
@@ -179,91 +175,71 @@ class WhatsappRouterAgent:
         if text.startswith("resolver carga"):
             if not self._can_execute_command(perfil, COMMAND_FAMILY_RESOLUTION):
                 return FORBIDDEN_MESSAGE
-            return self._resolver_pendencia("carga", text, message.telefone)
+            return self._resolver_pendencia("carga", text, message.telefone, perfil)
         if text.startswith("resolver avaria"):
             if not self._can_execute_command(perfil, COMMAND_FAMILY_RESOLUTION):
                 return FORBIDDEN_MESSAGE
-            return self._resolver_pendencia("avaria", text, message.telefone)
+            return self._resolver_pendencia("avaria", text, message.telefone, perfil)
 
         if text in COMMANDS:
             family = self._classify_top_level_command(text)
             if family and not self._can_execute_command(perfil, family):
                 return FORBIDDEN_MESSAGE
-            return self._handle_operational_command(text, message.telefone)
+            return self._handle_operational_command(text, message.telefone, perfil)
 
         if conversa.estado_atual in AluguerAgent.ACTIVE_STATES:
-            return self._finalize_response(self.aluguer_agent.handle(conversa, message), conversa, message.telefone)
+            return self._finalize_response(self.aluguer_agent.handle(conversa, message), conversa, message.telefone, perfil)
         if conversa.estado_atual in GestaoAluguerAgent.ACTIVE_STATES:
             if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
                 return FORBIDDEN_MESSAGE
-            return self._finalize_response(self.gestao_aluguer_agent.handle(conversa, message), conversa, message.telefone)
+            return self._finalize_response(self.gestao_aluguer_agent.handle(conversa, message), conversa, message.telefone, perfil)
         if conversa.estado_atual in EntregaAgent.ACTIVE_STATES:
-            return self._finalize_response(self.entrega_agent.handle(conversa, message), conversa, message.telefone)
+            return self._finalize_response(self.entrega_agent.handle(conversa, message), conversa, message.telefone, perfil)
         if conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES:
             if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
                 return FORBIDDEN_MESSAGE
-            return self._finalize_response(self.renovacao_agent.handle(conversa, message), conversa, message.telefone)
+            return self._finalize_response(self.renovacao_agent.handle(conversa, message), conversa, message.telefone, perfil)
         if conversa.estado_atual in RecolhaAgent.ACTIVE_STATES:
-            return self._finalize_response(self.recolha_agent.handle(conversa, message), conversa, message.telefone)
+            return self._finalize_response(self.recolha_agent.handle(conversa, message), conversa, message.telefone, perfil)
         if conversa.estado_atual in ContentorAgent.ACTIVE_STATES:
             if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
                 return FORBIDDEN_MESSAGE
-            return self._finalize_response(self.contentor_agent.handle(conversa, message), conversa, message.telefone)
+            return self._finalize_response(self.contentor_agent.handle(conversa, message), conversa, message.telefone, perfil)
 
         if text == "5":
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
-            return self._handle_operational_command("resumo", message.telefone)
+            return self._handle_operational_command("resumo", message.telefone, perfil)
 
         if text in {"1", "novo pedido", "cadastrar pedido"}:
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
-            if text == "1" and self._is_funcionario(message.telefone):
+            if text == "1" and perfil == PerfilOperador.FUNCIONARIO:
                 return self.entrega_agent.start(conversa)
-            if not self._can_create_pedido(message.telefone):
+            if perfil == PerfilOperador.FUNCIONARIO:
                 return "Seu perfil de motorista nÃ£o possui permissÃ£o para cadastrar pedidos."
             return self.pedido_v24_agent.start_cadastro(conversa)
         if text in {"2", "confirmar entrega de contentor", "confirmar entrega do lote"}:
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
             if self.pedido_service.pedidos_pendentes_entrega():
                 return self.pedido_v24_agent.start_entrega(conversa)
             return self.entrega_agent.start(conversa)
         if text in {"3", "confirmar recolha de contentor"}:
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
             if self.pedido_service.contentores_para_recolha():
                 return self.pedido_v24_agent.start_recolha(conversa)
             return self.recolha_agent.start(conversa)
         if text in {"4", "confirmar despejo no vazadouro", "confirmar despejo"}:
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
             return self.pedido_v24_agent.start_despejo(conversa)
 
         if text == "6":
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
-            return self._handle_operational_command("resumo", message.telefone)
-        if text in ENTREGA_COMMANDS or (text == "2" and not self._is_funcionario(message.telefone)) or (
-            text == "1" and self._is_funcionario(message.telefone)
+            return self._handle_operational_command("resumo", message.telefone, perfil)
+        if text in ENTREGA_COMMANDS or (text == "2" and perfil != PerfilOperador.FUNCIONARIO) or (
+            text == "1" and perfil == PerfilOperador.FUNCIONARIO
         ):
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
             return self.entrega_agent.start(conversa)
-        if text in RECOLHA_COMMANDS or text == "3" or (text == "2" and self._is_funcionario(message.telefone)):
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
+        if text in RECOLHA_COMMANDS or text == "3" or (text == "2" and perfil == PerfilOperador.FUNCIONARIO):
             return self.recolha_agent.start(conversa)
         if text in START_COMMANDS:
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
-            if not self._can_create_pedido(message.telefone):
+            if perfil == PerfilOperador.FUNCIONARIO:
                 return "Seu perfil de motorista nao possui permissao para cadastrar pedidos. Use a opcao de recolha."
             return self.aluguer_agent.start(conversa)
         if text == "1":
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
-            if not self._can_create_pedido(message.telefone):
+            if perfil == PerfilOperador.FUNCIONARIO:
                 return self.recolha_agent.start(conversa)
             return self.aluguer_agent.start(conversa)
         if text in CONTENTOR_STATUS_COMMANDS:
@@ -275,8 +251,6 @@ class WhatsappRouterAgent:
                 return FORBIDDEN_MESSAGE
             return self.gestao_aluguer_agent.start_alteracao(conversa)
         if text == "4":
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
             return self.gestao_aluguer_agent.start_alteracao(conversa)
         if text in DELETE_COMMANDS:
             if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
@@ -289,8 +263,6 @@ class WhatsappRouterAgent:
                 return FORBIDDEN_MESSAGE
             return self.contentor_agent.start_exclusao(conversa)
         if text == "5":
-            if not self._is_authorized(message.telefone):
-                return UNAUTHORIZED_MESSAGE
             return self.gestao_aluguer_agent.start_exclusao(conversa)
         if text in RENEW_COMMANDS:
             if not self._can_execute_command(perfil, COMMAND_FAMILY_ADMIN_MUTATION):
@@ -300,9 +272,7 @@ class WhatsappRouterAgent:
             if not self._can_execute_command(perfil, COMMAND_FAMILY_OPERATIONAL_QUERY):
                 return FORBIDDEN_MESSAGE
             return self.contentor_agent.listar_status()
-        if self._is_authorized(message.telefone):
-            return self._initial_menu(message.telefone)
-        return UNAUTHORIZED_MESSAGE
+        return self._initial_menu(perfil)
 
     def _classify_top_level_command(self, text: str) -> str | None:
         if text in {"lista", "disponiveis", "contentores", "status", "resumo"}:
@@ -324,10 +294,15 @@ class WhatsappRouterAgent:
     def _can_execute_command(self, perfil: PerfilOperador, family: str) -> bool:
         return perfil in COMMAND_PROFILES[family]
 
-    def _handle_operational_command(self, command: str, telefone: str | None = None) -> str:
+    def _handle_operational_command(
+        self,
+        command: str,
+        telefone: str | None = None,
+        perfil: PerfilOperador | None = None,
+    ) -> str:
         if command == "resumo":
-            perfil = self.operador_service.obter_perfil(telefone) or PerfilOperador.FUNCIONARIO
-            self._queue_initial_menu(telefone or "")
+            perfil = perfil or self.operador_service.decidir_acesso(telefone).perfil or PerfilOperador.FUNCIONARIO
+            self._queue_initial_menu(perfil)
             return self._painel_v32(perfil)
         if command == "lista":
             return self._lista()
@@ -1189,8 +1164,16 @@ class WhatsappRouterAgent:
             f"| Resolver: resolver avaria {aluguer.id}"
         )
 
-    def _resolver_pendencia(self, tipo: str, text: str, telefone: str) -> str:
-        if not self._is_authorized(telefone):
+    def _resolver_pendencia(
+        self,
+        tipo: str,
+        text: str,
+        telefone: str,
+        perfil: PerfilOperador | None = None,
+    ) -> str:
+        if perfil is None:
+            perfil = self.operador_service.decidir_acesso(telefone).perfil
+        if perfil != PerfilOperador.GESTOR:
             return UNAUTHORIZED_MESSAGE
         raw_id = text.split()[-1]
         if not raw_id.isdigit():
@@ -1305,18 +1288,19 @@ class WhatsappRouterAgent:
         response: str,
         conversa: ConversaWhatsApp,
         telefone: str,
+        perfil: PerfilOperador,
         append_menu_on_success: bool = False,
     ) -> str:
-        response = self._detach_embedded_menu(response, telefone)
+        response = self._detach_embedded_menu(response, perfil)
         if append_menu_on_success and conversa.estado_atual == "idle" and self._is_success_response(response):
-            self._queue_initial_menu(telefone)
+            self._queue_initial_menu(perfil)
         return response
 
     def _is_success_response(self, response: str) -> bool:
         clean = (response or "").lstrip()
         return clean.startswith("✅") or clean.startswith("âœ…")
 
-    def _detach_embedded_menu(self, response: str, telefone: str) -> str:
+    def _detach_embedded_menu(self, response: str, perfil: PerfilOperador) -> str:
         markers = (
             f"🤖 Menu principal - {APP_DISPLAY_NAME}",
             f"Menu principal - {APP_DISPLAY_NAME}",
@@ -1324,15 +1308,12 @@ class WhatsappRouterAgent:
         for marker in markers:
             index = response.find(marker)
             if index > 0:
-                self._queue_initial_menu(telefone)
+                self._queue_initial_menu(perfil)
                 return response[:index].rstrip()
         return response
 
-    def _queue_initial_menu(self, telefone: str) -> None:
-        if not self._is_authorized(telefone):
-            self._pending_messages = []
-            return
-        menu = self._initial_menu(telefone)
+    def _queue_initial_menu(self, perfil: PerfilOperador) -> None:
+        menu = self._initial_menu(perfil)
         if menu not in self._pending_messages:
             self._pending_messages.append(menu)
 
@@ -1377,8 +1358,8 @@ class WhatsappRouterAgent:
     def _can_create_pedido(self, telefone: str) -> bool:
         return self.operador_service.obter_perfil(telefone) != PerfilOperador.FUNCIONARIO
 
-    def _initial_menu(self, telefone: str) -> str:
-        if self._is_funcionario(telefone):
+    def _initial_menu(self, perfil: PerfilOperador) -> str:
+        if perfil == PerfilOperador.FUNCIONARIO:
             return (
                 f"Olá, sou o Robô de Gestão de Contentores da {APP_DISPLAY_NAME}. O que vamos fazer agora?\n\n"
                 "1. Confirmar entrega de contentor\n"
