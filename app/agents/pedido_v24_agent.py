@@ -699,11 +699,12 @@ class PedidoV24Agent:
     def _confirmar_despejo_atual(self, conversa, ctx):
         contentor_id = ctx["contentor_id"]
         fotos = list(ctx.get("fotos_despejo") or [])
+        tem_divergencia = self._despejo_tem_divergencia(ctx)
         try:
             contentor = self.service.confirmar_despejo(
                 contentor_id,
                 ctx.get("residuo_efetivo"),
-                bool(ctx.get("carga_errada")),
+                tem_divergencia,
                 ctx.get("relato_carga"),
                 operador=conversa.telefone,
                 pedido_id=ctx.get("pedido_id"),
@@ -723,7 +724,7 @@ class PedidoV24Agent:
             return self._idle(conversa, str(exc))
 
         despejos = list(ctx.get("despejos") or [])
-        despejos.append({"contentor_id": contentor_id, "fotos": len(fotos), "carga_errada": bool(ctx.get("carga_errada"))})
+        despejos.append({"contentor_id": contentor_id, "fotos": len(fotos), "carga_errada": tem_divergencia})
         ctx["despejos"] = despejos
         self._limpar_despejo_atual(ctx)
         pendentes = self._despejo_pendentes_por_pedido(ctx["pedido_id"])
@@ -832,10 +833,30 @@ class PedidoV24Agent:
             + "\n".join(f"{index}. {residuo}" for index, residuo in enumerate(ctx["residuos_disponiveis"], 1)),
         )
 
+    def _despejo_tem_divergencia(self, ctx) -> bool:
+        """Determina se há divergência no despejo.
+
+        Considera divergência quando:
+        - O fluxo de conformidade marcou explicitamente carga_errada=True; OU
+        - O resíduo efetivo difere do resíduo contratado.
+        """
+        carga_errada = bool(ctx.get("carga_errada"))
+        residuo_contratado = ctx.get("residuo_contratado")
+        residuo_efetivo = ctx.get("residuo_efetivo")
+
+        residuos_diferentes = bool(
+            residuo_contratado
+            and residuo_efetivo
+            and residuo_contratado != residuo_efetivo
+        )
+
+        return carga_errada or residuos_diferentes
+
     def _despejo_confirmacao_prompt(self, ctx) -> str:
         pedido = self.service.get(ctx["pedido_id"])
         contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
         label = self._equipamento_label(contentor) if contentor else f"Ativo #{ctx['contentor_id']}"
+        tem_divergencia = self._despejo_tem_divergencia(ctx)
         linhas = [
             "Confirme o despejo deste ativo:",
             "",
@@ -844,7 +865,7 @@ class PedidoV24Agent:
             f"Fotos: {len(ctx.get('fotos_despejo') or [])}",
             f"Residuo contratado: {ctx.get('residuo_contratado')}",
             f"Residuo efetivo: {ctx.get('residuo_efetivo')}",
-            f"Divergencia: {'Sim' if ctx.get('carga_errada') else 'Nao'}",
+            f"Divergencia: {'Sim' if tem_divergencia else 'Nao'}",
         ]
         if ctx.get("carga_errada"):
             linhas.append(f"Relato: {ctx.get('relato_carga')}")
