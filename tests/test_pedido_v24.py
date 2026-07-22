@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 import app.services.operador_service as operador_service_module
+from app.agents.pedido_v24_agent import PedidoV24Agent
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.agents.whatsapp_router_agent import MAIN_MENU
 from app.integrations.whatsapp.client import send_whatsapp_message
@@ -55,6 +57,48 @@ def liberar_operadores(monkeypatch):
         ),
     )
     monkeypatch.setattr(operador_service_module, "get_settings", lambda: settings)
+
+
+@pytest.mark.parametrize(
+    ("residuo_contratado", "residuo_efetivo", "carga_errada", "esperado"),
+    [
+        pytest.param("Entulho Misto", "Entulho Limpo", False, True, id="residuos-diferentes"),
+        pytest.param("Entulho Limpo", "Entulho Limpo", False, False, id="residuos-iguais"),
+        pytest.param("Entulho Limpo", "Entulho Limpo", True, True, id="nao-corresponde"),
+        pytest.param("Entulho Limpo", "Entulho Limpo", False, False, id="conformidade-confirmada"),
+    ],
+)
+def test_despejo_v24_mensagem_e_persistencia_usam_mesma_regra_de_divergencia(
+    residuo_contratado, residuo_efetivo, carga_errada, esperado
+):
+    agent = PedidoV24Agent.__new__(PedidoV24Agent)
+    contentor = SimpleNamespace(
+        id=10,
+        numero_adesivo_contentor="501",
+        tipo_equipamento=TipoEquipamentoPedido.CONTENTOR.value,
+    )
+    agent.db = MagicMock()
+    agent.db.get.return_value = contentor
+    agent.service = MagicMock()
+    agent.service.get.return_value = SimpleNamespace(nome_cliente="Cliente Divergencia")
+    agent.service.confirmar_despejo.return_value = contentor
+    agent._despejo_pendentes_por_pedido = MagicMock(return_value=[])
+    agent._idle = MagicMock(return_value="concluido")
+    ctx = {
+        "pedido_id": 1,
+        "contentor_id": contentor.id,
+        "fotos_despejo": ["foto-despejo"],
+        "residuo_contratado": residuo_contratado,
+        "residuo_efetivo": residuo_efetivo,
+        "carga_errada": carga_errada,
+        "relato_carga": "carga nao corresponde" if carga_errada else None,
+    }
+
+    confirmacao = agent._despejo_confirmacao_prompt(ctx)
+    agent._confirmar_despejo_atual(SimpleNamespace(telefone="operador"), ctx)
+
+    assert f"Divergencia: {'Sim' if esperado else 'Nao'}" in confirmacao
+    assert agent.service.confirmar_despejo.call_args.args[2] is esperado
 
 
 def avancar_cadastro_v24_ate_mao_obra(router, *, tipo="contentor", quantidade="1", phone="351900009900"):
