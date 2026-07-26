@@ -1,8 +1,11 @@
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import re
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.agents.aluguer_agent import AluguerAgent
@@ -16,7 +19,14 @@ from app.core.config import get_settings
 from app.core.phone import normalize_phone, whatsapp_link
 from app.core.time import utcnow
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
-from app.models.aluguer import AluguerContentor, StatusAluguer, StatusCiclo, StatusEntrega, StatusResolucao
+from app.models.aluguer import (
+    AluguerContentor,
+    EventoAluguer,
+    StatusAluguer,
+    StatusCiclo,
+    StatusEntrega,
+    StatusResolucao,
+)
 from app.models.conversa import ConversaWhatsApp
 from app.models.contentor import StatusContentor
 from app.models.operador import PerfilOperador
@@ -55,6 +65,13 @@ COMMAND_FAMILY_OPERATIONAL_QUERY = "operational_query"
 COMMAND_FAMILY_COMMERCIAL_QUERY = "commercial_query"
 COMMAND_FAMILY_ADMIN_MUTATION = "admin_mutation"
 COMMAND_FAMILY_RESOLUTION = "resolution"
+RESOLUCAO_AVARIA_REVISAO_STATE = "resolucao_avaria_revisao"
+RESOLUCAO_AVARIA_CONTEXT_KEY = "_resolucao_avaria"
+RESOLUCAO_AVARIA_CONFIRMAR = {"1", "confirmar resolucao", "resolucao_avaria:confirmar"}
+RESOLUCAO_AVARIA_VOLTAR = {"2", "voltar", "resolucao_avaria:voltar"}
+RESOLUCAO_AVARIA_CANCELAR = {"3", "cancelar", "resolucao_avaria:cancelar"}
+RESOLUCAO_AVARIA_RELATO_DISPLAY_LIMIT = 1000
+RESOLUCAO_AVARIA_RELATO_TRUNCADO = "[relato reduzido para exibição]"
 COMMAND_PROFILES = {
     COMMAND_FAMILY_OPERATIONAL_QUERY: {PerfilOperador.FUNCIONARIO, PerfilOperador.GESTOR},
     COMMAND_FAMILY_COMMERCIAL_QUERY: {PerfilOperador.GESTOR},
@@ -121,6 +138,26 @@ class WhatsappRouterAgent:
             return UNAUTHORIZED_MESSAGE
         conversa = self._get_or_create_conversa(message.telefone)
 
+        if text.startswith("resolver avaria"):
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_RESOLUTION):
+                return FORBIDDEN_MESSAGE
+            return self._iniciar_revisao_avaria(conversa, text, message.telefone)
+
+        if text == "resolucao_avaria:confirmar" and conversa.estado_atual == "idle":
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_RESOLUTION):
+                return FORBIDDEN_MESSAGE
+            ultima = self._contexto_dict(conversa.contexto_json).get(
+                "_ultima_resolucao_avaria"
+            )
+            ultima = self._contexto_dict(ultima)
+            if ultima.get("id") and ultima.get("origem"):
+                return self._mensagem_avaria_ja_resolvida(ultima["origem"], int(ultima["id"]))
+
+        if conversa.estado_atual == RESOLUCAO_AVARIA_REVISAO_STATE:
+            if not self._can_execute_command(perfil, COMMAND_FAMILY_RESOLUTION):
+                return FORBIDDEN_MESSAGE
+            return self._handle_revisao_avaria(conversa, text, message.telefone)
+
         if text in MENU_COMMANDS:
             if self._has_active_flow(conversa):
                 conversa.estado_atual = "idle"
@@ -176,11 +213,6 @@ class WhatsappRouterAgent:
             if not self._can_execute_command(perfil, COMMAND_FAMILY_RESOLUTION):
                 return FORBIDDEN_MESSAGE
             return self._resolver_pendencia("carga", text, message.telefone, perfil)
-        if text.startswith("resolver avaria"):
-            if not self._can_execute_command(perfil, COMMAND_FAMILY_RESOLUTION):
-                return FORBIDDEN_MESSAGE
-            return self._resolver_pendencia("avaria", text, message.telefone, perfil)
-
         if text in COMMANDS:
             family = self._classify_top_level_command(text)
             if family and not self._can_execute_command(perfil, family):
@@ -1163,6 +1195,387 @@ class WhatsappRouterAgent:
             f"- #{aluguer.id} {aluguer.nome_cliente}: {aluguer.relato_avaria or 'sem relato'} "
             f"| Resolver: resolver avaria {aluguer.id}"
         )
+
+    def _iniciar_revisao_avaria(
+        self,
+        conversa: ConversaWhatsApp,
+        text: str,
+        telefone: str,
+    ) -> str:
+        if conversa.estado_atual == RESOLUCAO_AVARIA_REVISAO_STATE:
+            revisao_atual = self._contexto_dict(conversa.contexto_json).get(
+                RESOLUCAO_AVARIA_CONTEXT_KEY
+            )
+            revisao_atual = self._contexto_dict(revisao_atual)
+            if self._revisao_avaria_valida(revisao_atual, conversa, telefone):
+                return (
+                    "Já existe uma revisão de avaria em andamento.\n\n"
+                    + self._tela_revisao_avaria(
+                        revisao_atual["origem"],
+                        int(revisao_atual["id"]),
+                        fluxo_pausado=True,
+                    )
+                )
+            return (
+                "⚠️ Revisão inválida. Use Voltar ou Cancelar para recuperar a "
+                "conversa com segurança. Nenhuma avaria foi alterada."
+            )
+        match = re.fullmatch(r"resolver\s+avaria\s+(\d+)", text)
+        if not match:
+            return "Informe o ID interno da pendência. Ex: resolver avaria 7"
+        alvo_id = int(match.group(1))
+
+        contentor = self.db.get(PedidoContentor, alvo_id)
+        if contentor is not None:
+            if contentor.status_resolucao_avaria == StatusResolucaoPedido.RESOLVIDO.value:
+                return self._mensagem_avaria_ja_resolvida("pedido", alvo_id)
+            if (
+                not contentor.contentor_avariado
+                or contentor.status_resolucao_avaria != StatusResolucaoPedido.PENDENTE.value
+            ):
+                return "Esse equipamento não possui uma pendência de avaria ativa."
+            origem = "pedido"
+        else:
+            aluguer = self.db.get(AluguerContentor, alvo_id)
+            if aluguer is None or aluguer.is_deleted:
+                return "Pendência de avaria não encontrada."
+            if aluguer.status_resolucao_avaria == StatusResolucao.RESOLVIDO.value:
+                return self._mensagem_avaria_ja_resolvida("legado", alvo_id)
+            if (
+                not aluguer.contentor_avariado
+                or aluguer.status_resolucao_avaria != StatusResolucao.PENDENTE.value
+            ):
+                return "Esse equipamento não possui uma pendência de avaria ativa."
+            origem = "legado"
+
+        contexto_anterior = self._contexto_dict(conversa.contexto_json)
+        estado_anterior = (
+            conversa.estado_atual
+            if isinstance(conversa.estado_atual, str) and conversa.estado_atual
+            else "idle"
+        )
+        revisao = {
+            "id": alvo_id,
+            "origem": origem,
+            "estado_anterior": estado_anterior,
+            "contexto_anterior": deepcopy(contexto_anterior),
+            "iniciada_em": utcnow().isoformat(),
+            "gestor": telefone,
+        }
+        conversa.estado_atual = RESOLUCAO_AVARIA_REVISAO_STATE
+        conversa.contexto_json = {RESOLUCAO_AVARIA_CONTEXT_KEY: revisao}
+        try:
+            # Decisão arquitetural: este commit persiste somente a pausa e o
+            # contexto conversacional. A avaria e sua auditoria só mudam após
+            # confirmação explícita, em uma transação posterior.
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            return "⚠️ Não foi possível iniciar a revisão da avaria. Nenhuma alteração foi realizada."
+        return self._tela_revisao_avaria(origem, alvo_id, fluxo_pausado=True)
+
+    def _handle_revisao_avaria(
+        self,
+        conversa: ConversaWhatsApp,
+        text: str,
+        telefone: str,
+    ) -> str:
+        contexto = self._contexto_dict(conversa.contexto_json)
+        revisao = self._contexto_dict(contexto.get(RESOLUCAO_AVARIA_CONTEXT_KEY))
+        revisao_valida = self._revisao_avaria_valida(revisao, conversa, telefone)
+        if text in RESOLUCAO_AVARIA_VOLTAR:
+            if not revisao_valida:
+                return self._cancelar_revisao_invalida(conversa)
+            if not self._restaurar_fluxo_anterior(conversa, revisao):
+                return (
+                    "⚠️ Não foi possível voltar agora. A revisão permanece ativa "
+                    "e nenhuma avaria foi alterada."
+                )
+            return "Revisão encerrada sem alterações. O fluxo anterior foi retomado."
+        if text in RESOLUCAO_AVARIA_CANCELAR:
+            if not revisao_valida:
+                return self._cancelar_revisao_invalida(conversa)
+            if not self._restaurar_fluxo_anterior(conversa, revisao):
+                return (
+                    "⚠️ Não foi possível cancelar agora. A revisão permanece ativa "
+                    "e nenhuma avaria foi alterada."
+                )
+            return "Resolução cancelada. A pendência foi preservada e o fluxo anterior foi retomado."
+        if not revisao_valida:
+            return (
+                "⚠️ Revisão inválida. Use Voltar ou Cancelar para recuperar a "
+                "conversa com segurança. Nenhuma avaria foi alterada."
+            )
+
+        alvo_id = revisao["id"]
+        origem = revisao["origem"]
+        if text in RESOLUCAO_AVARIA_CONFIRMAR:
+            if not self._alvo_avaria_compativel(origem, alvo_id):
+                return (
+                    "⚠️ A pendência não está disponível para confirmação. "
+                    "Nenhuma avaria foi alterada."
+                )
+            return self._confirmar_resolucao_avaria(conversa, origem, alvo_id, telefone)
+        return self._tela_revisao_avaria(origem, alvo_id, fluxo_pausado=True)
+
+    @staticmethod
+    def _contexto_dict(valor: object) -> dict:
+        return valor if isinstance(valor, dict) else {}
+
+    def _revisao_avaria_valida(
+        self,
+        revisao: dict,
+        conversa: ConversaWhatsApp,
+        telefone: str,
+    ) -> bool:
+        alvo_id = revisao.get("id")
+        return (
+            isinstance(alvo_id, int)
+            and not isinstance(alvo_id, bool)
+            and alvo_id > 0
+            and revisao.get("origem") in {"pedido", "legado"}
+            and isinstance(revisao.get("estado_anterior"), str)
+            and bool(revisao.get("estado_anterior"))
+            and isinstance(revisao.get("contexto_anterior"), dict)
+            and isinstance(revisao.get("gestor"), str)
+            and revisao.get("gestor") == telefone
+            and conversa.telefone == telefone
+        )
+
+    def _alvo_avaria_compativel(self, origem: str, alvo_id: int) -> bool:
+        if origem == "pedido":
+            alvo = self.db.get(PedidoContentor, alvo_id)
+            return bool(
+                alvo
+                and alvo.contentor_avariado
+                and alvo.status_resolucao_avaria
+                in {
+                    StatusResolucaoPedido.PENDENTE.value,
+                    StatusResolucaoPedido.RESOLVIDO.value,
+                }
+            )
+        alvo = self.db.get(AluguerContentor, alvo_id)
+        return bool(
+            alvo
+            and not alvo.is_deleted
+            and alvo.contentor_avariado
+            and alvo.status_resolucao_avaria
+            in {StatusResolucao.PENDENTE.value, StatusResolucao.RESOLVIDO.value}
+        )
+
+    def _cancelar_revisao_invalida(self, conversa: ConversaWhatsApp) -> str:
+        conversa.estado_atual = "idle"
+        conversa.contexto_json = {}
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            return (
+                "⚠️ Não foi possível recuperar a conversa agora. A revisão "
+                "permanece ativa e nenhuma avaria foi alterada."
+            )
+        return (
+            "Revisão inválida cancelada com segurança. "
+            "Nenhuma avaria foi alterada."
+        )
+
+    def _restaurar_fluxo_anterior(
+        self,
+        conversa: ConversaWhatsApp,
+        revisao: dict,
+    ) -> bool:
+        conversa.estado_atual = revisao.get("estado_anterior") or "idle"
+        conversa.contexto_json = deepcopy(revisao["contexto_anterior"])
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            return False
+        return True
+
+    def _tela_revisao_avaria(
+        self,
+        origem: str,
+        alvo_id: int,
+        *,
+        fluxo_pausado: bool,
+    ) -> str:
+        if origem == "pedido":
+            contentor = self.db.get(PedidoContentor, alvo_id)
+            if contentor is None:
+                return "Pendência de avaria não encontrada."
+            cliente = contentor.pedido.nome_cliente
+            pedido = str(contentor.pedido_id)
+            equipamento = str(contentor.numero_adesivo_contentor or "não informado")
+            relato = self._relato_avaria_para_exibicao(contentor.relato_avaria)
+            ocorrencia = contentor.recolha_data_hora
+            estado = contentor.status_resolucao_avaria
+        else:
+            aluguer = self.db.get(AluguerContentor, alvo_id)
+            if aluguer is None:
+                return "Pendência de avaria não encontrada."
+            cliente = aluguer.nome_cliente
+            pedido = "registro legado"
+            equipamento = str(aluguer.numero_contentor or "não informado")
+            relato = self._relato_avaria_para_exibicao(aluguer.relato_avaria)
+            ocorrencia = aluguer.recolha_data_hora
+            estado = aluguer.status_resolucao_avaria
+
+        data_ocorrencia = (
+            self._to_local_datetime(ocorrencia).strftime("%d/%m/%Y %H:%M")
+            if ocorrencia
+            else "não disponível"
+        )
+        aviso = (
+            "O fluxo anterior está pausado. Confirmar encerrará esse fluxo; "
+            "Voltar ou Cancelar o retomará sem alterações."
+            if fluxo_pausado
+            else "Nenhum fluxo operacional anterior estava ativo."
+        )
+        return "\n".join(
+            [
+                "Revisão de resolução de avaria",
+                "",
+                f"Cliente: {cliente}",
+                f"Pedido: {pedido}",
+                f"Equipamento Nº {equipamento}",
+                f"Relato: {relato}",
+                f"Ocorrência: {data_ocorrencia}",
+                f"Estado atual: {estado}",
+                "Ação proposta: marcar a pendência como resolvida.",
+                "",
+                aviso,
+                "",
+                "1. Confirmar resolução",
+                "2. Voltar",
+                "3. Cancelar",
+            ]
+        )
+
+    @staticmethod
+    def _relato_avaria_para_exibicao(relato: object) -> str:
+        if not isinstance(relato, str) or not relato.strip():
+            return "sem relato"
+        if len(relato) <= RESOLUCAO_AVARIA_RELATO_DISPLAY_LIMIT:
+            return relato
+        marcador = "\n" + RESOLUCAO_AVARIA_RELATO_TRUNCADO
+        limite = RESOLUCAO_AVARIA_RELATO_DISPLAY_LIMIT - len(marcador)
+        return relato[:limite].rstrip() + marcador
+
+    def _confirmar_resolucao_avaria(
+        self,
+        conversa: ConversaWhatsApp,
+        origem: str,
+        alvo_id: int,
+        telefone: str,
+    ) -> str:
+        try:
+            if origem == "pedido":
+                result = self.db.execute(
+                    update(PedidoContentor)
+                    .where(PedidoContentor.id == alvo_id)
+                    .where(
+                        PedidoContentor.status_resolucao_avaria
+                        == StatusResolucaoPedido.PENDENTE.value
+                    )
+                    .values(status_resolucao_avaria=StatusResolucaoPedido.RESOLVIDO.value)
+                )
+                if result.rowcount == 0:
+                    self.db.expire_all()
+                    contentor = self.db.get(PedidoContentor, alvo_id)
+                    if (
+                        contentor
+                        and contentor.status_resolucao_avaria
+                        == StatusResolucaoPedido.RESOLVIDO.value
+                    ):
+                        self._finalizar_conversa_resolucao(conversa, origem, alvo_id)
+                        self.db.commit()
+                        return self._mensagem_avaria_ja_resolvida(origem, alvo_id)
+                    self.db.rollback()
+                    return "⚠️ A pendência não está mais disponível para resolução."
+                self.db.expire_all()
+                contentor = self.db.get(PedidoContentor, alvo_id)
+                self._registrar_auditoria_avaria_atual(contentor, telefone)
+                equipamento = str(contentor.numero_adesivo_contentor or "não informado")
+            else:
+                result = self.db.execute(
+                    update(AluguerContentor)
+                    .where(AluguerContentor.id == alvo_id)
+                    .where(
+                        AluguerContentor.status_resolucao_avaria
+                        == StatusResolucao.PENDENTE.value
+                    )
+                    .values(status_resolucao_avaria=StatusResolucao.RESOLVIDO.value)
+                )
+                if result.rowcount == 0:
+                    self.db.expire_all()
+                    aluguer = self.db.get(AluguerContentor, alvo_id)
+                    if aluguer and aluguer.status_resolucao_avaria == StatusResolucao.RESOLVIDO.value:
+                        self._finalizar_conversa_resolucao(conversa, origem, alvo_id)
+                        self.db.commit()
+                        return self._mensagem_avaria_ja_resolvida(origem, alvo_id)
+                    self.db.rollback()
+                    return "⚠️ A pendência não está mais disponível para resolução."
+                self.db.expire_all()
+                aluguer = self.db.get(AluguerContentor, alvo_id)
+                self._registrar_auditoria_avaria_legada(aluguer, telefone)
+                equipamento = str(aluguer.numero_contentor or "não informado")
+
+            self._finalizar_conversa_resolucao(conversa, origem, alvo_id)
+            self.db.commit()
+            return f"Pendência de avaria do Equipamento Nº {equipamento} resolvida."
+        except Exception:
+            self.db.rollback()
+            return "⚠️ Não foi possível confirmar a resolução. Nenhuma alteração foi realizada."
+
+    def _registrar_auditoria_avaria_atual(
+        self,
+        contentor: PedidoContentor,
+        telefone: str,
+    ) -> None:
+        contentor.avaria_estado_anterior = StatusResolucaoPedido.PENDENTE.value
+        contentor.avaria_resolvida_em = utcnow()
+        contentor.avaria_resolvida_por = telefone
+
+    def _registrar_auditoria_avaria_legada(
+        self,
+        aluguer: AluguerContentor,
+        telefone: str,
+    ) -> None:
+        self.db.add(
+            EventoAluguer(
+                aluguer_id=aluguer.id,
+                tipo="pendencia_avaria_resolvida",
+                descricao=(
+                    f"Avaria do equipamento {aluguer.numero_contentor} resolvida por {telefone}; "
+                    "estado anterior PENDENTE; estado final RESOLVIDO"
+                ),
+            )
+        )
+
+    def _finalizar_conversa_resolucao(
+        self,
+        conversa: ConversaWhatsApp,
+        origem: str,
+        alvo_id: int,
+    ) -> None:
+        conversa.estado_atual = "idle"
+        conversa.contexto_json = {
+            "_ultima_resolucao_avaria": {"origem": origem, "id": alvo_id}
+        }
+
+    def _mensagem_avaria_ja_resolvida(self, origem: str, alvo_id: int) -> str:
+        if origem == "pedido":
+            contentor = self.db.get(PedidoContentor, alvo_id)
+            equipamento = (
+                str(contentor.numero_adesivo_contentor or "não informado")
+                if contentor
+                else "não informado"
+            )
+        else:
+            aluguer = self.db.get(AluguerContentor, alvo_id)
+            equipamento = str(aluguer.numero_contentor or "não informado") if aluguer else "não informado"
+        return f"A avaria do Equipamento Nº {equipamento} já está resolvida."
 
     def _resolver_pendencia(
         self,

@@ -53,6 +53,9 @@ PEDIDO_CONTENTORES_COLUMNS = {
     "precisa_mao_de_obra": "BOOLEAN DEFAULT 0 NOT NULL",
     "despejo_feito_por": "TEXT",
     "despejo_data_hora": "DATETIME",
+    "avaria_estado_anterior": "TEXT",
+    "avaria_resolvida_em": "DATETIME",
+    "avaria_resolvida_por": "TEXT",
 }
 
 

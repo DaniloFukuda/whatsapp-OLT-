@@ -240,6 +240,17 @@ def _buttons_for_body(body: str) -> list[dict[str, str]]:
 def _options_for_body(body: str) -> list[dict[str, str]]:
     normalized = _normalize_button_text(body)
     if (
+        "revisao de resolucao de avaria" in normalized
+        and "confirmar resolucao" in normalized
+        and "voltar" in normalized
+        and "cancelar" in normalized
+    ):
+        return [
+            {"id": "resolucao_avaria:confirmar", "title": "Confirmar resolução"},
+            {"id": "resolucao_avaria:voltar", "title": "Voltar"},
+            {"id": "resolucao_avaria:cancelar", "title": "Cancelar"},
+        ]
+    if (
         ("mao de obra" in normalized or "pessoal para carregamento" in normalized)
         and "1. sim" in normalized
         and "2. nao" in normalized
