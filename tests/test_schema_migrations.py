@@ -182,7 +182,8 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
                 """
                 SELECT numero_adesivo_contentor, residuo_contratado, tipo_equipamento,
                        horario_agendado, precisa_mao_de_obra, despejo_feito_por,
-                       despejo_data_hora
+                       despejo_data_hora, avaria_estado_anterior,
+                       avaria_resolvida_em, avaria_resolvida_por
                 FROM pedido_contentores WHERE id = 1
                 """
             )
@@ -246,6 +247,9 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
         "precisa_mao_de_obra",
         "despejo_feito_por",
         "despejo_data_hora",
+        "avaria_estado_anterior",
+        "avaria_resolvida_em",
+        "avaria_resolvida_por",
     } <= pedido_contentores_columns
     assert {"precisa_mao_de_obra"} <= pedidos_columns
     assert contentor_row["is_deleted"] == 0
@@ -258,5 +262,8 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
     assert pedido_contentor_row["precisa_mao_de_obra"] == 0
     assert pedido_contentor_row["despejo_feito_por"] is None
     assert pedido_contentor_row["despejo_data_hora"] is None
+    assert pedido_contentor_row["avaria_estado_anterior"] is None
+    assert pedido_contentor_row["avaria_resolvida_em"] is None
+    assert pedido_contentor_row["avaria_resolvida_por"] is None
     assert "quantidade_contentores" not in columns
     assert row_count == 1

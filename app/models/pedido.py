@@ -105,6 +105,11 @@ class PedidoContentor(Base):
     status_resolucao_avaria: Mapped[str] = mapped_column(
         String(20), default=StatusResolucaoPedido.NAO_APLICA.value, nullable=False
     )
+    avaria_estado_anterior: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    avaria_resolvida_em: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    avaria_resolvida_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
     status_ciclo: Mapped[str] = mapped_column(
         String(20), default=StatusCicloPedido.EM_ANDAMENTO.value, nullable=False
     )

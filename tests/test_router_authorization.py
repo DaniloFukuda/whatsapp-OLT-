@@ -250,7 +250,7 @@ def test_employee_cannot_access_commercial_queries(auth_id, command, db_session,
         ("OLT-AUTH-030", "alterar contentor", "alter_contentor", "contentor_alteracao_aguardando_item"),
         ("OLT-AUTH-031", "remover", "delete_contentor", "contentor_exclusao_aguardando_item"),
         ("OLT-AUTH-032", "resolver carga 41", "resolve", "idle"),
-        ("OLT-AUTH-033", "resolver avaria 42", "resolve", "idle"),
+        ("OLT-AUTH-033", "resolver avaria 42", "review_avaria", "idle"),
     ],
     ids=lambda value: value if str(value).startswith("OLT-AUTH") else None,
 )
@@ -278,17 +278,25 @@ def test_manager_keeps_administrative_operations(
         router.contentor_agent.start_alteracao_status = start
     elif target == "delete_contentor":
         router.contentor_agent.start_exclusao = start
-    else:
+    elif target == "resolve":
         router._resolver_pendencia = MagicMock(return_value="PENDÊNCIA RESOLVIDA")
+    else:
+        router._iniciar_revisao_avaria = MagicMock(return_value="REVISÃO DE AVARIA INICIADA")
 
     response = router.handle(message(command, MANAGER_PHONE))
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone=MANAGER_PHONE).one()
 
     assert auth_id
-    assert response in {"OPERAÇÃO ADMINISTRATIVA INICIADA", "PENDÊNCIA RESOLVIDA"}
+    assert response in {
+        "OPERAÇÃO ADMINISTRATIVA INICIADA",
+        "PENDÊNCIA RESOLVIDA",
+        "REVISÃO DE AVARIA INICIADA",
+    }
     assert conversa.estado_atual == expected_state
     if target == "resolve":
         router._resolver_pendencia.assert_called_once()
+    elif target == "review_avaria":
+        router._iniciar_revisao_avaria.assert_called_once()
     else:
         called.assert_called_once_with(command)
 
