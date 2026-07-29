@@ -282,6 +282,99 @@ def test_service_lista_ativos_por_status_operacional(db_session):
     assert segundo.id in recolha_ids
 
 
+def test_service_exclui_carrinha_de_todas_as_listas_operacionais(db_session):
+    service = PedidoService(db_session)
+    pedido = service.criar(
+        nome_cliente="Cliente Carrinha Fora dos Fluxos",
+        telefone_cliente="351912345678",
+        data_planejada=datetime.now(timezone.utc),
+        valor_global="180",
+        pago=False,
+        forma_pagamento=None,
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        itens=[
+            {
+                "tipo_equipamento": TipoEquipamentoPedido.CARRINHA.value,
+                "residuo_contratado": "Entulho Limpo",
+                "horario_agendado": "10:00",
+            }
+        ],
+    )
+    carrinha = pedido.contentores[0]
+
+    assert pedido not in service.pedidos_pendentes_entrega()
+
+    carrinha.status_entrega = StatusEntregaPedido.ENTREGUE.value
+    db_session.commit()
+    assert carrinha not in service.contentores_para_recolha()
+    assert pedido not in service.pedidos_para_recolha()
+
+    carrinha.status_recolha = StatusRecolhaPedido.RECOLHIDO.value
+    db_session.commit()
+    assert carrinha not in service.contentores_para_despejo()
+    assert carrinha not in service.contentores_pendentes_despejo(pedido.id)
+    assert pedido not in service.pedidos_para_despejo()
+
+
+@pytest.mark.parametrize("operacao", ["recolha", "despejo"])
+def test_service_rejeita_mutacao_direta_de_carrinha_sem_commit(
+    db_session, monkeypatch, operacao
+):
+    service = PedidoService(db_session)
+    pedido = service.criar(
+        nome_cliente="Cliente Carrinha Protegida",
+        telefone_cliente="351912345678",
+        data_planejada=datetime.now(timezone.utc),
+        valor_global="180",
+        pago=False,
+        forma_pagamento=None,
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        itens=[
+            {
+                "tipo_equipamento": TipoEquipamentoPedido.CARRINHA.value,
+                "residuo_contratado": "Entulho Limpo",
+                "horario_agendado": "10:00",
+            }
+        ],
+    )
+    carrinha = pedido.contentores[0]
+    carrinha.status_entrega = StatusEntregaPedido.ENTREGUE.value
+    if operacao == "despejo":
+        carrinha.status_recolha = StatusRecolhaPedido.RECOLHIDO.value
+    db_session.commit()
+
+    commit_spy = MagicMock(wraps=db_session.commit)
+    monkeypatch.setattr(db_session, "commit", commit_spy)
+
+    with pytest.raises(ValueError, match="apenas contentores"):
+        if operacao == "recolha":
+            service.confirmar_recolha(
+                carrinha.id,
+                "motorista",
+                True,
+                "Avaria que não pode ser registrada",
+                ["foto-carrinha"],
+            )
+        else:
+            service.confirmar_despejo(
+                carrinha.id,
+                "Entulho Limpo",
+                operador="motorista",
+                fotos=["foto-carrinha"],
+            )
+
+    assert commit_spy.call_count == 0
+    assert carrinha.numero_adesivo_contentor is None
+    assert carrinha.fotos == []
+    assert carrinha.contentor_avariado is False
+    assert carrinha.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
+    assert carrinha.despejo_data_hora is None
+
+
 def test_fluxo_cadastro_v24_cria_lote(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     router = WhatsappRouterAgent(db_session)
@@ -781,6 +874,90 @@ def criar_pedido_legado_misto(
     return pedido
 
 
+def test_entrega_direta_mista_rejeita_todo_lote_sem_mutacao(
+    db_session, monkeypatch
+):
+    pedido = criar_pedido_legado_misto(
+        db_session,
+        nome="Cliente Lote Misto Protegido",
+        telefone="351912345678",
+        data_planejada=datetime.now(timezone.utc),
+        pago=True,
+    )
+    contentor, carrinha = pedido.contentores
+    service = PedidoService(db_session)
+    commit_spy = MagicMock(wraps=db_session.commit)
+    monkeypatch.setattr(db_session, "commit", commit_spy)
+
+    with pytest.raises(
+        ValueError, match="Esta operação aceita apenas contentores"
+    ):
+        service.confirmar_entrega_lote_transacional(
+            pedido.id,
+            "motorista",
+            38.7,
+            -9.1,
+            "Portão azul",
+            [
+                {
+                    "contentor_id": contentor.id,
+                    "numero_adesivo": "401",
+                    "fotos": ["foto-contentor-401"],
+                },
+                {
+                    "contentor_id": carrinha.id,
+                    "numero_adesivo": "77",
+                    "fotos": ["foto-carrinha-77"],
+                },
+            ],
+        )
+
+    assert commit_spy.call_count == 0
+    for item in (contentor, carrinha):
+        assert item.status_entrega == StatusEntregaPedido.PENDENTE.value
+        assert item.numero_adesivo_contentor is None
+        assert item.entrega_feita_por is None
+        assert item.entrega_latitude is None
+        assert item.entrega_longitude is None
+        assert item.entrega_ponto_referencia is None
+        assert item.entrega_data_hora is None
+        assert item.fotos == []
+    assert db_session.query(ContentorFoto).count() == 0
+
+    db_session.rollback()
+    db_session.expire_all()
+    contentor_persistido = db_session.get(PedidoContentor, contentor.id)
+    carrinha_persistida = db_session.get(PedidoContentor, carrinha.id)
+    for item in (contentor_persistido, carrinha_persistida):
+        assert item.status_entrega == StatusEntregaPedido.PENDENTE.value
+        assert item.numero_adesivo_contentor is None
+        assert item.entrega_feita_por is None
+        assert item.entrega_latitude is None
+        assert item.entrega_longitude is None
+        assert item.entrega_ponto_referencia is None
+        assert item.entrega_data_hora is None
+        assert item.fotos == []
+
+    service.confirmar_entrega_lote_transacional(
+        pedido.id,
+        "motorista",
+        38.7,
+        -9.1,
+        "Portão azul",
+        [
+            {
+                "contentor_id": contentor.id,
+                "numero_adesivo": "401",
+                "fotos": ["foto-contentor-401"],
+            }
+        ],
+    )
+    assert contentor_persistido.status_entrega == StatusEntregaPedido.ENTREGUE.value
+    assert carrinha_persistida.status_entrega == StatusEntregaPedido.PENDENTE.value
+    assert commit_spy.call_count == 0
+    db_session.rollback()
+
+
 def test_service_rejeita_carrinha_sem_horario_valido(db_session):
     service = PedidoService(db_session)
 
@@ -1001,7 +1178,7 @@ def test_entrega_v24_guarda_lote_no_contexto_ate_gps(db_session, monkeypatch):
     assert router.pop_pending_messages() == [MAIN_MENU]
 
 
-def test_entrega_v24_carrinha_aceita_frota_zero_e_grava_so_no_gps(db_session, monkeypatch):
+def test_entrega_v24_carrinha_nao_aparece_no_fluxo_de_contentor(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     pedido = PedidoService(db_session).criar(
         nome_cliente="Cliente Carrinha Entrega", telefone_cliente="351912345678",
@@ -1019,31 +1196,21 @@ def test_entrega_v24_carrinha_aceita_frota_zero_e_grava_so_no_gps(db_session, mo
     )
     router = WhatsappRouterAgent(db_session)
 
-    router.handle(msg("2"))
-    prompt = router.handle(msg("1"))
-    assert "frota da carrinha" in prompt
-    foto_prompt = router.handle(msg("0"))
-    assert "Carrinha sem frota" in foto_prompt
-    router.handle(msg(kind="image", media="foto-carrinha"))
-    router.handle(msg("2"))
+    response = router.handle(msg("2"))
+
     db_session.refresh(pedido.contentores[0])
+    conversa = db_session.query(ConversaWhatsApp).one()
+    assert "nao existem pedidos pendentes de entrega" in response.lower()
+    assert "Cliente Carrinha Entrega" not in response
+    assert conversa.estado_atual == "idle"
     assert pedido.contentores[0].numero_adesivo_contentor is None
+    assert pedido.contentores[0].status_entrega == StatusEntregaPedido.PENDENTE.value
+    assert pedido.contentores[0].entrega_latitude is None
+    assert pedido.contentores[0].entrega_longitude is None
     assert db_session.query(ContentorFoto).count() == 0
 
-    router.handle(msg(kind="location", lat=38.7, lon=-9.1))
-    router.handle(msg("Sim"))
-    confirmacao = router.handle(msg("Portao azul"))
-    assert "Confirmar entrega" in confirmacao
-    response = router.handle(msg("1"))
 
-    db_session.refresh(pedido.contentores[0])
-    assert "Entrega confirmada com sucesso" in response
-    assert pedido.contentores[0].numero_adesivo_contentor is None
-    assert pedido.contentores[0].status_entrega == StatusEntregaPedido.ENTREGUE.value
-    assert db_session.query(ContentorFoto).filter_by(tipo_foto=TipoFoto.ENTREGA.value).count() == 1
-
-
-def test_entrega_v24_duas_carrinhas_separa_frota_e_fotos(db_session, monkeypatch):
+def test_entrega_direta_de_carrinhas_e_rejeitada_sem_mutacao(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     pedido = PedidoService(db_session).criar(
         nome_cliente="Cliente Duas Carrinhas",
@@ -1060,41 +1227,40 @@ def test_entrega_v24_duas_carrinhas_separa_frota_e_fotos(db_session, monkeypatch
             {"tipo_equipamento": "CARRINHA", "residuo_contratado": "Entulho Misto", "horario_agendado": "11:00"},
         ],
     )
-    router = WhatsappRouterAgent(db_session)
+    service = PedidoService(db_session)
+    commit_spy = MagicMock(wraps=db_session.commit)
+    monkeypatch.setattr(db_session, "commit", commit_spy)
 
-    lista = router.handle(msg("2"))
-    assert "Cliente Duas Carrinhas" in lista
-    assert "Carrinha x2" in lista
-    router.handle(msg("1"))
-    router.handle(msg("0"))
-    router.handle(msg(kind="image", media="foto-carrinha-1a"))
-    router.handle(msg("1"))
-    router.handle(msg(kind="image", media="foto-carrinha-1b"))
-    proximo = router.handle(msg("2"))
-    assert "Contentor 1 de 2 registrado." in proximo
-    assert "Selecione o pedido" not in proximo
-    router.handle(msg("77"))
-    router.handle(msg(kind="image", media="foto-carrinha-2"))
-    router.handle(msg("2"))
-    invalid_gps = router.handle(msg("https://www.google.com/maps?q=38.7,-9.1"))
-    assert "localização nativa do WhatsApp" in invalid_gps
-    router.handle(msg(kind="location", lat=38.7, lon=-9.1))
-    router.handle(msg("entrega_referencia:sim"))
-    confirmacao = router.handle(msg("Portao norte"))
-    assert "fotos: 2" in confirmacao
-    assert "fotos: 1" in confirmacao
-    response = router.handle(msg("1"))
+    with pytest.raises(ValueError, match="apenas contentores"):
+        service.confirmar_entrega_lote(
+            pedido.id,
+            "motorista",
+            38.7,
+            -9.1,
+            None,
+            [
+                {
+                    "contentor_id": pedido.contentores[0].id,
+                    "numero_adesivo": "0",
+                    "fotos": ["foto-carrinha-1"],
+                },
+                {
+                    "contentor_id": pedido.contentores[1].id,
+                    "numero_adesivo": "77",
+                    "fotos": ["foto-carrinha-2"],
+                },
+            ],
+        )
 
-    db_session.refresh(pedido.contentores[0])
-    db_session.refresh(pedido.contentores[1])
-    assert "Entrega confirmada com sucesso" in response
-    assert pedido.contentores[0].numero_adesivo_contentor is None
-    assert pedido.contentores[1].numero_adesivo_contentor == "77"
-    assert [foto.url_midia for foto in pedido.contentores[0].fotos] == [
-        "foto-carrinha-1a",
-        "foto-carrinha-1b",
-    ]
-    assert [foto.url_midia for foto in pedido.contentores[1].fotos] == ["foto-carrinha-2"]
+    assert commit_spy.call_count == 0
+    assert all(
+        item.status_entrega == StatusEntregaPedido.PENDENTE.value
+        and item.numero_adesivo_contentor is None
+        and item.entrega_latitude is None
+        and item.entrega_longitude is None
+        and item.fotos == []
+        for item in pedido.contentores
+    )
 
 
 def test_entrega_v24_selecao_de_pedido_usa_lista_com_cliente_inteiro(db_session, monkeypatch):
@@ -1367,7 +1533,7 @@ def test_service_rejeita_entrega_com_ativo_de_outro_pedido(db_session):
         )
 
 
-def test_recolha_v24_lista_contentor_e_carrinha_com_labels(db_session, monkeypatch):
+def test_recolha_v24_lista_apenas_contentor_em_pedido_legado_misto(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     pedido = criar_pedido_legado_misto(
         db_session,
@@ -1378,24 +1544,37 @@ def test_recolha_v24_lista_contentor_e_carrinha_com_labels(db_session, monkeypat
         pago=True,
         carrinha_horario="14:00",
     )
-    service = PedidoService(db_session)
-    service.confirmar_entrega_lote(
-        pedido.id,
-        "motorista",
-        38.7,
-        -9.1,
-        None,
-        [
-            {"contentor_id": pedido.contentores[0].id, "numero_adesivo": "44", "fotos": ["foto-44"]},
-            {"contentor_id": pedido.contentores[1].id, "numero_adesivo": "0", "fotos": ["foto-carrinha"]},
-        ],
-    )
     router = WhatsappRouterAgent(db_session)
 
-    response = router.handle(msg("3"))
+    entrega = router.handle(msg("2"))
+    assert "Quantidade: 1 equipamento" in entrega
+    assert "Carrinha" not in entrega
+    router.handle(msg("cancelar"))
 
-    assert "📦 Contentor 44" in response
-    assert "🚛 Carrinha (14:00)" in response
+    entregar_pedido(
+        pedido,
+        db_session,
+        datetime.now(timezone.utc),
+        ["44", "0"],
+    )
+
+    recolha = router.handle(msg("3"))
+
+    assert "📦 Contentor 44" in recolha
+    assert "Carrinha" not in recolha
+    assert pedido.contentores[1].status_recolha == StatusRecolhaPedido.PENDENTE.value
+
+    router.handle(msg("cancelar"))
+    for item in pedido.contentores:
+        item.status_recolha = StatusRecolhaPedido.RECOLHIDO.value
+    db_session.commit()
+
+    despejo_pedidos = router.handle(msg("4"))
+    despejo_ativos = router.handle(msg("1"))
+    assert "1 Contentor(es)" in despejo_pedidos
+    assert "Carrinha" not in despejo_pedidos
+    assert "Contentor 44" in despejo_ativos
+    assert "Carrinha" not in despejo_ativos
 
 
 def test_recolha_v24_confirma_todos_ativos_do_pedido_em_loop(db_session, monkeypatch):

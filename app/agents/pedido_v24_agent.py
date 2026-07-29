@@ -319,7 +319,13 @@ class PedidoV24Agent:
             pedido = self.service.get(pedido_id) if pedido_id else None
             if not pedido:
                 return "Selecione um pedido da lista."
-            pendentes = [c.id for c in pedido.contentores if c.status_entrega == "PENDENTE"]
+            pendentes = [
+                contentor.id
+                for contentor in pedido.contentores
+                if contentor.tipo_equipamento
+                == TipoEquipamentoPedido.CONTENTOR.value
+                and contentor.status_entrega == "PENDENTE"
+            ]
             if not pendentes:
                 return self._idle(conversa, "Esse pedido já não possui ativos pendentes de entrega.")
             ctx.update({"pedido_id": pedido.id, "contentores": pendentes, "indice": 0, "entregas": []})
@@ -329,23 +335,26 @@ class PedidoV24Agent:
                 return "Digite o número físico do equipamento para continuar."
             number = raw.strip()
             contentor = self.db.get(PedidoContentor, ctx["contentores"][ctx["indice"]])
+            if (
+                contentor
+                and contentor.tipo_equipamento
+                != TipoEquipamentoPedido.CONTENTOR.value
+            ):
+                return self._idle(
+                    conversa, "Esta operação aceita apenas contentores."
+                )
             if not contentor or contentor.status_entrega != "PENDENTE":
                 return self._idle(conversa, "Esse ativo já não está pendente. Reinicie a entrega.")
-            is_carrinha = contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
-            if is_carrinha:
-                if not re.fullmatch(r"\d{1,6}", number):
-                    return "Informe o número da frota da carrinha ou 0 se não houver."
-            elif not re.fullmatch(r"\d{1,6}", number) or number == "0":
+            if not re.fullmatch(r"\d{1,6}", number) or number == "0":
                 return "Informe somente o número visível no contentor."
             if number != "0" and number in [str(item.get("numero_adesivo")) for item in ctx.get("entregas") or []]:
                 return "Esse adesivo ja foi informado neste lote."
-            if not is_carrinha:
-                duplicate = self.db.query(PedidoContentor).filter(
-                    PedidoContentor.numero_adesivo_contentor == number,
-                    PedidoContentor.status_ciclo == "EM_ANDAMENTO",
-                ).first()
-                if duplicate:
-                    return "Esse adesivo já está em um ciclo ativo."
+            duplicate = self.db.query(PedidoContentor).filter(
+                PedidoContentor.numero_adesivo_contentor == number,
+                PedidoContentor.status_ciclo == "EM_ANDAMENTO",
+            ).first()
+            if duplicate:
+                return "Esse adesivo já está em um ciclo ativo."
             entregas = list(ctx.get("entregas") or [])
             entregas.append(
                 {
@@ -355,9 +364,12 @@ class PedidoV24Agent:
                 }
             )
             ctx["entregas"] = entregas
-            label = "Carrinha" if is_carrinha else "Contentor"
-            numero_label = number if number != "0" else "sem frota"
-            return self._advance(conversa, "v24_entrega_foto", ctx, f"Envie a foto do {label} {numero_label} posicionado no local.")
+            return self._advance(
+                conversa,
+                "v24_entrega_foto",
+                ctx,
+                f"Envie a foto do Contentor {number} posicionado no local.",
+            )
         if state == "v24_entrega_foto":
             photo = self._photo(message)
             if not photo:
@@ -776,6 +788,8 @@ class PedidoV24Agent:
         return bool(
             contentor
             and contentor.pedido_id == pedido_id
+            and contentor.tipo_equipamento
+            == TipoEquipamentoPedido.CONTENTOR.value
             and contentor.status_recolha == "RECOLHIDO"
             and contentor.status_ciclo == "EM_ANDAMENTO"
         )
@@ -888,7 +902,9 @@ class PedidoV24Agent:
         return [
             item
             for item in sorted(pedido.contentores, key=lambda item: (item.numero_adesivo_contentor or "", item.id))
-            if item.status_recolha == "RECOLHIDO" and item.status_ciclo == "EM_ANDAMENTO"
+            if item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+            and item.status_recolha == "RECOLHIDO"
+            and item.status_ciclo == "EM_ANDAMENTO"
         ]
 
     def _hydrate_legacy_despejo_context(self, ctx) -> None:
@@ -982,6 +998,8 @@ class PedidoV24Agent:
         return bool(
             contentor
             and contentor.pedido_id == pedido_id
+            and contentor.tipo_equipamento
+            == TipoEquipamentoPedido.CONTENTOR.value
             and contentor.status_entrega == "ENTREGUE"
             and contentor.status_recolha == "PENDENTE"
         )
@@ -1023,7 +1041,9 @@ class PedidoV24Agent:
         return [
             item
             for item in sorted(pedido.contentores, key=lambda item: (item.numero_adesivo_contentor or "", item.id))
-            if item.status_entrega == "ENTREGUE" and item.status_recolha == "PENDENTE"
+            if item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+            and item.status_entrega == "ENTREGUE"
+            and item.status_recolha == "PENDENTE"
         ]
 
     def _despejo_residuo_prompt(self, conversa, ctx):
@@ -1409,7 +1429,12 @@ class PedidoV24Agent:
         }.get(choice)
 
     def _pedido_entrega_label(self, pedido) -> str:
-        pendentes = [item for item in pedido.contentores if item.status_entrega == "PENDENTE"]
+        pendentes = [
+            item
+            for item in pedido.contentores
+            if item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+            and item.status_entrega == "PENDENTE"
+        ]
         tipos = {item.tipo_equipamento for item in pendentes}
         if tipos == {TipoEquipamentoPedido.CARRINHA.value}:
             tipo = "Carrinha"
@@ -1421,7 +1446,12 @@ class PedidoV24Agent:
         return f"#{pedido.id} — {pedido.nome_cliente} — {tipo} x{len(pendentes)} — {data}"
 
     def _pedido_entrega_option(self, pedido, index: int) -> str:
-        pendentes = [item for item in pedido.contentores if item.status_entrega == "PENDENTE"]
+        pendentes = [
+            item
+            for item in pedido.contentores
+            if item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+            and item.status_entrega == "PENDENTE"
+        ]
         tipos = {item.tipo_equipamento for item in pendentes}
         if tipos == {TipoEquipamentoPedido.CARRINHA.value}:
             tipo = "Carrinha"

@@ -190,6 +190,10 @@ class PedidoService:
         return (
             self.db.query(Pedido)
             .join(PedidoContentor)
+            .filter(
+                PedidoContentor.tipo_equipamento
+                == TipoEquipamentoPedido.CONTENTOR.value
+            )
             .filter(PedidoContentor.status_entrega == StatusEntregaPedido.PENDENTE.value)
             .distinct()
             .order_by(Pedido.data_planejada, Pedido.id)
@@ -200,6 +204,10 @@ class PedidoService:
         return (
             self.db.query(PedidoContentor)
             .options(joinedload(PedidoContentor.pedido))
+            .filter(
+                PedidoContentor.tipo_equipamento
+                == TipoEquipamentoPedido.CONTENTOR.value
+            )
             .filter(PedidoContentor.status_entrega == StatusEntregaPedido.ENTREGUE.value)
             .filter(PedidoContentor.status_recolha == StatusRecolhaPedido.PENDENTE.value)
             .order_by(PedidoContentor.numero_adesivo_contentor, PedidoContentor.id)
@@ -211,6 +219,10 @@ class PedidoService:
             self.db.query(Pedido)
             .join(PedidoContentor)
             .options(joinedload(Pedido.contentores))
+            .filter(
+                PedidoContentor.tipo_equipamento
+                == TipoEquipamentoPedido.CONTENTOR.value
+            )
             .filter(PedidoContentor.status_entrega == StatusEntregaPedido.ENTREGUE.value)
             .filter(PedidoContentor.status_recolha == StatusRecolhaPedido.PENDENTE.value)
             .distinct()
@@ -222,6 +234,10 @@ class PedidoService:
         return (
             self.db.query(PedidoContentor)
             .options(joinedload(PedidoContentor.pedido))
+            .filter(
+                PedidoContentor.tipo_equipamento
+                == TipoEquipamentoPedido.CONTENTOR.value
+            )
             .filter(PedidoContentor.status_recolha == StatusRecolhaPedido.RECOLHIDO.value)
             .filter(PedidoContentor.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value)
             .order_by(PedidoContentor.numero_adesivo_contentor, PedidoContentor.id)
@@ -233,6 +249,10 @@ class PedidoService:
             self.db.query(Pedido)
             .join(PedidoContentor)
             .options(joinedload(Pedido.contentores))
+            .filter(
+                PedidoContentor.tipo_equipamento
+                == TipoEquipamentoPedido.CONTENTOR.value
+            )
             .filter(PedidoContentor.status_recolha == StatusRecolhaPedido.RECOLHIDO.value)
             .filter(PedidoContentor.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value)
             .distinct()
@@ -290,9 +310,22 @@ class PedidoService:
         pedido = self.get(pedido_id)
         if not pedido:
             raise ValueError("Pedido não encontrado.")
-        pendentes = [c for c in pedido.contentores if c.status_entrega == StatusEntregaPedido.PENDENTE.value]
+        pendentes = [
+            contentor
+            for contentor in pedido.contentores
+            if contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+            and contentor.status_entrega == StatusEntregaPedido.PENDENTE.value
+        ]
         entregas = entregas or []
         entregas_por_id = {int(item["contentor_id"]): item for item in entregas if item.get("contentor_id")}
+        itens_por_id = {item.id: item for item in pedido.contentores}
+        if any(
+            itens_por_id.get(contentor_id) is not None
+            and itens_por_id[contentor_id].tipo_equipamento
+            != TipoEquipamentoPedido.CONTENTOR.value
+            for contentor_id in entregas_por_id
+        ):
+            raise ValueError("Esta operação aceita apenas contentores.")
         if not entregas:
             raise ValueError("Nenhum ativo preparado para entrega.")
         if {c.id for c in pendentes} != set(entregas_por_id):
@@ -357,13 +390,14 @@ class PedidoService:
         ponto_referencia: str | None,
         agora: datetime,
     ) -> None:
+        if (
+            contentor.tipo_equipamento
+            != TipoEquipamentoPedido.CONTENTOR.value
+        ):
+            raise ValueError("Esta operação aceita apenas contentores.")
         if entrega:
             numero = str(entrega["numero_adesivo"]).strip()
-            contentor.numero_adesivo_contentor = (
-                None
-                if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value and numero == "0"
-                else numero
-            )
+            contentor.numero_adesivo_contentor = numero
         contentor.status_entrega = StatusEntregaPedido.ENTREGUE.value
         contentor.entrega_feita_por = operador
         contentor.entrega_latitude = latitude
@@ -398,6 +432,12 @@ class PedidoService:
         fotos: list[str] | None = None,
     ) -> PedidoContentor:
         contentor = self.db.get(PedidoContentor, contentor_id)
+        if (
+            contentor
+            and contentor.tipo_equipamento
+            != TipoEquipamentoPedido.CONTENTOR.value
+        ):
+            raise ValueError("Esta operação aceita apenas contentores.")
         if (
             not contentor
             or contentor.status_entrega != StatusEntregaPedido.ENTREGUE.value
@@ -491,7 +531,9 @@ class PedidoService:
         return [
             contentor
             for contentor in pedido.contentores
-            if contentor.status_recolha == StatusRecolhaPedido.RECOLHIDO.value
+            if contentor.tipo_equipamento
+            == TipoEquipamentoPedido.CONTENTOR.value
+            and contentor.status_recolha == StatusRecolhaPedido.RECOLHIDO.value
             and contentor.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
         ]
 
@@ -503,6 +545,12 @@ class PedidoService:
         pedido_id: int | None = None,
     ) -> PedidoContentor:
         contentor = self.db.get(PedidoContentor, contentor_id)
+        if (
+            contentor
+            and contentor.tipo_equipamento
+            != TipoEquipamentoPedido.CONTENTOR.value
+        ):
+            raise ValueError("Esta operação aceita apenas contentores.")
         if (
             not contentor
             or contentor.status_recolha != StatusRecolhaPedido.RECOLHIDO.value
@@ -532,6 +580,12 @@ class PedidoService:
         fotos: list[str] | None = None,
     ) -> PedidoContentor:
         contentor = self.db.get(PedidoContentor, contentor_id)
+        if (
+            contentor
+            and contentor.tipo_equipamento
+            != TipoEquipamentoPedido.CONTENTOR.value
+        ):
+            raise ValueError("Esta operação aceita apenas contentores.")
         if (
             not contentor
             or contentor.status_recolha != StatusRecolhaPedido.RECOLHIDO.value
