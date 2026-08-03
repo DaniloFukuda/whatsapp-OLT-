@@ -1,17 +1,22 @@
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import re
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.time import utcnow
+from app.core.config import get_settings
 from app.models.aluguer import ContentorFoto
 from app.models.pedido import (
     Pedido,
     PedidoContentor,
     StatusCicloPedido,
     StatusEntregaPedido,
+    StatusChegadaCarrinha,
+    StatusPartidaCarrinha,
+    StatusOperacionalCarrinha,
     StatusPagamento,
     StatusRecolhaPedido,
     StatusResolucaoPedido,
@@ -200,6 +205,58 @@ class PedidoService:
             .all()
         )
 
+    def carrinhas_aguardando_chegada(self) -> list[PedidoContentor]:
+        return (
+            self.db.query(PedidoContentor)
+            .options(joinedload(PedidoContentor.pedido))
+            .filter(PedidoContentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value)
+            .filter(
+                PedidoContentor.status_operacional_carrinha
+                == StatusOperacionalCarrinha.AGUARDANDO_CHEGADA.value
+            )
+            .order_by(PedidoContentor.horario_agendado, PedidoContentor.id)
+            .all()
+        )
+
+    def pedidos_carrinha_aguardando_chegada(self) -> list[Pedido]:
+        return self._pedidos_carrinha_por_estado(
+            StatusOperacionalCarrinha.AGUARDANDO_CHEGADA
+        )
+
+    def carrinhas_aguardando_partida(self) -> list[PedidoContentor]:
+        return self._carrinhas_por_estado(StatusOperacionalCarrinha.EM_ATENDIMENTO)
+
+    def pedidos_carrinha_aguardando_partida(self) -> list[Pedido]:
+        return self._pedidos_carrinha_por_estado(StatusOperacionalCarrinha.EM_ATENDIMENTO)
+
+    def carrinhas_aguardando_despejo(self) -> list[PedidoContentor]:
+        return self._carrinhas_por_estado(StatusOperacionalCarrinha.AGUARDANDO_DESPEJO)
+
+    def pedidos_carrinha_aguardando_despejo(self) -> list[Pedido]:
+        return self._pedidos_carrinha_por_estado(StatusOperacionalCarrinha.AGUARDANDO_DESPEJO)
+
+    def _carrinhas_por_estado(self, estado: StatusOperacionalCarrinha) -> list[PedidoContentor]:
+        return (
+            self.db.query(PedidoContentor)
+            .options(joinedload(PedidoContentor.pedido))
+            .filter(PedidoContentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value)
+            .filter(PedidoContentor.status_operacional_carrinha == estado.value)
+            .order_by(PedidoContentor.horario_agendado, PedidoContentor.id)
+            .all()
+        )
+
+    def _pedidos_carrinha_por_estado(self, estado: StatusOperacionalCarrinha) -> list[Pedido]:
+        return (
+            self.db.query(Pedido)
+            .join(PedidoContentor)
+            .options(joinedload(Pedido.contentores))
+            .filter(PedidoContentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value)
+            .filter(PedidoContentor.status_operacional_carrinha == estado.value)
+            .distinct()
+            .order_by(Pedido.data_planejada, Pedido.id)
+            .all()
+        )
+
     def contentores_para_recolha(self) -> list[PedidoContentor]:
         return (
             self.db.query(PedidoContentor)
@@ -380,6 +437,97 @@ class PedidoService:
         self.db.flush()
         return pedido
 
+    def confirmar_chegada_carrinha_lote_transacional(
+        self,
+        pedido_id: int,
+        operador: str,
+        latitude: float,
+        longitude: float,
+        ponto_referencia: str | None,
+        chegadas: list[dict],
+    ) -> Pedido:
+        pedido = self.get(pedido_id)
+        if not pedido:
+            raise ValueError("Pedido não encontrado.")
+        pendentes = [
+            item for item in pedido.contentores
+            if item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+            and item.status_operacional_carrinha
+            == StatusOperacionalCarrinha.AGUARDANDO_CHEGADA.value
+        ]
+        chegadas_por_id = {
+            int(item["contentor_id"]): item for item in chegadas if item.get("contentor_id")
+        }
+        if not pendentes or {item.id for item in pendentes} != set(chegadas_por_id):
+            raise ValueError("A lista de carrinhas aguardando chegada mudou. Reinicie a operação.")
+        if latitude is None or longitude is None or not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+            raise ValueError("A localização GPS da chegada é inválida.")
+        agora = utcnow()
+        prevista = agora + timedelta(hours=2)
+        for carrinha in pendentes:
+            dados = chegadas_por_id[carrinha.id]
+            fotos = [foto for foto in dados.get("fotos") or [] if foto]
+            if not fotos:
+                raise ValueError("Todas as carrinhas precisam de pelo menos uma foto na chegada.")
+            numero = str(dados.get("numero_adesivo") or "").strip()
+            frota = None if numero == "0" else numero
+            resultado = self.db.execute(
+                update(PedidoContentor)
+                .where(
+                    PedidoContentor.id == carrinha.id,
+                    PedidoContentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value,
+                    PedidoContentor.status_operacional_carrinha
+                    == StatusOperacionalCarrinha.AGUARDANDO_CHEGADA.value,
+                )
+                .values(
+                    status_operacional_carrinha=StatusOperacionalCarrinha.EM_ATENDIMENTO.value,
+                    status_chegada_carrinha=StatusChegadaCarrinha.CHEGOU.value,
+                    chegada_carrinha_feita_por=operador,
+                    chegada_carrinha_data_hora=agora,
+                    chegada_carrinha_latitude=latitude,
+                    chegada_carrinha_longitude=longitude,
+                    chegada_carrinha_ponto_referencia=ponto_referencia,
+                    partida_prevista_carrinha_data_hora=prevista,
+                    frota_carrinha=frota,
+                    numero_adesivo_contentor=None,
+                    status_entrega=StatusEntregaPedido.ENTREGUE.value,
+                    entrega_feita_por=operador,
+                    entrega_latitude=latitude,
+                    entrega_longitude=longitude,
+                    entrega_ponto_referencia=ponto_referencia,
+                    entrega_data_hora=agora,
+                )
+            )
+            if resultado.rowcount != 1:
+                raise ValueError("A chegada desta carrinha já foi confirmada por outro operador.")
+            carrinha.status_operacional_carrinha = StatusOperacionalCarrinha.EM_ATENDIMENTO.value
+            carrinha.frota_carrinha = frota
+            carrinha.status_chegada_carrinha = StatusChegadaCarrinha.CHEGOU.value
+            carrinha.chegada_carrinha_feita_por = operador
+            carrinha.chegada_carrinha_data_hora = agora
+            carrinha.chegada_carrinha_latitude = latitude
+            carrinha.chegada_carrinha_longitude = longitude
+            carrinha.chegada_carrinha_ponto_referencia = ponto_referencia
+            carrinha.partida_prevista_carrinha_data_hora = prevista
+            # Espelho legado somente para compatibilidade de leitura; a verdade da carrinha
+            # permanece nos campos próprios acima.
+            carrinha.status_entrega = StatusEntregaPedido.ENTREGUE.value
+            carrinha.entrega_feita_por = operador
+            carrinha.entrega_latitude = latitude
+            carrinha.entrega_longitude = longitude
+            carrinha.entrega_ponto_referencia = ponto_referencia
+            carrinha.entrega_data_hora = agora
+            for foto_url in fotos:
+                self.db.add(ContentorFoto(
+                    pedido_contentor_id=carrinha.id,
+                    url_midia=foto_url,
+                    tipo_foto=TipoFoto.ENTREGA.value,
+                    url_foto=foto_url,
+                    tipo=TipoFoto.ENTREGA.value.lower(),
+                ))
+        self.db.flush()
+        return pedido
+
     def _aplicar_entrega_item(
         self,
         contentor: PedidoContentor,
@@ -444,6 +592,9 @@ class PedidoService:
             or contentor.status_recolha != StatusRecolhaPedido.PENDENTE.value
         ):
             raise ValueError("Contentor não disponível para recolha.")
+        avarias_enabled = get_settings().feature_avarias_enabled
+        if avariado and not avarias_enabled:
+            raise ValueError("A funcionalidade de avarias não está disponível nesta empresa.")
         relato_limpo = (relato or "").strip()
         if avariado and len(relato_limpo) < 10:
             raise ValueError("O relato da avaria precisa ter pelo menos 10 caracteres.")
@@ -455,13 +606,14 @@ class PedidoService:
         contentor.status_recolha = StatusRecolhaPedido.RECOLHIDO.value
         contentor.recolha_feita_por = operador
         contentor.recolha_data_hora = utcnow()
-        contentor.contentor_avariado = avariado
-        contentor.relato_avaria = relato_limpo if avariado else None
-        contentor.status_resolucao_avaria = (
-            StatusResolucaoPedido.PENDENTE.value
-            if avariado
-            else StatusResolucaoPedido.NAO_APLICA.value
-        )
+        if avarias_enabled:
+            contentor.contentor_avariado = avariado
+            contentor.relato_avaria = relato_limpo if avariado else None
+            contentor.status_resolucao_avaria = (
+                StatusResolucaoPedido.PENDENTE.value
+                if avariado
+                else StatusResolucaoPedido.NAO_APLICA.value
+            )
         fotos_existentes = {
             foto.url_midia
             for foto in contentor.fotos
@@ -481,6 +633,174 @@ class PedidoService:
             )
         self.db.commit()
         return contentor
+
+    def confirmar_partida_carrinha(
+        self,
+        contentor_id: int,
+        operador: str,
+        avariado: bool,
+        relato: str | None,
+        fotos: list[str] | None = None,
+    ) -> PedidoContentor:
+        carrinha = self.db.get(PedidoContentor, contentor_id)
+        if (
+            not carrinha
+            or carrinha.tipo_equipamento != TipoEquipamentoPedido.CARRINHA.value
+            or carrinha.status_operacional_carrinha
+            != StatusOperacionalCarrinha.EM_ATENDIMENTO.value
+        ):
+            raise ValueError("Carrinha não disponível para confirmar partida.")
+        relato_limpo = (relato or "").strip()
+        avarias_enabled = get_settings().feature_avarias_enabled
+        if not avarias_enabled and (avariado or relato_limpo):
+            raise ValueError("A funcionalidade de avarias não está disponível nesta empresa.")
+        if not fotos:
+            raise ValueError("Envie pelo menos uma foto da partida.")
+        if avariado and len(relato_limpo) < 10:
+            raise ValueError("O relato da avaria precisa ter pelo menos 10 caracteres.")
+        try:
+            agora = utcnow()
+            resultado = self.db.execute(
+                update(PedidoContentor)
+                .where(
+                    PedidoContentor.id == contentor_id,
+                    PedidoContentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value,
+                    PedidoContentor.status_operacional_carrinha
+                    == StatusOperacionalCarrinha.EM_ATENDIMENTO.value,
+                )
+                .values(
+                    status_operacional_carrinha=StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value,
+                    status_partida_carrinha=StatusPartidaCarrinha.PARTIU.value,
+                    partida_carrinha_feita_por=operador,
+                    partida_carrinha_data_hora=agora,
+                    status_recolha=StatusRecolhaPedido.RECOLHIDO.value,
+                    recolha_feita_por=operador,
+                    recolha_data_hora=agora,
+                )
+            )
+            if resultado.rowcount != 1:
+                raise ValueError("A partida desta carrinha já foi confirmada por outro operador.")
+            carrinha.status_operacional_carrinha = StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
+            carrinha.status_partida_carrinha = StatusPartidaCarrinha.PARTIU.value
+            carrinha.partida_carrinha_feita_por = operador
+            carrinha.partida_carrinha_data_hora = agora
+            # O limite de duas horas é informativo. Nunca conclui nem cancela o ciclo.
+            carrinha.status_recolha = StatusRecolhaPedido.RECOLHIDO.value
+            carrinha.recolha_feita_por = operador
+            carrinha.recolha_data_hora = agora
+            if avarias_enabled:
+                carrinha.contentor_avariado = avariado
+                carrinha.relato_avaria = relato_limpo if avariado else None
+                carrinha.status_resolucao_avaria = (
+                    StatusResolucaoPedido.PENDENTE.value if avariado
+                    else StatusResolucaoPedido.NAO_APLICA.value
+                )
+            for foto_url in dict.fromkeys(foto for foto in (fotos or []) if foto):
+                self.db.add(ContentorFoto(
+                    pedido_contentor_id=carrinha.id,
+                    url_midia=foto_url,
+                    tipo_foto=TipoFoto.RECOLHA.value,
+                    url_foto=foto_url,
+                    tipo=TipoFoto.RECOLHA.value.lower(),
+                ))
+            self.db.commit()
+            return carrinha
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def previsao_partida_carrinha(self, carrinha: PedidoContentor) -> datetime | None:
+        if carrinha.partida_prevista_carrinha_data_hora:
+            return carrinha.partida_prevista_carrinha_data_hora
+        if carrinha.chegada_carrinha_data_hora:
+            return carrinha.chegada_carrinha_data_hora + timedelta(hours=2)
+        return None
+
+    def carrinha_atrasada(self, carrinha: PedidoContentor, agora: datetime | None = None) -> bool:
+        if (
+            carrinha.status_operacional_carrinha != StatusOperacionalCarrinha.EM_ATENDIMENTO.value
+            or carrinha.partida_carrinha_data_hora is not None
+        ):
+            return False
+        previsao = self.previsao_partida_carrinha(carrinha)
+        return bool(previsao and (agora or utcnow()) > previsao)
+
+    def tempo_operacional_carrinha(self, carrinha: PedidoContentor) -> timedelta | None:
+        if not carrinha.chegada_carrinha_data_hora or not carrinha.partida_carrinha_data_hora:
+            return None
+        return carrinha.partida_carrinha_data_hora - carrinha.chegada_carrinha_data_hora
+
+    def confirmar_despejo_carrinha(
+        self,
+        carrinha_id: int,
+        residuo_efetivo: str,
+        carga_errada: bool,
+        relato: str | None,
+        operador: str,
+        fotos: list[str],
+    ) -> PedidoContentor:
+        carrinha = self.db.get(PedidoContentor, carrinha_id)
+        if (
+            not carrinha
+            or carrinha.tipo_equipamento != TipoEquipamentoPedido.CARRINHA.value
+            or carrinha.status_operacional_carrinha
+            != StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
+        ):
+            raise ValueError("Carrinha não disponível para despejo.")
+        if residuo_efetivo not in RESIDUOS_CANONICOS:
+            raise ValueError("Residuo efetivo invalido.")
+        fotos_unicas = list(dict.fromkeys(foto for foto in fotos if foto))
+        if not fotos_unicas:
+            raise ValueError("Envie pelo menos uma foto do despejo.")
+        relato_limpo = (relato or "").strip()
+        if carga_errada and len(relato_limpo) < 10:
+            raise ValueError("O relato da carga precisa ter pelo menos 10 caracteres.")
+        try:
+            agora = utcnow()
+            resultado = self.db.execute(
+                update(PedidoContentor)
+                .where(
+                    PedidoContentor.id == carrinha_id,
+                    PedidoContentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value,
+                    PedidoContentor.status_operacional_carrinha
+                    == StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value,
+                )
+                .values(
+                    status_operacional_carrinha=StatusOperacionalCarrinha.CONCLUIDA.value,
+                    residuo_efetivo_vazadouro=residuo_efetivo,
+                    carga_errada=carga_errada,
+                    relato_carga=relato_limpo if carga_errada else None,
+                    status_resolucao_carga=(
+                        StatusResolucaoPedido.PENDENTE.value
+                        if carga_errada else StatusResolucaoPedido.NAO_APLICA.value
+                    ),
+                    despejo_feito_por=operador,
+                    despejo_data_hora=agora,
+                    status_ciclo=StatusCicloPedido.CONCLUIDO.value,
+                )
+            )
+            if resultado.rowcount != 1:
+                raise ValueError("O despejo desta carrinha já foi confirmado por outro operador.")
+            carrinha.status_operacional_carrinha = StatusOperacionalCarrinha.CONCLUIDA.value
+            carrinha.despejo_feito_por = operador
+            carrinha.despejo_data_hora = agora
+            carrinha.status_ciclo = StatusCicloPedido.CONCLUIDO.value
+            carrinha.residuo_efetivo_vazadouro = residuo_efetivo
+            carrinha.carga_errada = carga_errada
+            carrinha.relato_carga = relato_limpo if carga_errada else None
+            for foto_url in fotos_unicas:
+                self.db.add(ContentorFoto(
+                    pedido_contentor_id=carrinha.id,
+                    url_midia=foto_url,
+                    tipo_foto=TipoFoto.DESPEJO.value,
+                    url_foto=foto_url,
+                    tipo=TipoFoto.DESPEJO.value.lower(),
+                ))
+            self.db.commit()
+            return carrinha
+        except Exception:
+            self.db.rollback()
+            raise
 
     def cotas_restantes(self, pedido_id: int) -> Counter:
         cotas = self.cotas_residuos(pedido_id)
@@ -646,6 +966,8 @@ class PedidoService:
         return contentor
 
     def resolver(self, tipo: str, contentor_id: int) -> PedidoContentor:
+        if tipo == "avaria" and not get_settings().feature_avarias_enabled:
+            raise ValueError("A funcionalidade de avarias não está disponível nesta empresa.")
         contentor = self.db.get(PedidoContentor, contentor_id)
         if not contentor:
             raise ValueError("Contentor não encontrado.")

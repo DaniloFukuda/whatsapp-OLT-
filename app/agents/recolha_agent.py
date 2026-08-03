@@ -3,6 +3,7 @@ import unicodedata
 from sqlalchemy.orm import Session
 
 from app.core.time import utcnow
+from app.core.config import get_settings
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.aluguer import AluguerContentor
 from app.models.conversa import ConversaWhatsApp
@@ -112,6 +113,8 @@ class RecolhaAgent:
             if choice is True:
                 context["carga_errada"] = False
                 context["relato_carga"] = None
+                if not get_settings().feature_avarias_enabled:
+                    return self._finish_without_avaria(conversa, context)
                 return self._advance(conversa, "recolha_aguardando_triagem_avaria", context, self._triagem_avaria_prompt())
             if choice is False:
                 context["carga_errada"] = True
@@ -128,9 +131,13 @@ class RecolhaAgent:
             if len(relato) < 10:
                 return "⚠️ O relato da carga precisa ter pelo menos 10 caracteres."
             context["relato_carga"] = relato
+            if not get_settings().feature_avarias_enabled:
+                return self._finish_without_avaria(conversa, context)
             return self._advance(conversa, "recolha_aguardando_triagem_avaria", context, self._triagem_avaria_prompt())
 
         if state == "recolha_aguardando_triagem_avaria":
+            if not get_settings().feature_avarias_enabled:
+                return self._finish_without_avaria(conversa, context, recovered=True)
             choice = self._parse_yes_no(message.texto)
             if choice is True:
                 context["contentor_avariado"] = False
@@ -147,6 +154,8 @@ class RecolhaAgent:
             return "⚠️ Opcao invalida. Responda 1 para perfeito ou 2 para avariado."
 
         if state == "recolha_aguardando_relato_avaria":
+            if not get_settings().feature_avarias_enabled:
+                return self._finish_without_avaria(conversa, context, recovered=True)
             relato = (message.texto or "").strip()
             if len(relato) < 10:
                 return "⚠️ O relato da avaria precisa ter pelo menos 10 caracteres."
@@ -154,6 +163,14 @@ class RecolhaAgent:
             return self._finish(conversa, context)
 
         return self.start(conversa)
+
+    def _finish_without_avaria(self, conversa: ConversaWhatsApp, context: dict, recovered: bool = False) -> str:
+        context.pop("contentor_avariado", None)
+        context.pop("relato_avaria", None)
+        resposta = self._finish(conversa, context)
+        if recovered:
+            return "A funcionalidade de avarias não está disponível nesta empresa. O subfluxo foi cancelado com segurança.\n\n" + resposta
+        return resposta
 
     def _finish(self, conversa: ConversaWhatsApp, context: dict) -> str:
         try:
@@ -174,12 +191,15 @@ class RecolhaAgent:
         pendencias = []
         if aluguer.carga_errada:
             pendencias.append("carga errada")
-        if aluguer.contentor_avariado:
+        if get_settings().feature_avarias_enabled and aluguer.contentor_avariado:
             pendencias.append("avaria")
         complemento = ""
         if pendencias:
             complemento = "\n\nPendencia criada para o gestor: " + ", ".join(pendencias) + "."
-        return "✅ Recolha do contentor registrada com sucesso! Contentor liberado para novo pedido." + complemento + "\n\n" + MAIN_MENU
+        menu = MAIN_MENU
+        if not get_settings().feature_avarias_enabled:
+            menu = "\n".join(line for line in menu.splitlines() if "avaria" not in line.lower())
+        return "✅ Recolha do contentor registrada com sucesso! Contentor liberado para novo pedido." + complemento + "\n\n" + menu
 
     def _format_selection_prompt(self, candidatos: list[AluguerContentor]) -> str:
         linhas = ["Confirmar recolha de contentor. Escolha o pedido:"]

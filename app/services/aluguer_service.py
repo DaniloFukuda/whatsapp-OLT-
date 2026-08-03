@@ -4,6 +4,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.core.time import utcnow
+from app.core.config import get_settings
 from app.models.aluguer import (
     AluguerContentor,
     ContentorFoto,
@@ -273,6 +274,9 @@ class AluguerService:
         relato_avaria: str | None = None,
     ) -> AluguerContentor:
         aluguer = self._get_or_raise(aluguer_id)
+        avarias_enabled = get_settings().feature_avarias_enabled
+        if contentor_avariado and not avarias_enabled:
+            raise ValueError("A funcionalidade de avarias não está disponível nesta empresa.")
         fotos_recolha = [foto for foto in (fotos_recolha or []) if foto]
         if not fotos_recolha:
             raise ValueError("Envie pelo menos uma foto da recolha")
@@ -294,11 +298,12 @@ class AluguerService:
         aluguer.status_resolucao_carga = (
             StatusResolucao.PENDENTE.value if carga_errada else StatusResolucao.NAO_APLICA.value
         )
-        aluguer.contentor_avariado = bool(contentor_avariado)
-        aluguer.relato_avaria = relato_avaria.strip() if contentor_avariado and relato_avaria else None
-        aluguer.status_resolucao_avaria = (
-            StatusResolucao.PENDENTE.value if contentor_avariado else StatusResolucao.NAO_APLICA.value
-        )
+        if avarias_enabled:
+            aluguer.contentor_avariado = bool(contentor_avariado)
+            aluguer.relato_avaria = relato_avaria.strip() if contentor_avariado and relato_avaria else None
+            aluguer.status_resolucao_avaria = (
+                StatusResolucao.PENDENTE.value if contentor_avariado else StatusResolucao.NAO_APLICA.value
+            )
         if aluguer.contentor:
             aluguer.contentor.status = StatusContentor.DISPONIVEL
 
@@ -308,7 +313,7 @@ class AluguerService:
         self.alugueres.add_event(aluguer.id, "recolha", "Contentor recolhido e ciclo encerrado")
         if carga_errada:
             self.alugueres.add_event(aluguer.id, "pendencia_carga", aluguer.relato_carga or "Carga incorreta")
-        if contentor_avariado:
+        if contentor_avariado and avarias_enabled:
             self.alugueres.add_event(aluguer.id, "pendencia_avaria", aluguer.relato_avaria or "Contentor avariado")
         return self.alugueres.save(aluguer)
 
@@ -323,6 +328,8 @@ class AluguerService:
         return self.alugueres.save(aluguer)
 
     def resolver_pendencia_avaria(self, aluguer_id: int, operador_telefone: str | None = None) -> AluguerContentor:
+        if not get_settings().feature_avarias_enabled:
+            raise ValueError("A funcionalidade de avarias não está disponível nesta empresa.")
         aluguer = self._get_or_raise(aluguer_id)
         aluguer.status_resolucao_avaria = StatusResolucao.RESOLVIDO.value
         self.alugueres.add_event(

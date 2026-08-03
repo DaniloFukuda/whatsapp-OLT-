@@ -36,6 +36,7 @@ from app.models.pedido import (
     StatusCicloPedido,
     StatusEntregaPedido,
     StatusPagamento,
+    StatusOperacionalCarrinha,
     StatusRecolhaPedido,
     StatusResolucaoPedido,
     TipoEquipamentoPedido,
@@ -50,6 +51,7 @@ ACTIVE_ALUGUER_STATUSES = {StatusAluguer.ATIVO, StatusAluguer.VENCENDO, StatusAl
 APP_DISPLAY_NAME = "OLT Gestão de Resíduos & Demolições"
 UNAUTHORIZED_MESSAGE = "Telefone não autorizado."
 FORBIDDEN_MESSAGE = "Operação não permitida."
+AVARIAS_DISABLED_MESSAGE = "A funcionalidade de avarias não está disponível nesta empresa."
 COMMANDS = {"resumo", "lista", "disponiveis", "alugados", "vencendo", "atrasados"}
 START_COMMANDS = {"iniciar", "cadastrar", "comecar", "começar", "novo"}
 ALTER_COMMANDS = {"alterar", "modificar"}
@@ -79,7 +81,7 @@ COMMAND_PROFILES = {
     COMMAND_FAMILY_RESOLUTION: {PerfilOperador.GESTOR},
 }
 MAIN_MENU = (
-    f"🤖 Menu principal - {APP_DISPLAY_NAME}\n\n"
+    f"🤖 Menu Principal • {APP_DISPLAY_NAME}\n\n"
     "1️⃣ 📝 Novo pedido\n"
     "2️⃣ 🚛 Entrega de contentor\n"
     "3️⃣ 📦 Recolha de contentor\n"
@@ -100,12 +102,12 @@ MAIN_MENU = (
     "5. Resumo dos contentores"
 )
 MAIN_MENU = (
-    f"🤖 Menu principal - {APP_DISPLAY_NAME}\n\n"
-    "1. 🟢 Novo pedido\n"
-    "2. 🚛 Entrega de contentor\n"
-    "3. 📦 Recolha de contentor\n"
+    f"🤖 Menu Principal • {APP_DISPLAY_NAME}\n\n"
+    "1. 🟢 Novo Pedido\n"
+    "2. 🚛 Confirmar Chegada / Entrega\n"
+    "3. 📦 Confirmar Recolha / Partida\n"
     "4. ♻️ Confirmar Despejo no Vazadouro\n"
-    "5. 📊 Resumo dos contentores\n\n"
+    "5. 📊 Painel de Controle Operacional\n\n"
     "Digite o número da opção desejada."
 )
 CANCELLED_MENU_MESSAGE = "Operação cancelada. Nenhuma alteração foi salva.\n\n" + MAIN_MENU
@@ -137,6 +139,16 @@ class WhatsappRouterAgent:
         if perfil is None:
             return UNAUTHORIZED_MESSAGE
         conversa = self._get_or_create_conversa(message.telefone)
+
+        if not self._avarias_enabled():
+            recovered = self._recover_disabled_avaria_review(conversa)
+            if recovered:
+                return AVARIAS_DISABLED_MESSAGE + " A revisão foi cancelada com segurança e o fluxo anterior foi retomado."
+            if text.startswith("resolver avaria") or text in {
+                "avaria", "avarias", "listar avaria", "listar avarias", "lista avaria", "lista avarias",
+                "resolucao_avaria:confirmar", "resolucao_avaria:voltar", "resolucao_avaria:cancelar",
+            }:
+                return AVARIAS_DISABLED_MESSAGE
 
         if text.startswith("resolver avaria"):
             if not self._can_execute_command(perfil, COMMAND_FAMILY_RESOLUTION):
@@ -242,17 +254,27 @@ class WhatsappRouterAgent:
             return self._handle_operational_command("resumo", message.telefone, perfil)
 
         if text in {"1", "novo pedido", "cadastrar pedido"}:
-            if text == "1" and perfil == PerfilOperador.FUNCIONARIO:
-                return self.entrega_agent.start(conversa)
             if perfil == PerfilOperador.FUNCIONARIO:
                 return "Seu perfil de motorista nÃ£o possui permissÃ£o para cadastrar pedidos."
             return self.pedido_v24_agent.start_cadastro(conversa)
-        if text in {"2", "confirmar entrega de contentor", "confirmar entrega do lote"}:
-            if self.pedido_service.pedidos_pendentes_entrega():
+        if text in {
+            "2", "confirmar entrega de contentor", "confirmar entrega do lote",
+            "confirmar chegada", "confirmar chegada / entrega", "chegada",
+        }:
+            if (
+                self.pedido_service.pedidos_pendentes_entrega()
+                or self.pedido_service.carrinhas_aguardando_chegada()
+            ):
                 return self.pedido_v24_agent.start_entrega(conversa)
             return self.entrega_agent.start(conversa)
-        if text in {"3", "confirmar recolha de contentor"}:
-            if self.pedido_service.contentores_para_recolha():
+        if text in {
+            "3", "confirmar recolha de contentor", "confirmar partida",
+            "confirmar recolha / partida", "partida",
+        }:
+            if (
+                self.pedido_service.contentores_para_recolha()
+                or self.pedido_service.carrinhas_aguardando_partida()
+            ):
                 return self.pedido_v24_agent.start_recolha(conversa)
             return self.recolha_agent.start(conversa)
         if text in {"4", "confirmar despejo no vazadouro", "confirmar despejo"}:
@@ -326,6 +348,24 @@ class WhatsappRouterAgent:
     def _can_execute_command(self, perfil: PerfilOperador, family: str) -> bool:
         return perfil in COMMAND_PROFILES[family]
 
+    @staticmethod
+    def _avarias_enabled() -> bool:
+        return get_settings().feature_avarias_enabled
+
+    def _recover_disabled_avaria_review(self, conversa: ConversaWhatsApp) -> bool:
+        if conversa.estado_atual != RESOLUCAO_AVARIA_REVISAO_STATE:
+            return False
+        contexto = self._contexto_dict(conversa.contexto_json)
+        revisao = self._contexto_dict(contexto.get(RESOLUCAO_AVARIA_CONTEXT_KEY))
+        if isinstance(revisao.get("contexto_anterior"), dict):
+            conversa.estado_atual = revisao.get("estado_anterior") or "idle"
+            conversa.contexto_json = deepcopy(revisao["contexto_anterior"])
+        else:
+            conversa.estado_atual = "idle"
+            conversa.contexto_json = {}
+        self.db.commit()
+        return True
+
     def _handle_operational_command(
         self,
         command: str,
@@ -380,10 +420,19 @@ class WhatsappRouterAgent:
             ))
         carrinhas = self._pedidos_por_entrega(pedidos, today, TipoEquipamentoPedido.CARRINHA.value)
         if carrinhas:
-            blocos.append("🚛 *Envio de Carrinhas:*\n" + "\n".join(
+            blocos.append("🚛 *Chegada de Carrinhas:*\n" + "\n".join(
                 self._format_entrega_hoje(pedido, itens, incluir_horario=True)
                 for pedido, itens in carrinhas
             ))
+        carrinhas_em_atendimento = self._carrinhas_em_atendimento(pedidos)
+        if carrinhas_em_atendimento:
+            blocos.append(
+                "⏱️ *Carrinhas em atendimento:*\n"
+                + "\n".join(
+                    self._format_carrinha_em_atendimento(item)
+                    for item in carrinhas_em_atendimento
+                )
+            )
         if perfil == PerfilOperador.GESTOR:
             renovacoes = self._contentores_vencendo_amanha(pedidos, today)
             renovacoes_legadas = self._alugueres_por_vencimento(alugueres, today + timedelta(days=1))
@@ -439,8 +488,8 @@ class WhatsappRouterAgent:
                 blocos.append("💳 *Pagamentos Pendentes:*\n" + "\n".join(
                     linhas
                 ))
-        avarias = self._avarias_ativas(pedidos)
-        avarias_legadas = self._alugueres_avarias_ativas(alugueres)
+        avarias = self._avarias_ativas(pedidos) if self._avarias_enabled() else []
+        avarias_legadas = self._alugueres_avarias_ativas(alugueres) if self._avarias_enabled() else []
         if avarias or avarias_legadas:
             linhas = [self._format_avaria(item) for item in avarias]
             linhas.extend(self._format_avaria_aluguer(aluguer) for aluguer in avarias_legadas)
@@ -630,6 +679,31 @@ class WhatsappRouterAgent:
 
     def _format_carrinha_amanha(self, pedido: Pedido, itens: list[PedidoContentor]) -> str:
         return f"• {pedido.nome_cliente} ({len(itens)} un) • ⏰ {self._horarios_label(itens)}"
+
+    def _carrinhas_em_atendimento(self, pedidos: list[Pedido]) -> list[PedidoContentor]:
+        return sorted(
+            [
+                item
+                for pedido in pedidos
+                for item in pedido.contentores
+                if item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+                and item.status_operacional_carrinha
+                == StatusOperacionalCarrinha.EM_ATENDIMENTO.value
+            ],
+            key=lambda item: (item.partida_prevista_carrinha_data_hora or item.criado_em, item.id),
+        )
+
+    def _format_carrinha_em_atendimento(self, item: PedidoContentor) -> str:
+        previsao = self.pedido_service.previsao_partida_carrinha(item)
+        agora = utcnow()
+        if self.pedido_service.carrinha_atrasada(item, agora):
+            situacao = "🔴 Atrasada"
+        elif previsao and agora >= previsao - timedelta(minutes=30):
+            situacao = "🟡 Próxima do prazo"
+        else:
+            situacao = "🟢 Dentro do prazo"
+        hora = previsao.astimezone(self._timezone()).strftime("%H:%M") if previsao else "não informada"
+        return f"• {item.pedido.nome_cliente} — {situacao} — partida prevista {hora}"
 
     def _format_renovacao(self, pedido: Pedido, itens: list[PedidoContentor]) -> str:
         linhas = [f"• {pedido.nome_cliente} ({len(itens)} un) • Valor: {self._money(pedido.valor_global)}"]
@@ -873,7 +947,7 @@ class WhatsappRouterAgent:
                         f"contratado {item.residuo_contratado}; vazadouro {item.residuo_efetivo_vazadouro or 'nao informado'} "
                         f"| resolver carga {item.id}"
                     )
-        if itens["avarias"]:
+        if self._avarias_enabled() and itens["avarias"]:
             linhas.append("Avarias em equipamentos:")
             for item in itens["avarias"]:
                 linhas.append(
@@ -983,13 +1057,14 @@ class WhatsappRouterAgent:
             f"{c.relato_carga} | resolver carga {c.id}"
             for c in itens["cargas"]
         )
-        linhas.append("")
-        linhas.append(f"Avarias: {len(itens['avarias'])}")
-        linhas.extend(
-            f"• {c.pedido.nome_cliente} — Contentor {c.numero_adesivo_contentor or c.id}: "
-            f"{c.relato_avaria} | resolver avaria {c.id}"
-            for c in itens["avarias"]
-        )
+        if self._avarias_enabled():
+            linhas.append("")
+            linhas.append(f"Avarias: {len(itens['avarias'])}")
+            linhas.extend(
+                f"• {c.pedido.nome_cliente} — Contentor {c.numero_adesivo_contentor or c.id}: "
+                f"{c.relato_avaria} | resolver avaria {c.id}"
+                for c in itens["avarias"]
+            )
         return "\n".join(linhas)
 
     def _resumo_operacional(self, perfil: PerfilOperador = PerfilOperador.GESTOR) -> str:
@@ -1151,7 +1226,11 @@ class WhatsappRouterAgent:
             if not aluguer.pago
         ]
         pendencias_carga = self.aluguer_service.listar_pendencias_carga()
-        pendencias_avaria = self.aluguer_service.listar_pendencias_avaria()
+        pendencias_avaria = (
+            self.aluguer_service.listar_pendencias_avaria()
+            if self._avarias_enabled()
+            else []
+        )
 
         linhas = []
         if mostrar_financeiro:
@@ -1170,12 +1249,13 @@ class WhatsappRouterAgent:
             if pendencias_carga
             else ["Nenhuma pendencia de carga."]
         )
-        linhas.append(f"🛠️ Pendencias de avarias: {len(pendencias_avaria)}")
-        linhas.extend(
-            [self._format_pendencia_avaria(aluguer) for aluguer in pendencias_avaria]
-            if pendencias_avaria
-            else ["Nenhuma pendencia de avaria."]
-        )
+        if self._avarias_enabled():
+            linhas.append(f"🛠️ Pendencias de avarias: {len(pendencias_avaria)}")
+            linhas.extend(
+                [self._format_pendencia_avaria(aluguer) for aluguer in pendencias_avaria]
+                if pendencias_avaria
+                else ["Nenhuma pendencia de avaria."]
+            )
         return linhas
 
     def _format_pendencia_financeira(self, aluguer: AluguerContentor) -> str:
@@ -1772,11 +1852,4 @@ class WhatsappRouterAgent:
         return self.operador_service.obter_perfil(telefone) != PerfilOperador.FUNCIONARIO
 
     def _initial_menu(self, perfil: PerfilOperador) -> str:
-        if perfil == PerfilOperador.FUNCIONARIO:
-            return (
-                f"Olá, sou o Robô de Gestão de Contentores da {APP_DISPLAY_NAME}. O que vamos fazer agora?\n\n"
-                "1. Confirmar entrega de contentor\n"
-                "2. Confirmar recolha de contentor\n"
-                "3. Confirmar Despejo no Vazadouro"
-            )
         return MAIN_MENU
