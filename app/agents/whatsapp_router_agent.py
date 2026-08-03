@@ -36,6 +36,7 @@ from app.models.pedido import (
     StatusCicloPedido,
     StatusEntregaPedido,
     StatusPagamento,
+    StatusOperacionalCarrinha,
     StatusRecolhaPedido,
     StatusResolucaoPedido,
     TipoEquipamentoPedido,
@@ -79,7 +80,7 @@ COMMAND_PROFILES = {
     COMMAND_FAMILY_RESOLUTION: {PerfilOperador.GESTOR},
 }
 MAIN_MENU = (
-    f"🤖 Menu principal - {APP_DISPLAY_NAME}\n\n"
+    f"🤖 Menu Principal • {APP_DISPLAY_NAME}\n\n"
     "1️⃣ 📝 Novo pedido\n"
     "2️⃣ 🚛 Entrega de contentor\n"
     "3️⃣ 📦 Recolha de contentor\n"
@@ -100,12 +101,12 @@ MAIN_MENU = (
     "5. Resumo dos contentores"
 )
 MAIN_MENU = (
-    f"🤖 Menu principal - {APP_DISPLAY_NAME}\n\n"
-    "1. 🟢 Novo pedido\n"
-    "2. 🚛 Entrega de contentor\n"
-    "3. 📦 Recolha de contentor\n"
+    f"🤖 Menu Principal • {APP_DISPLAY_NAME}\n\n"
+    "1. 🟢 Novo Pedido\n"
+    "2. 🚛 Confirmar Chegada / Entrega\n"
+    "3. 📦 Confirmar Recolha / Partida\n"
     "4. ♻️ Confirmar Despejo no Vazadouro\n"
-    "5. 📊 Resumo dos contentores\n\n"
+    "5. 📊 Painel de Controle Operacional\n\n"
     "Digite o número da opção desejada."
 )
 CANCELLED_MENU_MESSAGE = "Operação cancelada. Nenhuma alteração foi salva.\n\n" + MAIN_MENU
@@ -242,17 +243,27 @@ class WhatsappRouterAgent:
             return self._handle_operational_command("resumo", message.telefone, perfil)
 
         if text in {"1", "novo pedido", "cadastrar pedido"}:
-            if text == "1" and perfil == PerfilOperador.FUNCIONARIO:
-                return self.entrega_agent.start(conversa)
             if perfil == PerfilOperador.FUNCIONARIO:
                 return "Seu perfil de motorista nÃ£o possui permissÃ£o para cadastrar pedidos."
             return self.pedido_v24_agent.start_cadastro(conversa)
-        if text in {"2", "confirmar entrega de contentor", "confirmar entrega do lote"}:
-            if self.pedido_service.pedidos_pendentes_entrega():
+        if text in {
+            "2", "confirmar entrega de contentor", "confirmar entrega do lote",
+            "confirmar chegada", "confirmar chegada / entrega", "chegada",
+        }:
+            if (
+                self.pedido_service.pedidos_pendentes_entrega()
+                or self.pedido_service.carrinhas_aguardando_chegada()
+            ):
                 return self.pedido_v24_agent.start_entrega(conversa)
             return self.entrega_agent.start(conversa)
-        if text in {"3", "confirmar recolha de contentor"}:
-            if self.pedido_service.contentores_para_recolha():
+        if text in {
+            "3", "confirmar recolha de contentor", "confirmar partida",
+            "confirmar recolha / partida", "partida",
+        }:
+            if (
+                self.pedido_service.contentores_para_recolha()
+                or self.pedido_service.carrinhas_aguardando_partida()
+            ):
                 return self.pedido_v24_agent.start_recolha(conversa)
             return self.recolha_agent.start(conversa)
         if text in {"4", "confirmar despejo no vazadouro", "confirmar despejo"}:
@@ -380,10 +391,19 @@ class WhatsappRouterAgent:
             ))
         carrinhas = self._pedidos_por_entrega(pedidos, today, TipoEquipamentoPedido.CARRINHA.value)
         if carrinhas:
-            blocos.append("🚛 *Envio de Carrinhas:*\n" + "\n".join(
+            blocos.append("🚛 *Chegada de Carrinhas:*\n" + "\n".join(
                 self._format_entrega_hoje(pedido, itens, incluir_horario=True)
                 for pedido, itens in carrinhas
             ))
+        carrinhas_em_atendimento = self._carrinhas_em_atendimento(pedidos)
+        if carrinhas_em_atendimento:
+            blocos.append(
+                "⏱️ *Carrinhas em atendimento:*\n"
+                + "\n".join(
+                    self._format_carrinha_em_atendimento(item)
+                    for item in carrinhas_em_atendimento
+                )
+            )
         if perfil == PerfilOperador.GESTOR:
             renovacoes = self._contentores_vencendo_amanha(pedidos, today)
             renovacoes_legadas = self._alugueres_por_vencimento(alugueres, today + timedelta(days=1))
@@ -630,6 +650,31 @@ class WhatsappRouterAgent:
 
     def _format_carrinha_amanha(self, pedido: Pedido, itens: list[PedidoContentor]) -> str:
         return f"• {pedido.nome_cliente} ({len(itens)} un) • ⏰ {self._horarios_label(itens)}"
+
+    def _carrinhas_em_atendimento(self, pedidos: list[Pedido]) -> list[PedidoContentor]:
+        return sorted(
+            [
+                item
+                for pedido in pedidos
+                for item in pedido.contentores
+                if item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+                and item.status_operacional_carrinha
+                == StatusOperacionalCarrinha.EM_ATENDIMENTO.value
+            ],
+            key=lambda item: (item.partida_prevista_carrinha_data_hora or item.criado_em, item.id),
+        )
+
+    def _format_carrinha_em_atendimento(self, item: PedidoContentor) -> str:
+        previsao = self.pedido_service.previsao_partida_carrinha(item)
+        agora = utcnow()
+        if self.pedido_service.carrinha_atrasada(item, agora):
+            situacao = "🔴 Atrasada"
+        elif previsao and agora >= previsao - timedelta(minutes=30):
+            situacao = "🟡 Próxima do prazo"
+        else:
+            situacao = "🟢 Dentro do prazo"
+        hora = previsao.astimezone(self._timezone()).strftime("%H:%M") if previsao else "não informada"
+        return f"• {item.pedido.nome_cliente} — {situacao} — partida prevista {hora}"
 
     def _format_renovacao(self, pedido: Pedido, itens: list[PedidoContentor]) -> str:
         linhas = [f"• {pedido.nome_cliente} ({len(itens)} un) • Valor: {self._money(pedido.valor_global)}"]
@@ -1772,11 +1817,4 @@ class WhatsappRouterAgent:
         return self.operador_service.obter_perfil(telefone) != PerfilOperador.FUNCIONARIO
 
     def _initial_menu(self, perfil: PerfilOperador) -> str:
-        if perfil == PerfilOperador.FUNCIONARIO:
-            return (
-                f"Olá, sou o Robô de Gestão de Contentores da {APP_DISPLAY_NAME}. O que vamos fazer agora?\n\n"
-                "1. Confirmar entrega de contentor\n"
-                "2. Confirmar recolha de contentor\n"
-                "3. Confirmar Despejo no Vazadouro"
-            )
         return MAIN_MENU

@@ -267,3 +267,92 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
     assert pedido_contentor_row["avaria_resolvida_por"] is None
     assert "quantidade_contentores" not in columns
     assert row_count == 1
+
+
+def test_migracao_carrinhas_legadas_por_evidencia_e_idempotente(tmp_path):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'carrinhas-legadas.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE pedidos (
+                id INTEGER PRIMARY KEY,
+                nome_cliente TEXT NOT NULL,
+                telefone_cliente TEXT NOT NULL,
+                data_planejada DATETIME NOT NULL,
+                valor_global NUMERIC NOT NULL,
+                status_pagamento TEXT NOT NULL,
+                forma_pagamento TEXT,
+                pedido_feito_por TEXT NOT NULL,
+                endereco_aproximado TEXT NOT NULL,
+                criado_em DATETIME NOT NULL,
+                atualizado_em DATETIME NOT NULL
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO pedidos VALUES
+            (1, 'Eloisa', '351900000001', '2026-07-29', 300, 'PENDENTE', NULL, 'gestor', 'Rua', '2026-07-29', '2026-07-29')
+        """))
+        connection.execute(text("""
+            CREATE TABLE pedido_contentores (
+                id INTEGER PRIMARY KEY,
+                pedido_id INTEGER NOT NULL,
+                numero_adesivo_contentor TEXT,
+                tipo_equipamento TEXT NOT NULL,
+                residuo_contratado TEXT NOT NULL,
+                status_entrega TEXT NOT NULL,
+                entrega_feita_por TEXT,
+                entrega_latitude FLOAT,
+                entrega_longitude FLOAT,
+                entrega_ponto_referencia TEXT,
+                entrega_data_hora DATETIME,
+                status_recolha TEXT NOT NULL,
+                recolha_feita_por TEXT,
+                recolha_data_hora DATETIME,
+                status_ciclo TEXT NOT NULL,
+                despejo_data_hora DATETIME,
+                contentor_avariado BOOLEAN DEFAULT 0 NOT NULL,
+                carga_errada BOOLEAN DEFAULT 0 NOT NULL,
+                criado_em DATETIME NOT NULL,
+                atualizado_em DATETIME NOT NULL
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO pedido_contentores VALUES
+            (1,1,NULL,'CARRINHA','Entulho Limpo','PENDENTE',NULL,NULL,NULL,NULL,NULL,'PENDENTE',NULL,NULL,'EM_ANDAMENTO',NULL,0,0,'2026-07-29','2026-07-29'),
+            (2,1,NULL,'CARRINHA','Entulho Limpo','ENTREGUE','op',38.7,-9.1,'Portao','2026-07-29 10:00','PENDENTE',NULL,NULL,'EM_ANDAMENTO',NULL,0,0,'2026-07-29','2026-07-29'),
+            (3,1,NULL,'CARRINHA','Entulho Limpo','ENTREGUE','op',38.7,-9.1,NULL,'2026-07-29 10:00','RECOLHIDO','op','2026-07-29 12:30','EM_ANDAMENTO',NULL,0,0,'2026-07-29','2026-07-29'),
+            (4,1,NULL,'CARRINHA','Entulho Limpo','ENTREGUE','op',38.7,-9.1,NULL,'2026-07-29 10:00','RECOLHIDO','op','2026-07-29 12:00','CONCLUIDO','2026-07-29 13:00',0,0,'2026-07-29','2026-07-29'),
+            (5,1,NULL,'CARRINHA','Entulho Limpo','ENTREGUE',NULL,NULL,NULL,NULL,NULL,'PENDENTE',NULL,NULL,'EM_ANDAMENTO',NULL,0,0,'2026-07-29','2026-07-29'),
+            (6,1,'77','CONTENTOR','Entulho Limpo','ENTREGUE','op',38.7,-9.1,NULL,'2026-07-29 10:00','RECOLHIDO','op','2026-07-29 12:00','CONCLUIDO','2026-07-29 13:00',0,0,'2026-07-29','2026-07-29')
+        """))
+
+    ensure_alugueres_contentor_schema(engine)
+    ensure_alugueres_contentor_schema(engine)
+
+    with engine.connect() as connection:
+        estados = dict(connection.execute(text(
+            "SELECT id, status_operacional_carrinha FROM pedido_contentores ORDER BY id"
+        )).all())
+        eloisa = connection.execute(text("""
+            SELECT p.valor_global, p.status_pagamento, p.forma_pagamento,
+                   pc.chegada_carrinha_data_hora, pc.partida_carrinha_data_hora,
+                   pc.chegada_carrinha_feita_por, pc.partida_carrinha_feita_por
+              FROM pedidos p JOIN pedido_contentores pc ON pc.pedido_id=p.id
+             WHERE pc.id=1
+        """)).mappings().one()
+
+    assert estados[1] == "AGUARDANDO_CHEGADA"
+    assert estados[2] == "EM_ATENDIMENTO"
+    assert estados[3] == "AGUARDANDO_DESPEJO"
+    assert estados[4] == "CONCLUIDA"
+    assert estados[5] == "AGUARDANDO_CHEGADA"
+    assert estados[6] == "AGUARDANDO_CHEGADA"
+    assert float(eloisa["valor_global"]) == 300
+    assert eloisa["status_pagamento"] == "PENDENTE"
+    assert eloisa["forma_pagamento"] is None
+    assert eloisa["chegada_carrinha_data_hora"] is None
+    assert eloisa["partida_carrinha_data_hora"] is None
+    assert eloisa["chegada_carrinha_feita_por"] is None
+    assert eloisa["partida_carrinha_feita_por"] is None

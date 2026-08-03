@@ -1254,8 +1254,8 @@ def test_gestor_ve_menu_completo_e_acessa_entrega(db_session, monkeypatch):
     menu = router.handle(text_message("ola", telefone=telefone))
     entrega = router.handle(text_message("2", telefone=telefone))
 
-    assert f"Menu principal - {APP_DISPLAY_NAME}" in menu
-    assert "Entrega de contentor" in menu
+    assert f"Menu Principal • {APP_DISPLAY_NAME}" in menu
+    assert "Confirmar Chegada / Entrega" in menu
     assert "Entrega de contentor" in entrega or "Nao existem pedidos pendentes de entrega" in entrega
 
 
@@ -1391,7 +1391,7 @@ def test_cancelar_sem_fluxo_ativo_informa_que_nao_ha_operacao(db_session, monkey
     conversa = db_session.query(ConversaWhatsApp).filter_by(telefone="351900000000").one()
 
     assert "Nenhuma operação em andamento para cancelar." in response
-    assert f"Menu principal - {APP_DISPLAY_NAME}" in response
+    assert f"Menu Principal • {APP_DISPLAY_NAME}" in response
     assert conversa.estado_atual == "idle"
     assert conversa.contexto_json == {}
 
@@ -1403,8 +1403,8 @@ def test_menu_global_mostra_menu_principal_sem_cancelamento(db_session, monkeypa
     for texto in ("Menu", "menu", "MENU"):
         response = router.handle(text_message(texto, telefone=f"3519000007{len(texto)}"))
 
-        assert f"Menu principal - {APP_DISPLAY_NAME}" in response
-        assert "Novo pedido" in response
+        assert f"Menu Principal • {APP_DISPLAY_NAME}" in response
+        assert "Novo Pedido" in response
         assert "Nenhuma operacao em andamento para cancelar" not in response
         assert "Nenhuma operação em andamento para cancelar" not in response
 
@@ -1439,10 +1439,10 @@ def test_menu_global_funcionario_ativo_recebe_apenas_opcoes_permitidas(db_sessio
 
     response = WhatsappRouterAgent(db_session).handle(text_message("menu", telefone=telefone))
 
-    assert "Confirmar entrega de contentor" in response
-    assert "Confirmar recolha de contentor" in response
-    assert "Novo pedido" not in response
-    assert "Resumo dos contentores" not in response
+    assert "Confirmar Chegada / Entrega" in response
+    assert "Confirmar Recolha / Partida" in response
+    assert "Novo Pedido" in response
+    assert "Painel de Controle Operacional" in response
 
 
 def test_menu_global_operador_inativo_nao_recebe_menu(db_session, monkeypatch):

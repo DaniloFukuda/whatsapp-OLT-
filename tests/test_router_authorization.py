@@ -467,7 +467,7 @@ def test_router_uses_one_access_decision_per_message(db_session, active_manager)
 
     response = router.handle(message("menu", MANAGER_PHONE))
 
-    assert "Menu principal" in response
+    assert "Menu Principal" in response
     router.operador_service.decidir_acesso.assert_called_once_with(MANAGER_PHONE)
     router.operador_service.verificar_autorizacao.assert_not_called()
     router.operador_service.obter_perfil.assert_not_called()

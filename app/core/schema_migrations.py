@@ -53,6 +53,18 @@ PEDIDO_CONTENTORES_COLUMNS = {
     "precisa_mao_de_obra": "BOOLEAN DEFAULT 0 NOT NULL",
     "despejo_feito_por": "TEXT",
     "despejo_data_hora": "DATETIME",
+    "status_chegada_carrinha": "TEXT DEFAULT 'AGUARDANDO_CHEGADA' NOT NULL",
+    "chegada_carrinha_feita_por": "TEXT",
+    "chegada_carrinha_data_hora": "DATETIME",
+    "status_partida_carrinha": "TEXT DEFAULT 'AGUARDANDO_PARTIDA' NOT NULL",
+    "partida_carrinha_feita_por": "TEXT",
+    "partida_carrinha_data_hora": "DATETIME",
+    "status_operacional_carrinha": "TEXT DEFAULT 'AGUARDANDO_CHEGADA' NOT NULL",
+    "frota_carrinha": "TEXT",
+    "chegada_carrinha_latitude": "FLOAT",
+    "chegada_carrinha_longitude": "FLOAT",
+    "chegada_carrinha_ponto_referencia": "TEXT",
+    "partida_prevista_carrinha_data_hora": "DATETIME",
     "avaria_estado_anterior": "TEXT",
     "avaria_resolvida_em": "DATETIME",
     "avaria_resolvida_por": "TEXT",
@@ -125,6 +137,53 @@ def ensure_alugueres_contentor_schema(engine: Engine) -> None:
                 connection.execute(
                     text(f"ALTER TABLE pedido_contentores ADD COLUMN {column_name} {column_definition}")
                 )
+        pedido_contentores_columns = {
+            row["name"]
+            for row in connection.execute(text("PRAGMA table_info(pedido_contentores)")).mappings()
+        }
+        if {
+            "entrega_feita_por",
+            "entrega_data_hora",
+            "entrega_latitude",
+            "entrega_longitude",
+            "entrega_ponto_referencia",
+            "recolha_feita_por",
+            "recolha_data_hora",
+        } <= pedido_contentores_columns:
+            connection.execute(text("""
+                UPDATE pedido_contentores
+                   SET status_chegada_carrinha = 'CHEGOU',
+                       status_operacional_carrinha = 'EM_ATENDIMENTO',
+                       chegada_carrinha_feita_por = entrega_feita_por,
+                       chegada_carrinha_data_hora = entrega_data_hora,
+                       chegada_carrinha_latitude = entrega_latitude,
+                       chegada_carrinha_longitude = entrega_longitude,
+                       chegada_carrinha_ponto_referencia = entrega_ponto_referencia,
+                       partida_prevista_carrinha_data_hora = datetime(entrega_data_hora, '+2 hours')
+                 WHERE tipo_equipamento = 'CARRINHA'
+                   AND entrega_data_hora IS NOT NULL
+                   AND status_operacional_carrinha = 'AGUARDANDO_CHEGADA'
+                   AND chegada_carrinha_data_hora IS NULL
+            """))
+            connection.execute(text("""
+                UPDATE pedido_contentores
+                   SET status_partida_carrinha = 'PARTIU',
+                       status_operacional_carrinha = 'AGUARDANDO_DESPEJO',
+                       partida_carrinha_feita_por = recolha_feita_por,
+                       partida_carrinha_data_hora = recolha_data_hora
+                 WHERE tipo_equipamento = 'CARRINHA'
+                   AND recolha_data_hora IS NOT NULL
+                   AND status_operacional_carrinha IN ('AGUARDANDO_CHEGADA', 'EM_ATENDIMENTO')
+                   AND partida_carrinha_data_hora IS NULL
+            """))
+            connection.execute(text("""
+                UPDATE pedido_contentores
+                   SET status_operacional_carrinha = 'CONCLUIDA'
+                 WHERE tipo_equipamento = 'CARRINHA'
+                   AND despejo_data_hora IS NOT NULL
+                   AND status_ciclo = 'CONCLUIDO'
+                   AND status_operacional_carrinha != 'CONCLUIDA'
+            """))
 
         pedidos_columns = {
             row["name"]

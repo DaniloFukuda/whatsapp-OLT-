@@ -988,7 +988,15 @@ def test_menu_principal_usa_texto_com_emojis_sem_list_message():
     assert "interactive_type" not in result
     assert "OLT Gestão de Resíduos & Demolições" in result["body"]
     assert "OLT Entulhos" not in result["body"]
-    assert "1. 🟢 Novo pedido" in result["body"]
+    assert result["body"] == (
+        "🤖 Menu Principal • OLT Gestão de Resíduos & Demolições\n\n"
+        "1. 🟢 Novo Pedido\n"
+        "2. 🚛 Confirmar Chegada / Entrega\n"
+        "3. 📦 Confirmar Recolha / Partida\n"
+        "4. ♻️ Confirmar Despejo no Vazadouro\n"
+        "5. 📊 Painel de Controle Operacional\n\n"
+        "Digite o número da opção desejada."
+    )
 
 
 def test_cadastro_v24_carrinha_valida_horario_e_mao_de_obra(db_session, monkeypatch):
@@ -1178,7 +1186,7 @@ def test_entrega_v24_guarda_lote_no_contexto_ate_gps(db_session, monkeypatch):
     assert router.pop_pending_messages() == [MAIN_MENU]
 
 
-def test_entrega_v24_carrinha_nao_aparece_no_fluxo_de_contentor(db_session, monkeypatch):
+def test_opcao_compartilhada_lista_carrinha_para_chegada_sem_mutacao(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     pedido = PedidoService(db_session).criar(
         nome_cliente="Cliente Carrinha Entrega", telefone_cliente="351912345678",
@@ -1200,9 +1208,10 @@ def test_entrega_v24_carrinha_nao_aparece_no_fluxo_de_contentor(db_session, monk
 
     db_session.refresh(pedido.contentores[0])
     conversa = db_session.query(ConversaWhatsApp).one()
-    assert "nao existem pedidos pendentes de entrega" in response.lower()
-    assert "Cliente Carrinha Entrega" not in response
-    assert conversa.estado_atual == "idle"
+    assert "confirmar a chegada / entrega" in response.lower()
+    assert "Cliente Carrinha Entrega" in response
+    assert "Carrinha x1" in response
+    assert conversa.estado_atual == "v24_entrega_pedido"
     assert pedido.contentores[0].numero_adesivo_contentor is None
     assert pedido.contentores[0].status_entrega == StatusEntregaPedido.PENDENTE.value
     assert pedido.contentores[0].entrega_latitude is None
@@ -1533,7 +1542,7 @@ def test_service_rejeita_entrega_com_ativo_de_outro_pedido(db_session):
         )
 
 
-def test_recolha_v24_lista_apenas_contentor_em_pedido_legado_misto(db_session, monkeypatch):
+def test_pedido_legado_misto_e_bloqueado_no_menu_compartilhado_sem_mutacao(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     pedido = criar_pedido_legado_misto(
         db_session,
@@ -1547,34 +1556,17 @@ def test_recolha_v24_lista_apenas_contentor_em_pedido_legado_misto(db_session, m
     router = WhatsappRouterAgent(db_session)
 
     entrega = router.handle(msg("2"))
-    assert "Quantidade: 1 equipamento" in entrega
-    assert "Carrinha" not in entrega
-    router.handle(msg("cancelar"))
-
-    entregar_pedido(
-        pedido,
-        db_session,
-        datetime.now(timezone.utc),
-        ["44", "0"],
+    assert "Quantidade: 2 equipamentos" in entrega
+    assert "Tipo: Equipamento x2" in entrega
+    bloqueio = router.handle(msg("1"))
+    assert "mistura contentores e carrinhas" in bloqueio
+    db_session.refresh(pedido.contentores[0])
+    db_session.refresh(pedido.contentores[1])
+    assert all(
+        item.status_entrega == StatusEntregaPedido.PENDENTE.value
+        for item in pedido.contentores
     )
-
-    recolha = router.handle(msg("3"))
-
-    assert "📦 Contentor 44" in recolha
-    assert "Carrinha" not in recolha
-    assert pedido.contentores[1].status_recolha == StatusRecolhaPedido.PENDENTE.value
-
-    router.handle(msg("cancelar"))
-    for item in pedido.contentores:
-        item.status_recolha = StatusRecolhaPedido.RECOLHIDO.value
-    db_session.commit()
-
-    despejo_pedidos = router.handle(msg("4"))
-    despejo_ativos = router.handle(msg("1"))
-    assert "1 Contentor(es)" in despejo_pedidos
-    assert "Carrinha" not in despejo_pedidos
-    assert "Contentor 44" in despejo_ativos
-    assert "Carrinha" not in despejo_ativos
+    assert db_session.query(ContentorFoto).count() == 0
 
 
 def test_recolha_v24_confirma_todos_ativos_do_pedido_em_loop(db_session, monkeypatch):
@@ -1620,7 +1612,7 @@ def test_recolha_v24_confirma_todos_ativos_do_pedido_em_loop(db_session, monkeyp
 
     db_session.refresh(pedido.contentores[0])
     db_session.refresh(pedido.contentores[1])
-    assert "Selecione o pedido para recolha" in lista
+    assert "Selecione o pedido para confirmar recolha / partida" in lista
     assert "Selecione o ativo" in ativos
     assert "Contentor 81" in primeiro_prompt
     assert "Confirme a recolha" in confirmacao_primeiro
@@ -2433,18 +2425,24 @@ def test_despejo_v24_divergencia_valida_cria_pendencia_e_rejeita_relato_curto(db
         router.handle(msg(item))
     pergunta = router.handle(msg("despejo_conformidade:nao"))
     curto = router.handle(msg("curto"))
-    final = router.handle(msg("  havia plastico misturado  "))
+    foto = router.handle(msg("  havia plastico misturado  "))
+    router.handle(msg(kind="image", media="foto-divergencia"))
+    confirmacao = router.handle(msg("2"))
+    final = router.handle(msg("1"))
 
     db_session.refresh(pedido.contentores[0])
     assert "pelo menos 10" in pergunta
     assert "pelo menos 10" in curto
-    assert "Divergência registrada" in final
-    assert pedido.contentores[0].residuo_efetivo_vazadouro is None
+    assert "Envie a foto" in foto
+    assert "Confirmar despejo" in confirmacao
+    assert "processado no vazadouro" in final
+    assert pedido.contentores[0].residuo_efetivo_vazadouro == "Entulho Limpo"
     assert pedido.contentores[0].carga_errada is True
     assert pedido.contentores[0].relato_carga == "havia plastico misturado"
     assert pedido.contentores[0].status_resolucao_carga == StatusResolucaoPedido.PENDENTE.value
-    assert pedido.contentores[0].status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
-    assert pedido.contentores[0].despejo_data_hora is None
+    assert pedido.contentores[0].status_ciclo == StatusCicloPedido.CONCLUIDO.value
+    assert pedido.contentores[0].despejo_data_hora is not None
+    assert db_session.query(ContentorFoto).filter_by(tipo_foto=TipoFoto.DESPEJO.value).count() == 1
 
 
 def test_despejo_v24_conflito_concorrente_recarrega_restantes_sem_duplicar_fotos(db_session, monkeypatch):
@@ -2626,7 +2624,7 @@ def test_resumo_v32_gestor_ve_blocos_contentores_carrinhas_financeiro_e_menu_sep
     assert "Total a receber: 0,00 €" in response
     assert "Total projetado: 180,00 €" in response
     assert "[Abrir endereço]" not in response
-    assert "Menu principal" not in response
+    assert "Menu Principal" not in response
     assert router.pop_pending_messages() == [MAIN_MENU]
 
 
@@ -2670,12 +2668,7 @@ def test_resumo_v32_funcionario_oculta_comercial_financeiro_pagamentos_e_carga(d
     assert "https://wa.me/?text=resolver%20avaria%202" in response
     assert "Menu principal" not in response
     pending = router.pop_pending_messages()
-    assert pending == [
-        "Olá, sou o Robô de Gestão de Contentores da OLT Gestão de Resíduos & Demolições. O que vamos fazer agora?\n\n"
-        "1. Confirmar entrega de contentor\n"
-        "2. Confirmar recolha de contentor\n"
-        "3. Confirmar Despejo no Vazadouro"
-    ]
+    assert pending == [MAIN_MENU]
 
 
 def test_resumo_v33_agrupa_pedido_sem_duplicar_ativos_fotos_ou_pendencias(db_session):
@@ -2828,7 +2821,7 @@ def test_resumo_v4_entregas_hoje_contentor_carrinha_endereco_e_horario_seguro(db
     assert "📦 *Entrega de Contentores:*" in response
     assert "• Cliente Entrega Maps (2 un)" in response
     assert "📍 Abrir endereço: https://www.google.com/maps?q=38.7,-9.1" in response
-    assert "🚛 *Envio de Carrinhas:*" in response
+    assert "🚛 *Chegada de Carrinhas:*" in response
     assert "• Cliente Carrinha Antiga (1 un)" in response
     assert "⏰ Horário: Horário não informado" in response
     assert "📍 Endereço: Rua Textual" in response

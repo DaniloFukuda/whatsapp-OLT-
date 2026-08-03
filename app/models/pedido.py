@@ -22,6 +22,23 @@ class StatusRecolhaPedido(StrEnum):
     RECOLHIDO = "RECOLHIDO"
 
 
+class StatusChegadaCarrinha(StrEnum):
+    AGUARDANDO_CHEGADA = "AGUARDANDO_CHEGADA"
+    CHEGOU = "CHEGOU"
+
+
+class StatusPartidaCarrinha(StrEnum):
+    AGUARDANDO_PARTIDA = "AGUARDANDO_PARTIDA"
+    PARTIU = "PARTIU"
+
+
+class StatusOperacionalCarrinha(StrEnum):
+    AGUARDANDO_CHEGADA = "AGUARDANDO_CHEGADA"
+    EM_ATENDIMENTO = "EM_ATENDIMENTO"
+    AGUARDANDO_DESPEJO = "AGUARDANDO_DESPEJO"
+    CONCLUIDA = "CONCLUIDA"
+
+
 class StatusCicloPedido(StrEnum):
     EM_ANDAMENTO = "EM_ANDAMENTO"
     CONCLUIDO = "CONCLUIDO"
@@ -100,6 +117,26 @@ class PedidoContentor(Base):
     )
     recolha_feita_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
     recolha_data_hora: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_chegada_carrinha: Mapped[str] = mapped_column(
+        String(30), default=StatusChegadaCarrinha.AGUARDANDO_CHEGADA.value, nullable=False
+    )
+    chegada_carrinha_feita_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    chegada_carrinha_data_hora: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_partida_carrinha: Mapped[str] = mapped_column(
+        String(30), default=StatusPartidaCarrinha.AGUARDANDO_PARTIDA.value, nullable=False
+    )
+    partida_carrinha_feita_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    partida_carrinha_data_hora: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_operacional_carrinha: Mapped[str] = mapped_column(
+        String(30), default=StatusOperacionalCarrinha.AGUARDANDO_CHEGADA.value, nullable=False
+    )
+    frota_carrinha: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    chegada_carrinha_latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    chegada_carrinha_longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    chegada_carrinha_ponto_referencia: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    partida_prevista_carrinha_data_hora: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     contentor_avariado: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     relato_avaria: Mapped[str | None] = mapped_column(Text, nullable=True)
     status_resolucao_avaria: Mapped[str] = mapped_column(

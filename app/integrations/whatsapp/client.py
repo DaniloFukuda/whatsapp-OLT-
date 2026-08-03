@@ -317,7 +317,11 @@ def _is_corrigir_pedido_body(body: str) -> bool:
 
 
 def _is_entrega_pedido_body(body: str) -> bool:
-    return "selecione o cliente para iniciar a entrega" in _normalize_button_text(body)
+    normalized = _normalize_button_text(body)
+    return (
+        "selecione o cliente para iniciar a entrega" in normalized
+        or "selecione o cliente para confirmar a chegada / entrega" in normalized
+    )
 
 
 def _corrigir_pedido_options(body: str) -> list[dict[str, str]]:
@@ -477,7 +481,11 @@ def _normalize_button_text(value: str) -> str:
 
 
 def _is_main_menu(body: str) -> bool:
-    return "Menu principal - OLT Gestão de Resíduos & Demolições" in (body or "")
+    value = body or ""
+    return (
+        "Menu principal - OLT Gestão de Resíduos & Demolições" in value
+        or "Menu Principal • OLT Gestão de Resíduos & Demolições" in value
+    )
 
 
 def _should_mock(settings) -> bool:

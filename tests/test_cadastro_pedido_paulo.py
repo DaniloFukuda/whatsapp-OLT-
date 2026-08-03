@@ -290,12 +290,12 @@ def test_menu_funcionario_mostra_entrega_e_recolha(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("menu", telefone=telefone))
 
-    assert "1. Confirmar entrega de contentor" in response
-    assert "2. Confirmar recolha de contentor" in response
-    assert "Novo pedido" not in response
+    assert "1. 🟢 Novo Pedido" in response
+    assert "2. 🚛 Confirmar Chegada / Entrega" in response
+    assert "3. 📦 Confirmar Recolha / Partida" in response
 
 
-def test_funcionario_opcao_1_abre_entrega_nao_cadastro(db_session, monkeypatch):
+def test_funcionario_opcao_1_respeita_permissao_de_cadastro(db_session, monkeypatch):
     liberar_operadores(monkeypatch)
     telefone = "351900009005"
     db_session.add(
@@ -310,5 +310,5 @@ def test_funcionario_opcao_1_abre_entrega_nao_cadastro(db_session, monkeypatch):
 
     response = WhatsappRouterAgent(db_session).handle(text_message("1", telefone=telefone))
 
-    assert "Nao existem pedidos pendentes de entrega" in response
+    assert "permiss" in response.lower()
     assert "Cadastro de pedido iniciado" not in response
