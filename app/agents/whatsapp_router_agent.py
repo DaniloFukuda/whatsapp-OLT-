@@ -51,6 +51,7 @@ ACTIVE_ALUGUER_STATUSES = {StatusAluguer.ATIVO, StatusAluguer.VENCENDO, StatusAl
 APP_DISPLAY_NAME = "OLT Gestão de Resíduos & Demolições"
 UNAUTHORIZED_MESSAGE = "Telefone não autorizado."
 FORBIDDEN_MESSAGE = "Operação não permitida."
+AVARIAS_DISABLED_MESSAGE = "A funcionalidade de avarias não está disponível nesta empresa."
 COMMANDS = {"resumo", "lista", "disponiveis", "alugados", "vencendo", "atrasados"}
 START_COMMANDS = {"iniciar", "cadastrar", "comecar", "começar", "novo"}
 ALTER_COMMANDS = {"alterar", "modificar"}
@@ -138,6 +139,16 @@ class WhatsappRouterAgent:
         if perfil is None:
             return UNAUTHORIZED_MESSAGE
         conversa = self._get_or_create_conversa(message.telefone)
+
+        if not self._avarias_enabled():
+            recovered = self._recover_disabled_avaria_review(conversa)
+            if recovered:
+                return AVARIAS_DISABLED_MESSAGE + " A revisão foi cancelada com segurança e o fluxo anterior foi retomado."
+            if text.startswith("resolver avaria") or text in {
+                "avaria", "avarias", "listar avaria", "listar avarias", "lista avaria", "lista avarias",
+                "resolucao_avaria:confirmar", "resolucao_avaria:voltar", "resolucao_avaria:cancelar",
+            }:
+                return AVARIAS_DISABLED_MESSAGE
 
         if text.startswith("resolver avaria"):
             if not self._can_execute_command(perfil, COMMAND_FAMILY_RESOLUTION):
@@ -337,6 +348,24 @@ class WhatsappRouterAgent:
     def _can_execute_command(self, perfil: PerfilOperador, family: str) -> bool:
         return perfil in COMMAND_PROFILES[family]
 
+    @staticmethod
+    def _avarias_enabled() -> bool:
+        return get_settings().feature_avarias_enabled
+
+    def _recover_disabled_avaria_review(self, conversa: ConversaWhatsApp) -> bool:
+        if conversa.estado_atual != RESOLUCAO_AVARIA_REVISAO_STATE:
+            return False
+        contexto = self._contexto_dict(conversa.contexto_json)
+        revisao = self._contexto_dict(contexto.get(RESOLUCAO_AVARIA_CONTEXT_KEY))
+        if isinstance(revisao.get("contexto_anterior"), dict):
+            conversa.estado_atual = revisao.get("estado_anterior") or "idle"
+            conversa.contexto_json = deepcopy(revisao["contexto_anterior"])
+        else:
+            conversa.estado_atual = "idle"
+            conversa.contexto_json = {}
+        self.db.commit()
+        return True
+
     def _handle_operational_command(
         self,
         command: str,
@@ -459,8 +488,8 @@ class WhatsappRouterAgent:
                 blocos.append("💳 *Pagamentos Pendentes:*\n" + "\n".join(
                     linhas
                 ))
-        avarias = self._avarias_ativas(pedidos)
-        avarias_legadas = self._alugueres_avarias_ativas(alugueres)
+        avarias = self._avarias_ativas(pedidos) if self._avarias_enabled() else []
+        avarias_legadas = self._alugueres_avarias_ativas(alugueres) if self._avarias_enabled() else []
         if avarias or avarias_legadas:
             linhas = [self._format_avaria(item) for item in avarias]
             linhas.extend(self._format_avaria_aluguer(aluguer) for aluguer in avarias_legadas)
@@ -918,7 +947,7 @@ class WhatsappRouterAgent:
                         f"contratado {item.residuo_contratado}; vazadouro {item.residuo_efetivo_vazadouro or 'nao informado'} "
                         f"| resolver carga {item.id}"
                     )
-        if itens["avarias"]:
+        if self._avarias_enabled() and itens["avarias"]:
             linhas.append("Avarias em equipamentos:")
             for item in itens["avarias"]:
                 linhas.append(
@@ -1028,13 +1057,14 @@ class WhatsappRouterAgent:
             f"{c.relato_carga} | resolver carga {c.id}"
             for c in itens["cargas"]
         )
-        linhas.append("")
-        linhas.append(f"Avarias: {len(itens['avarias'])}")
-        linhas.extend(
-            f"• {c.pedido.nome_cliente} — Contentor {c.numero_adesivo_contentor or c.id}: "
-            f"{c.relato_avaria} | resolver avaria {c.id}"
-            for c in itens["avarias"]
-        )
+        if self._avarias_enabled():
+            linhas.append("")
+            linhas.append(f"Avarias: {len(itens['avarias'])}")
+            linhas.extend(
+                f"• {c.pedido.nome_cliente} — Contentor {c.numero_adesivo_contentor or c.id}: "
+                f"{c.relato_avaria} | resolver avaria {c.id}"
+                for c in itens["avarias"]
+            )
         return "\n".join(linhas)
 
     def _resumo_operacional(self, perfil: PerfilOperador = PerfilOperador.GESTOR) -> str:
@@ -1196,7 +1226,11 @@ class WhatsappRouterAgent:
             if not aluguer.pago
         ]
         pendencias_carga = self.aluguer_service.listar_pendencias_carga()
-        pendencias_avaria = self.aluguer_service.listar_pendencias_avaria()
+        pendencias_avaria = (
+            self.aluguer_service.listar_pendencias_avaria()
+            if self._avarias_enabled()
+            else []
+        )
 
         linhas = []
         if mostrar_financeiro:
@@ -1215,12 +1249,13 @@ class WhatsappRouterAgent:
             if pendencias_carga
             else ["Nenhuma pendencia de carga."]
         )
-        linhas.append(f"🛠️ Pendencias de avarias: {len(pendencias_avaria)}")
-        linhas.extend(
-            [self._format_pendencia_avaria(aluguer) for aluguer in pendencias_avaria]
-            if pendencias_avaria
-            else ["Nenhuma pendencia de avaria."]
-        )
+        if self._avarias_enabled():
+            linhas.append(f"🛠️ Pendencias de avarias: {len(pendencias_avaria)}")
+            linhas.extend(
+                [self._format_pendencia_avaria(aluguer) for aluguer in pendencias_avaria]
+                if pendencias_avaria
+                else ["Nenhuma pendencia de avaria."]
+            )
         return linhas
 
     def _format_pendencia_financeira(self, aluguer: AluguerContentor) -> str:

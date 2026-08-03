@@ -7,6 +7,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.time import utcnow
+from app.core.config import get_settings
 from app.models.aluguer import ContentorFoto
 from app.models.pedido import (
     Pedido,
@@ -591,6 +592,9 @@ class PedidoService:
             or contentor.status_recolha != StatusRecolhaPedido.PENDENTE.value
         ):
             raise ValueError("Contentor não disponível para recolha.")
+        avarias_enabled = get_settings().feature_avarias_enabled
+        if avariado and not avarias_enabled:
+            raise ValueError("A funcionalidade de avarias não está disponível nesta empresa.")
         relato_limpo = (relato or "").strip()
         if avariado and len(relato_limpo) < 10:
             raise ValueError("O relato da avaria precisa ter pelo menos 10 caracteres.")
@@ -602,13 +606,14 @@ class PedidoService:
         contentor.status_recolha = StatusRecolhaPedido.RECOLHIDO.value
         contentor.recolha_feita_por = operador
         contentor.recolha_data_hora = utcnow()
-        contentor.contentor_avariado = avariado
-        contentor.relato_avaria = relato_limpo if avariado else None
-        contentor.status_resolucao_avaria = (
-            StatusResolucaoPedido.PENDENTE.value
-            if avariado
-            else StatusResolucaoPedido.NAO_APLICA.value
-        )
+        if avarias_enabled:
+            contentor.contentor_avariado = avariado
+            contentor.relato_avaria = relato_limpo if avariado else None
+            contentor.status_resolucao_avaria = (
+                StatusResolucaoPedido.PENDENTE.value
+                if avariado
+                else StatusResolucaoPedido.NAO_APLICA.value
+            )
         fotos_existentes = {
             foto.url_midia
             for foto in contentor.fotos
@@ -646,6 +651,9 @@ class PedidoService:
         ):
             raise ValueError("Carrinha não disponível para confirmar partida.")
         relato_limpo = (relato or "").strip()
+        avarias_enabled = get_settings().feature_avarias_enabled
+        if not avarias_enabled and (avariado or relato_limpo):
+            raise ValueError("A funcionalidade de avarias não está disponível nesta empresa.")
         if not fotos:
             raise ValueError("Envie pelo menos uma foto da partida.")
         if avariado and len(relato_limpo) < 10:
@@ -680,12 +688,13 @@ class PedidoService:
             carrinha.status_recolha = StatusRecolhaPedido.RECOLHIDO.value
             carrinha.recolha_feita_por = operador
             carrinha.recolha_data_hora = agora
-            carrinha.contentor_avariado = avariado
-            carrinha.relato_avaria = relato_limpo if avariado else None
-            carrinha.status_resolucao_avaria = (
-                StatusResolucaoPedido.PENDENTE.value if avariado
-                else StatusResolucaoPedido.NAO_APLICA.value
-            )
+            if avarias_enabled:
+                carrinha.contentor_avariado = avariado
+                carrinha.relato_avaria = relato_limpo if avariado else None
+                carrinha.status_resolucao_avaria = (
+                    StatusResolucaoPedido.PENDENTE.value if avariado
+                    else StatusResolucaoPedido.NAO_APLICA.value
+                )
             for foto_url in dict.fromkeys(foto for foto in (fotos or []) if foto):
                 self.db.add(ContentorFoto(
                     pedido_contentor_id=carrinha.id,
@@ -957,6 +966,8 @@ class PedidoService:
         return contentor
 
     def resolver(self, tipo: str, contentor_id: int) -> PedidoContentor:
+        if tipo == "avaria" and not get_settings().feature_avarias_enabled:
+            raise ValueError("A funcionalidade de avarias não está disponível nesta empresa.")
         contentor = self.db.get(PedidoContentor, contentor_id)
         if not contentor:
             raise ValueError("Contentor não encontrado.")
