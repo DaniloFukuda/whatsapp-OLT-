@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy.orm import Session
 
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
+from app.core.config import get_settings
 from app.models.conversa import ConversaWhatsApp
 from app.models.pedido import (
     PedidoContentor,
@@ -514,12 +515,18 @@ class PedidoV24Agent:
             if choice in {"1", "outra foto", "➕ outra foto"}:
                 return self._advance(conversa, "v24_recolha_foto", ctx, "Envie a próxima foto.")
             if choice in {"2", "proximo passo", "➡️ proximo passo"}:
+                if not get_settings().feature_avarias_enabled:
+                    ctx.pop("avariado", None)
+                    ctx.pop("relato_avaria", None)
+                    return self._advance(conversa, "v24_recolha_confirmacao", ctx, self._recolha_confirmacao_prompt(ctx))
                 return self._advance(
                     conversa, "v24_recolha_avaria", ctx,
                     "O equipamento sofreu algum estrago ou avaria na obra?\n\n1. ✅ Não, está perfeito\n2. 💥 Sim, está estragado",
                 )
             return "Selecione Outra Foto ou Próximo Passo."
         if state == "v24_recolha_avaria":
+            if not get_settings().feature_avarias_enabled:
+                return self._recover_disabled_avaria(conversa, ctx)
             if choice in {"1", "nao, esta perfeito", "✅ nao, esta perfeito"}:
                 ctx["avariado"] = False
                 ctx["relato_avaria"] = None
@@ -528,6 +535,8 @@ class PedidoV24Agent:
                 return self._advance(conversa, "v24_recolha_relato", ctx, "Descreva a avaria com pelo menos 10 caracteres.")
             return "Selecione uma das opções de avaria."
         if state == "v24_recolha_relato":
+            if not get_settings().feature_avarias_enabled:
+                return self._recover_disabled_avaria(conversa, ctx)
             relato = raw.strip()
             if len(relato) < 10:
                 return "O relato da avaria precisa ter pelo menos 10 caracteres."
@@ -921,6 +930,17 @@ class PedidoV24Agent:
         ctx.setdefault("relato_carga", None)
         ctx.setdefault("fotos_despejo", [])
 
+    def _recover_disabled_avaria(self, conversa: ConversaWhatsApp, ctx: dict) -> str:
+        ctx.pop("avariado", None)
+        ctx.pop("relato_avaria", None)
+        prompt = self._recolha_confirmacao_prompt(ctx)
+        return self._advance(
+            conversa,
+            "v24_recolha_confirmacao",
+            ctx,
+            "A funcionalidade de avarias não está disponível nesta empresa. O subfluxo foi cancelado com segurança.\n\n" + prompt,
+        )
+
     def _confirmar_recolha_atual(self, conversa, ctx):
         contentor_id = ctx["contentor_id"]
         avariado = bool(ctx.get("avariado"))
@@ -1012,16 +1032,17 @@ class PedidoV24Agent:
     def _recolha_confirmacao_prompt(self, ctx) -> str:
         contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
         label = self._equipamento_label(contentor) if contentor else f"Ativo #{ctx['contentor_id']}"
-        avaria = "Sim" if ctx.get("avariado") else "Nao"
         linhas = [
             "Confirme a recolha deste ativo:",
             "",
             f"Ativo: {label}",
             f"Fotos: {len(ctx.get('fotos_recolha') or [])}",
-            f"Avaria: {avaria}",
         ]
-        if ctx.get("avariado"):
-            linhas.append(f"Relato: {ctx.get('relato_avaria')}")
+        if get_settings().feature_avarias_enabled:
+            avaria = "Sim" if ctx.get("avariado") else "Nao"
+            linhas.append(f"Avaria: {avaria}")
+            if ctx.get("avariado"):
+                linhas.append(f"Relato: {ctx.get('relato_avaria')}")
         linhas.extend(["", "1. Confirmar recolha", "2. Cancelar ativo"])
         return "\n".join(linhas)
 
