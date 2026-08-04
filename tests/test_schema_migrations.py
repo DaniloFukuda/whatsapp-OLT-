@@ -193,7 +193,10 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
             for row in connection.execute(text("PRAGMA table_info(pedidos)")).mappings()
         }
         pedido_row = connection.execute(
-            text("SELECT precisa_mao_de_obra FROM pedidos WHERE id = 1")
+            text(
+                "SELECT precisa_mao_de_obra, pagamento_recebido_em, "
+                "pagamento_recebido_por FROM pedidos WHERE id = 1"
+            )
         ).mappings().one()
 
     assert {
@@ -251,10 +254,16 @@ def test_ensure_alugueres_contentor_schema_migra_sqlite_antigo_sem_apagar_dados(
         "avaria_resolvida_em",
         "avaria_resolvida_por",
     } <= pedido_contentores_columns
-    assert {"precisa_mao_de_obra"} <= pedidos_columns
+    assert {
+        "precisa_mao_de_obra",
+        "pagamento_recebido_em",
+        "pagamento_recebido_por",
+    } <= pedidos_columns
     assert contentor_row["is_deleted"] == 0
     assert contentor_row["justificativa_exclusao"] is None
     assert pedido_row["precisa_mao_de_obra"] == 0
+    assert pedido_row["pagamento_recebido_em"] is None
+    assert pedido_row["pagamento_recebido_por"] is None
     assert pedido_contentor_row["numero_adesivo_contentor"] == "77"
     assert pedido_contentor_row["residuo_contratado"] == "Entulho Limpo"
     assert pedido_contentor_row["tipo_equipamento"] == "CONTENTOR"

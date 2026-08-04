@@ -73,6 +73,10 @@ class Pedido(Base):
         String(20), default=StatusPagamento.PENDENTE.value, nullable=False
     )
     forma_pagamento: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    pagamento_recebido_em: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    pagamento_recebido_por: Mapped[str | None] = mapped_column(String(50), nullable=True)
     pedido_feito_por: Mapped[str] = mapped_column(String(50), nullable=False)
     endereco_aproximado: Mapped[str] = mapped_column(Text, nullable=False)
     endereco_latitude: Mapped[float | None] = mapped_column(Float, nullable=True)

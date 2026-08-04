@@ -14,6 +14,7 @@ from app.agents.entrega_agent import EntregaAgent
 from app.agents.gestao_aluguer_agent import GestaoAluguerAgent
 from app.agents.recolha_agent import RecolhaAgent
 from app.agents.pedido_v24_agent import PedidoV24Agent
+from app.agents.pagamento_pendente_agent import PagamentoPendenteAgent
 from app.agents.renovacao_agent import RenovacaoAgent
 from app.core.config import get_settings
 from app.core.phone import normalize_phone, whatsapp_link
@@ -63,6 +64,13 @@ ENTREGA_COMMANDS = {"entrega", "entregar", "entrega de contentor", "confirmar en
 RECOLHA_COMMANDS = {"recolha", "recolher", "confirmar recolha", "confirmar recolha de contentor"}
 MENU_COMMANDS = {"menu", "inicio", "início"}
 CANCEL_COMMANDS = {"cancelar", "cancela", "sair", "parar", "voltar", "0"}
+PAGAMENTO_PENDENTE_COMMANDS = {
+    "registrar pagamento",
+    "registrar pagamento pendente",
+    "receber pagamento",
+    "pagamentos pendentes",
+    "pagamento pendente",
+}
 COMMAND_FAMILY_OPERATIONAL_QUERY = "operational_query"
 COMMAND_FAMILY_COMMERCIAL_QUERY = "commercial_query"
 COMMAND_FAMILY_ADMIN_MUTATION = "admin_mutation"
@@ -123,6 +131,7 @@ class WhatsappRouterAgent:
         self.contentor_agent = ContentorAgent(db)
         self.recolha_agent = RecolhaAgent(db)
         self.pedido_v24_agent = PedidoV24Agent(db)
+        self.pagamento_pendente_agent = PagamentoPendenteAgent(db)
         self.pedido_service = PedidoService(db)
         self.aluguer_service = AluguerService(db)
         self.contentor_service = ContentorService(db)
@@ -134,10 +143,31 @@ class WhatsappRouterAgent:
         text = (message.texto or "").strip().lower()
         decisao = self.operador_service.decidir_acesso(message.telefone)
         if not decisao.autorizado:
+            conversa_existente = (
+                self.db.query(ConversaWhatsApp)
+                .filter(ConversaWhatsApp.telefone == message.telefone)
+                .first()
+            )
+            if (
+                conversa_existente
+                and conversa_existente.estado_atual in PagamentoPendenteAgent.ACTIVE_STATES
+            ):
+                conversa_existente.estado_atual = "idle"
+                conversa_existente.contexto_json = {}
+                self.db.commit()
+                return FORBIDDEN_MESSAGE
             return UNAUTHORIZED_MESSAGE
         perfil = decisao.perfil
         if perfil is None:
             return UNAUTHORIZED_MESSAGE
+        if text in PAGAMENTO_PENDENTE_COMMANDS:
+            operador = self.operador_service.buscar_por_telefone(message.telefone)
+            if (
+                not operador
+                or not operador.ativo
+                or operador.perfil != PerfilOperador.GESTOR
+            ):
+                return FORBIDDEN_MESSAGE
         conversa = self._get_or_create_conversa(message.telefone)
 
         if not self._avarias_enabled():
@@ -205,6 +235,33 @@ class WhatsappRouterAgent:
                 self.db.commit()
                 return self.aluguer_agent.start(conversa)
             return "Opcao invalida. Responda 1 para continuar ou 2 para recomecar."
+
+        if conversa.estado_atual in PagamentoPendenteAgent.ACTIVE_STATES:
+            operador = self.operador_service.buscar_por_telefone(message.telefone)
+            if (
+                perfil != PerfilOperador.GESTOR
+                or not operador
+                or not operador.ativo
+                or operador.perfil != PerfilOperador.GESTOR
+            ):
+                conversa.estado_atual = "idle"
+                conversa.contexto_json = {}
+                self.db.commit()
+                return FORBIDDEN_MESSAGE
+            return self.pagamento_pendente_agent.handle(
+                conversa, message, operador.telefone_whatsapp
+            )
+
+        if text in PAGAMENTO_PENDENTE_COMMANDS:
+            operador = self.operador_service.buscar_por_telefone(message.telefone)
+            if (
+                perfil != PerfilOperador.GESTOR
+                or not operador
+                or not operador.ativo
+                or operador.perfil != PerfilOperador.GESTOR
+            ):
+                return FORBIDDEN_MESSAGE
+            return self.pagamento_pendente_agent.start(conversa)
 
         if conversa.estado_atual.startswith(PedidoV24Agent.PREFIX):
             return self._finalize_response(
@@ -408,6 +465,8 @@ class WhatsappRouterAgent:
         ]
         if perfil == PerfilOperador.GESTOR:
             linhas.extend(["", self._painel_v4_financeiro(pedidos, alugueres, today)])
+            if self.pedido_service.pedidos_pagamento_pendente():
+                linhas.extend(["", "💶 Registrar pagamento pendente"])
         return "\n".join(linhas)
 
     def _painel_v4_acoes_hoje(self, pedidos: list[Pedido], alugueres: list[AluguerContentor], today, perfil: PerfilOperador) -> str:
@@ -1769,6 +1828,7 @@ class WhatsappRouterAgent:
             or conversa.estado_atual in RecolhaAgent.ACTIVE_STATES
             or conversa.estado_atual in ContentorAgent.ACTIVE_STATES
             or conversa.estado_atual.startswith(PedidoV24Agent.PREFIX)
+            or conversa.estado_atual in PagamentoPendenteAgent.ACTIVE_STATES
         )
 
     def pop_pending_messages(self) -> list[str]:

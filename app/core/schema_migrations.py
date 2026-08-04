@@ -73,6 +73,8 @@ PEDIDO_CONTENTORES_COLUMNS = {
 
 PEDIDOS_COLUMNS = {
     "precisa_mao_de_obra": "BOOLEAN DEFAULT 0 NOT NULL",
+    "pagamento_recebido_em": "DATETIME",
+    "pagamento_recebido_por": "TEXT",
 }
 
 

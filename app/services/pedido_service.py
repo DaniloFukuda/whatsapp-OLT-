@@ -1,5 +1,5 @@
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import re
 
@@ -23,9 +23,18 @@ from app.models.pedido import (
     TipoEquipamentoPedido,
     TipoFoto,
 )
+from app.models.operador import Operador, PerfilOperador
 
 
 RESIDUOS_CANONICOS = ("Entulho Limpo", "Entulho Misto")
+FORMAS_PAGAMENTO = {
+    "dinheiro": "Dinheiro",
+    "mbway": "MBWay",
+    "mb way": "MBWay",
+    "transferencia": "Transferência",
+    "transferência": "Transferência",
+    "multibanco": "Multibanco",
+}
 
 
 class PedidoService:
@@ -190,6 +199,103 @@ class PedidoService:
             .filter(Pedido.id == pedido_id)
             .first()
         )
+
+    def pedidos_pagamento_pendente(self) -> list[Pedido]:
+        """Lista cada pedido válido pendente uma vez, independentemente dos itens."""
+        pedidos = (
+            self.db.query(Pedido)
+            .options(joinedload(Pedido.contentores))
+            .filter(Pedido.status_pagamento == StatusPagamento.PENDENTE.value)
+            .filter(Pedido.valor_global > 0)
+            .filter(Pedido.contentores.any())
+            .order_by(Pedido.data_planejada, Pedido.id)
+            .all()
+        )
+        return [pedido for pedido in pedidos if self._tipos_pagamento_permitidos(pedido)]
+
+    @staticmethod
+    def _tipos_pagamento_permitidos(pedido: Pedido) -> bool:
+        tipos = {item.tipo_equipamento for item in pedido.contentores}
+        return tipos in (
+            {TipoEquipamentoPedido.CONTENTOR.value},
+            {TipoEquipamentoPedido.CARRINHA.value},
+        )
+
+    @staticmethod
+    def tipo_equipamento_pagamento(pedido: Pedido) -> str:
+        tipos = {
+            item.tipo_equipamento
+            for item in pedido.contentores
+            if item.tipo_equipamento in {
+                TipoEquipamentoPedido.CONTENTOR.value,
+                TipoEquipamentoPedido.CARRINHA.value,
+            }
+        }
+        if len(tipos) == 1:
+            return next(iter(tipos))
+        return "MISTO"
+
+    @staticmethod
+    def normalizar_forma_pagamento(forma_pagamento: str | None) -> str | None:
+        return FORMAS_PAGAMENTO.get((forma_pagamento or "").strip().lower())
+
+    def registrar_pagamento_pendente(
+        self,
+        pedido_id: int,
+        forma_pagamento: str,
+        operador_id: str,
+        recebido_em: datetime | None = None,
+    ) -> Pedido:
+        """Recebe integralmente um pedido pendente com compare-and-set transacional."""
+        try:
+            forma = self.normalizar_forma_pagamento(forma_pagamento)
+            if not forma:
+                raise ValueError("Forma de pagamento inválida.")
+
+            operador = self.db.get(Operador, operador_id)
+            if not operador or not operador.ativo or operador.perfil != PerfilOperador.GESTOR:
+                raise PermissionError("Operação não permitida.")
+
+            pedido = self.db.get(Pedido, pedido_id)
+            if not pedido:
+                raise ValueError("Pedido não encontrado.")
+            if pedido.status_pagamento != StatusPagamento.PENDENTE.value:
+                raise ValueError("Este pedido já está marcado como pago.")
+            if Decimal(str(pedido.valor_global or 0)) <= 0:
+                raise ValueError("O pedido não possui saldo pendente válido.")
+
+            if not self._tipos_pagamento_permitidos(pedido):
+                raise ValueError(
+                    "Este fluxo ainda não aceita pagamentos de pedidos com tipos mistos."
+                )
+
+            momento = recebido_em or utcnow()
+            if momento.tzinfo is None:
+                momento = momento.replace(tzinfo=timezone.utc)
+            else:
+                momento = momento.astimezone(timezone.utc)
+            resultado = self.db.execute(
+                update(Pedido)
+                .where(
+                    Pedido.id == pedido_id,
+                    Pedido.status_pagamento == StatusPagamento.PENDENTE.value,
+                    Pedido.valor_global > 0,
+                )
+                .values(
+                    status_pagamento=StatusPagamento.PAGO.value,
+                    forma_pagamento=forma,
+                    pagamento_recebido_em=momento,
+                    pagamento_recebido_por=operador_id,
+                    atualizado_em=momento,
+                )
+            )
+            if resultado.rowcount != 1:
+                raise ValueError("Este pedido já está marcado como pago.")
+            self.db.commit()
+            return self.get(pedido_id)
+        except Exception:
+            self.db.rollback()
+            raise
 
     def pedidos_pendentes_entrega(self) -> list[Pedido]:
         return (
