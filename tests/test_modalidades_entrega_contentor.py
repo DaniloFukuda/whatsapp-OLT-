@@ -278,7 +278,7 @@ def test_chamada_direta_nao_permite_conclusao(db_session, monkeypatch):
 
 
 @pytest.mark.parametrize("carrinhas_enabled", [True, False])
-def test_contentor_off_nao_bloqueia_chegada_de_carrinha(
+def test_contentor_off_isola_chegada_de_carrinha_pela_flag_propria(
     db_session,
     monkeypatch,
     carrinhas_enabled,
@@ -294,11 +294,16 @@ def test_contentor_off_nao_bloqueia_chegada_de_carrinha(
     resposta = concluir_entrega(PedidoV24Agent(db_session), atual, numero="77")
 
     db_session.refresh(pedido.contentores[0])
-    assert "Chegada da carrinha confirmada" in resposta
-    assert (
-        pedido.contentores[0].status_operacional_carrinha
-        == StatusOperacionalCarrinha.EM_ATENDIMENTO.value
-    )
+    if carrinhas_enabled:
+        assert "Chegada da carrinha confirmada" in resposta
+        assert (
+            pedido.contentores[0].status_operacional_carrinha
+            == StatusOperacionalCarrinha.EM_ATENDIMENTO.value
+        )
+    else:
+        assert pedido.contentores[0].status_operacional_carrinha == (
+            StatusOperacionalCarrinha.AGUARDANDO_CHEGADA.value
+        )
 
 
 def test_contentor_on_carrinha_off_mantem_entrega_contentor(db_session, monkeypatch):

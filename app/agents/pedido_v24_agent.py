@@ -47,14 +47,25 @@ class PedidoV24Agent:
         return self._selecionar_tipo_solicitacao(conversa, {}, tipo)
 
     def start_entrega(self, conversa: ConversaWhatsApp) -> str:
+        settings = get_settings()
+        if not settings.feature_contentores_enabled and not settings.feature_carrinhas_enabled:
+            return self._idle(
+                conversa,
+                "Não há modalidade operacional habilitada para chegada ou entrega.",
+            )
         pedidos_contentor = (
             self.service.pedidos_pendentes_entrega()
-            if get_settings().feature_contentores_enabled
+            if settings.feature_contentores_enabled
+            else []
+        )
+        pedidos_carrinha = (
+            self.service.pedidos_carrinha_aguardando_chegada()
+            if settings.feature_carrinhas_enabled
             else []
         )
         pedidos = self._merge_pedidos(
             pedidos_contentor,
-            self.service.pedidos_carrinha_aguardando_chegada(),
+            pedidos_carrinha,
         )
         if not pedidos:
             return self._idle(conversa, "Não existem pedidos pendentes de entrega.")
@@ -105,9 +116,16 @@ class PedidoV24Agent:
             state.startswith("v24_entrega_")
             and state != "v24_entrega_pedido"
             and not get_settings().feature_contentores_enabled
-            and self._contexto_entrega_tem_contentor(ctx)
+            and self._contexto_entrega_tem_tipo(ctx, TipoEquipamentoPedido.CONTENTOR.value)
         ):
             return self._idle(conversa, self._contentor_entrega_desabilitada_message())
+        if (
+            state.startswith("v24_entrega_")
+            and state != "v24_entrega_pedido"
+            and not get_settings().feature_carrinhas_enabled
+            and self._contexto_entrega_tem_tipo(ctx, TipoEquipamentoPedido.CARRINHA.value)
+        ):
+            return self._idle(conversa, self._carrinha_chegada_desabilitada_message())
 
         if state == "v24_cadastro_nome" and message.contact_name:
             name = message.contact_name.strip()
@@ -381,6 +399,11 @@ class PedidoV24Agent:
                 and not get_settings().feature_contentores_enabled
             ):
                 return self._idle(conversa, self._contentor_entrega_desabilitada_message())
+            if (
+                TipoEquipamentoPedido.CARRINHA.value in tipos
+                and not get_settings().feature_carrinhas_enabled
+            ):
+                return self._idle(conversa, self._carrinha_chegada_desabilitada_message())
             if len(tipos) > 1:
                 return self._idle(
                     conversa,
@@ -1220,9 +1243,14 @@ class PedidoV24Agent:
         try:
             if (
                 not get_settings().feature_contentores_enabled
-                and self._contexto_entrega_tem_contentor(ctx)
+                and self._contexto_entrega_tem_tipo(ctx, TipoEquipamentoPedido.CONTENTOR.value)
             ):
                 return self._idle(conversa, self._contentor_entrega_desabilitada_message())
+            if (
+                not get_settings().feature_carrinhas_enabled
+                and self._contexto_entrega_tem_tipo(ctx, TipoEquipamentoPedido.CARRINHA.value)
+            ):
+                return self._idle(conversa, self._carrinha_chegada_desabilitada_message())
             if conversa.estado_atual != "v24_entrega_confirmacao":
                 raise ValueError("A entrega não está pronta para confirmação.")
             campos_obrigatorios = {"pedido_id", "latitude", "longitude", "referencia_entrega", "entregas"}
@@ -1709,7 +1737,7 @@ class PedidoV24Agent:
             return "Confirme o número da frota da carrinha alocada (ou digite 0 se não houver):"
         return "Digite o número do contentor que está a descarregar agora:"
 
-    def _contexto_entrega_tem_contentor(self, ctx) -> bool:
+    def _contexto_entrega_tem_tipo(self, ctx, tipo_equipamento: str) -> bool:
         item_ids = list(ctx.get("contentores") or [])
         item_ids.extend(
             entrega.get("contentor_id")
@@ -1718,14 +1746,14 @@ class PedidoV24Agent:
         )
         for item_id in set(item_ids):
             item = self.db.get(PedidoContentor, item_id)
-            if item and item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value:
+            if item and item.tipo_equipamento == tipo_equipamento:
                 return True
         pedido_id = ctx.get("pedido_id")
         pedido = self.service.get(pedido_id) if pedido_id else None
         return bool(
             pedido
             and any(
-                item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+                item.tipo_equipamento == tipo_equipamento
                 for item in pedido.contentores
             )
         )
@@ -1733,6 +1761,10 @@ class PedidoV24Agent:
     @staticmethod
     def _contentor_entrega_desabilitada_message() -> str:
         return "A entrega de Contentor não está habilitada. A operação foi cancelada com segurança."
+
+    @staticmethod
+    def _carrinha_chegada_desabilitada_message() -> str:
+        return "A chegada de Carrinha não está habilitada. A operação foi cancelada com segurança."
 
     def _tipo_equipamento_prompt(self, ctx):
         index = len(ctx.get("itens") or []) + 1
