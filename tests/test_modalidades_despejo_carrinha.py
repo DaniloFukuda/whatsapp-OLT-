@@ -1,4 +1,4 @@
-"""FEATURE_CONTENTORES_ENABLED aplicada ao despejo operacional de Contentor."""
+"""FEATURE_CARRINHAS_ENABLED aplicada ao despejo operacional de Carrinha."""
 
 from datetime import datetime, timezone
 
@@ -49,7 +49,7 @@ def configurar(monkeypatch, *, contentores=True, carrinhas=True, avarias=True):
 
 def conversa(db_session, *, estado="idle", contexto=None):
     atual = ConversaWhatsApp(
-        telefone=f"35190005{db_session.query(ConversaWhatsApp).count():04d}",
+        telefone=f"35190006{db_session.query(ConversaWhatsApp).count():04d}",
         estado_atual=estado,
         contexto_json=contexto or {},
     )
@@ -60,48 +60,15 @@ def conversa(db_session, *, estado="idle", contexto=None):
 
 def mensagem(texto=None, *, tipo="text", media=None):
     return NormalizedWhatsAppMessage(
-        telefone="351900050000",
+        telefone="351900060000",
         tipo=tipo,
         texto=texto,
         media_id=media,
-        message_id=media or "modalidades-despejo-contentor",
+        message_id=media or "modalidades-despejo-carrinha",
     )
 
 
-def criar_contentor_recolhido(db_session, *, avariado=False):
-    service = PedidoService(db_session)
-    pedido = service.criar(
-        nome_cliente="Cliente Contentor Despejo",
-        telefone_cliente="351912345678",
-        data_planejada=datetime.now(timezone.utc),
-        valor_global="300",
-        pago=True,
-        forma_pagamento="MBWay",
-        pedido_feito_por="gestor",
-        endereco_aproximado="Rua do Vazadouro",
-        ponto_referencia=None,
-        residuos=["Entulho Limpo"],
-    )
-    item = pedido.contentores[0]
-    service.confirmar_entrega_lote(
-        pedido.id,
-        "motorista-entrega",
-        38.7,
-        -9.1,
-        None,
-        [{"contentor_id": item.id, "numero_adesivo": "701", "fotos": ["foto-entrega"]}],
-    )
-    service.confirmar_recolha(
-        item.id,
-        "motorista-recolha",
-        avariado,
-        "Avaria antiga preservada" if avariado else None,
-        ["foto-recolha"],
-    )
-    return pedido
-
-
-def criar_carrinha_aguardando_despejo(db_session):
+def criar_carrinha_aguardando_despejo(db_session, *, avariada=False):
     service = PedidoService(db_session)
     pedido = service.criar(
         nome_cliente="Cliente Carrinha Despejo",
@@ -127,42 +94,77 @@ def criar_carrinha_aguardando_despejo(db_session):
         38.7,
         -9.1,
         None,
-        [{"contentor_id": item.id, "numero_adesivo": "77", "fotos": ["foto-chegada"]}],
+        [{"contentor_id": item.id, "numero_adesivo": "88", "fotos": ["foto-chegada"]}],
     )
     service.confirmar_partida_carrinha(
-        item.id, "motorista-partida", False, None, ["foto-partida"]
+        item.id,
+        "motorista-partida",
+        avariada,
+        "Avaria antiga da carrinha" if avariada else None,
+        ["foto-partida"],
     )
     db_session.commit()
     return pedido
 
 
-def contexto_confirmacao(pedido, *, foto="foto-despejo", divergencia=False):
+def criar_contentor_recolhido(db_session):
+    service = PedidoService(db_session)
+    pedido = service.criar(
+        nome_cliente="Cliente Contentor Preservado",
+        telefone_cliente="351912345678",
+        data_planejada=datetime.now(timezone.utc),
+        valor_global="300",
+        pago=True,
+        forma_pagamento="MBWay",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua do Contentor",
+        ponto_referencia=None,
+        residuos=["Entulho Limpo"],
+    )
+    item = pedido.contentores[0]
+    service.confirmar_entrega_lote(
+        pedido.id,
+        "motorista-entrega",
+        38.7,
+        -9.1,
+        None,
+        [{"contentor_id": item.id, "numero_adesivo": "801", "fotos": ["foto-entrega"]}],
+    )
+    service.confirmar_recolha(item.id, "motorista-recolha", False, None, ["foto-recolha"])
+    return pedido
+
+
+def contexto_confirmacao(pedido, *, divergencia=False):
     item = pedido.contentores[0]
     return {
         "pedido_id": pedido.id,
         "contentores": [item.id],
         "contentor_id": item.id,
         "despejos": [],
-        "fotos_despejo": [foto],
+        "fotos_despejo": ["foto-despejo-preparada"],
         "residuo_contratado": "Entulho Limpo",
         "residuo_efetivo": "Entulho Misto" if divergencia else "Entulho Limpo",
         "residuo_assumido": "Entulho Limpo",
         "carga_errada": divergencia,
-        "relato_carga": "Material divergente observado" if divergencia else None,
+        "relato_carga": "Divergência antiga preservada" if divergencia else None,
     }
 
 
 def snapshot(item, pedido, db_session):
     return {
+        "status_operacional": item.status_operacional_carrinha,
         "status_ciclo": item.status_ciclo,
+        "status_entrega_legado": item.status_entrega,
+        "status_recolha_legado": item.status_recolha,
         "residuo": item.residuo_efetivo_vazadouro,
         "carga_errada": item.carga_errada,
         "relato": item.relato_carga,
         "resolucao": item.status_resolucao_carga,
         "operador": item.despejo_feito_por,
         "data": item.despejo_data_hora,
-        "avariado": item.contentor_avariado,
+        "avariada": item.contentor_avariado,
         "relato_avaria": item.relato_avaria,
+        "resolucao_avaria": item.status_resolucao_avaria,
         "valor": pedido.valor_global,
         "pagamento": pedido.status_pagamento,
         "forma": pedido.forma_pagamento,
@@ -174,40 +176,40 @@ def snapshot(item, pedido, db_session):
     }
 
 
-def test_contentor_on_aparece_para_despejo(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_recolhido(db_session)
+def test_carrinha_on_aparece_para_despejo(db_session, monkeypatch):
+    configurar(monkeypatch, carrinhas=True)
+    pedido = criar_carrinha_aguardando_despejo(db_session)
     resposta = PedidoV24Agent(db_session).start_despejo(conversa(db_session))
     assert f"#{pedido.id}" in resposta
-    assert "Contentor" in resposta
+    assert "Carrinha" in resposta
 
 
-def test_contentor_on_despejo_completo_funciona(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_recolhido(db_session)
+def test_carrinha_on_conclui_despejo_normalmente(db_session, monkeypatch):
+    configurar(monkeypatch, carrinhas=True)
+    pedido = criar_carrinha_aguardando_despejo(db_session)
+    item = pedido.contentores[0]
     atual = conversa(db_session, estado="v24_despejo_confirmacao", contexto=contexto_confirmacao(pedido))
     resposta = PedidoV24Agent(db_session).handle(atual, mensagem("1"))
-    db_session.refresh(pedido.contentores[0])
+    db_session.refresh(item)
     assert "processado no vazadouro" in resposta
-    assert pedido.contentores[0].status_ciclo == StatusCicloPedido.CONCLUIDO.value
-    assert pedido.contentores[0].residuo_efetivo_vazadouro == "Entulho Limpo"
+    assert item.status_operacional_carrinha == StatusOperacionalCarrinha.CONCLUIDA.value
+    assert item.status_ciclo == StatusCicloPedido.CONCLUIDO.value
 
 
-def test_contentor_off_nao_aparece_e_antigo_fica_bloqueado(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_recolhido(db_session)
-    configurar(monkeypatch, contentores=False)
-    atual = conversa(db_session)
-    resposta = PedidoV24Agent(db_session).start_despejo(atual)
+def test_carrinha_off_nao_aparece_e_antiga_fica_bloqueada(db_session, monkeypatch):
+    configurar(monkeypatch, carrinhas=True)
+    pedido = criar_carrinha_aguardando_despejo(db_session)
+    configurar(monkeypatch, carrinhas=False)
+    resposta = PedidoV24Agent(db_session).start_despejo(conversa(db_session))
     assert f"#{pedido.id}" not in resposta
-    assert atual.estado_atual == "idle"
+    assert pedido.contentores[0].status_operacional_carrinha == StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
 
 
 @pytest.mark.parametrize("estado", ["v24_despejo_ativo", "v24_despejo_contentor"])
-def test_contentor_off_selecao_direta_nao_permite_bypass(db_session, monkeypatch, estado):
-    pedido = criar_contentor_recolhido(db_session)
+def test_carrinha_off_selecao_direta_nao_permite_bypass(db_session, monkeypatch, estado):
+    pedido = criar_carrinha_aguardando_despejo(db_session)
     item = pedido.contentores[0]
-    configurar(monkeypatch, contentores=False)
+    configurar(monkeypatch, carrinhas=False)
     contexto = {"pedido_id": pedido.id, "ids": [item.id], "contentores": [item.id], "despejos": []}
     atual = conversa(db_session, estado=estado, contexto=contexto)
     resposta = PedidoV24Agent(db_session).handle(atual, mensagem(str(item.id)))
@@ -227,107 +229,102 @@ def test_contentor_off_selecao_direta_nao_permite_bypass(db_session, monkeypatch
         ("v24_despejo_confirmacao", "1", "text", None),
     ],
 )
-def test_contexto_residual_off_bloqueia_todos_handlers(
+def test_contexto_residual_off_bloqueia_handlers_sem_mutacao(
     db_session, monkeypatch, estado, texto, tipo, media
 ):
-    pedido = criar_contentor_recolhido(db_session)
-    antes = snapshot(pedido.contentores[0], pedido, db_session)
-    configurar(monkeypatch, contentores=False)
+    pedido = criar_carrinha_aguardando_despejo(db_session, avariada=True)
+    item = pedido.contentores[0]
+    antes = snapshot(item, pedido, db_session)
+    configurar(monkeypatch, carrinhas=False)
     contexto = contexto_confirmacao(pedido, divergencia=True)
     contexto["residuos_disponiveis"] = ["Entulho Limpo", "Entulho Misto"]
     atual = conversa(db_session, estado=estado, contexto=contexto)
     resposta = PedidoV24Agent(db_session).handle(atual, mensagem(texto, tipo=tipo, media=media))
-    db_session.refresh(pedido.contentores[0])
+    db_session.refresh(item)
     db_session.refresh(pedido)
     assert "não está habilitado" in resposta
     assert atual.estado_atual == "idle"
-    assert snapshot(pedido.contentores[0], pedido, db_session) == antes
+    assert snapshot(item, pedido, db_session) == antes
 
 
 @pytest.mark.parametrize("divergencia", [False, True])
-def test_ultima_guarda_impede_toda_mutacao_operacional_e_financeira(
+def test_ultima_guarda_preserva_operacional_legado_avaria_e_financeiro(
     db_session, monkeypatch, divergencia
 ):
-    pedido = criar_contentor_recolhido(db_session, avariado=True)
+    pedido = criar_carrinha_aguardando_despejo(db_session, avariada=True)
     item = pedido.contentores[0]
     antes = snapshot(item, pedido, db_session)
-    configurar(monkeypatch, contentores=False, avarias=not divergencia)
+    configurar(monkeypatch, carrinhas=False, avarias=not divergencia)
     atual = conversa(db_session, estado="v24_despejo_confirmacao", contexto=contexto_confirmacao(pedido, divergencia=divergencia))
     resposta = PedidoV24Agent(db_session)._confirmar_despejo_atual(atual, dict(atual.contexto_json))
     db_session.refresh(item)
     db_session.refresh(pedido)
     assert "não está habilitado" in resposta
     assert snapshot(item, pedido, db_session) == antes
-    assert atual.estado_atual == "idle"
+    assert item.status_operacional_carrinha == StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
+    assert item.status_ciclo == StatusCicloPedido.EM_ANDAMENTO.value
 
 
-@pytest.mark.parametrize("carrinhas", [True, False])
-def test_carrinha_passou_a_respeitar_a_propria_flag_sem_afetar_contentor(
-    db_session, monkeypatch, carrinhas
-):
-    configurar(monkeypatch, contentores=False, carrinhas=carrinhas)
+def test_contentor_on_carrinha_off_preserva_despejo_contentor(db_session, monkeypatch):
+    configurar(monkeypatch, contentores=True, carrinhas=False)
+    pedido = criar_contentor_recolhido(db_session)
+    item = pedido.contentores[0]
+    atual = conversa(db_session, estado="v24_despejo_confirmacao", contexto=contexto_confirmacao(pedido))
+    PedidoV24Agent(db_session).handle(atual, mensagem("1"))
+    db_session.refresh(item)
+    assert item.status_ciclo == StatusCicloPedido.CONCLUIDO.value
+
+
+def test_contentor_off_carrinha_on_preserva_despejo_carrinha(db_session, monkeypatch):
+    configurar(monkeypatch, contentores=False, carrinhas=True)
     pedido = criar_carrinha_aguardando_despejo(db_session)
     item = pedido.contentores[0]
     atual = conversa(db_session, estado="v24_despejo_confirmacao", contexto=contexto_confirmacao(pedido))
-    resposta = PedidoV24Agent(db_session).handle(atual, mensagem("1"))
+    PedidoV24Agent(db_session).handle(atual, mensagem("1"))
     db_session.refresh(item)
-    if carrinhas:
-        assert "processado no vazadouro" in resposta
-        assert item.status_operacional_carrinha == StatusOperacionalCarrinha.CONCLUIDA.value
-    else:
-        assert "não está habilitado" in resposta
-        assert item.status_operacional_carrinha == StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
+    assert item.status_operacional_carrinha == StatusOperacionalCarrinha.CONCLUIDA.value
+
+
+def test_off_off_nao_inicia_operacao_e_limpa_contexto(db_session, monkeypatch):
+    criar_contentor_recolhido(db_session)
+    criar_carrinha_aguardando_despejo(db_session)
+    configurar(monkeypatch, contentores=False, carrinhas=False)
+    atual = conversa(db_session, estado="v24_despejo_confirmacao", contexto={"pedido_id": 999, "tipo": "residual"})
+    resposta = PedidoV24Agent(db_session).start_despejo(atual)
+    assert "Não existem" in resposta
+    assert atual.estado_atual == "idle"
+    assert atual.contexto_json == {}
 
 
 @pytest.mark.parametrize("avarias", [True, False])
-def test_feature_avarias_permanece_independente_e_avaria_preservada(db_session, monkeypatch, avarias):
-    pedido = criar_contentor_recolhido(db_session, avariado=True)
+def test_feature_avarias_independente_e_avaria_preservada(db_session, monkeypatch, avarias):
+    pedido = criar_carrinha_aguardando_despejo(db_session, avariada=True)
     item = pedido.contentores[0]
     antes = (item.contentor_avariado, item.relato_avaria, item.status_resolucao_avaria)
-    configurar(monkeypatch, contentores=False, avarias=avarias)
+    configurar(monkeypatch, carrinhas=False, avarias=avarias)
     atual = conversa(db_session, estado="v24_despejo_confirmacao", contexto=contexto_confirmacao(pedido))
     PedidoV24Agent(db_session).handle(atual, mensagem("1"))
     db_session.refresh(item)
     assert (item.contentor_avariado, item.relato_avaria, item.status_resolucao_avaria) == antes
 
 
-def test_reabilitar_contentor_reabre_fluxo_sem_modificar_registro(db_session, monkeypatch):
-    pedido = criar_contentor_recolhido(db_session)
+def test_reabilitar_carrinha_reabre_fluxo_sem_modificar_registro(db_session, monkeypatch):
+    pedido = criar_carrinha_aguardando_despejo(db_session)
     item = pedido.contentores[0]
     antes = snapshot(item, pedido, db_session)
-    configurar(monkeypatch, contentores=False)
+    configurar(monkeypatch, carrinhas=False)
     PedidoV24Agent(db_session).start_despejo(conversa(db_session))
     db_session.refresh(item)
     assert snapshot(item, pedido, db_session) == antes
-    configurar(monkeypatch, contentores=True)
-    resposta = PedidoV24Agent(db_session).start_despejo(conversa(db_session))
-    assert f"#{pedido.id}" in resposta
-
-
-def test_defaults_on_on_preservam_fluxo_anterior(db_session):
-    pedido = criar_contentor_recolhido(db_session)
-    assert get_settings().feature_contentores_enabled is True
-    assert get_settings().feature_carrinhas_enabled is True
+    configurar(monkeypatch, carrinhas=True)
     assert f"#{pedido.id}" in PedidoV24Agent(db_session).start_despejo(conversa(db_session))
 
 
-def test_cancelamento_retorna_idle_sem_mutacao_parcial(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_recolhido(db_session)
-    antes = snapshot(pedido.contentores[0], pedido, db_session)
-    atual = conversa(db_session, estado="v24_despejo_confirmacao", contexto=contexto_confirmacao(pedido, divergencia=True))
-    resposta = PedidoV24Agent(db_session).handle(atual, mensagem("3"))
-    db_session.refresh(pedido.contentores[0])
-    assert "cancelado" in resposta
-    assert atual.estado_atual == "idle"
-    assert snapshot(pedido.contentores[0], pedido, db_session) == antes
-
-
-def test_contentor_off_e_carrinha_on_lista_somente_carrinha(db_session, monkeypatch):
+def test_defaults_on_on_preservam_ambas_modalidades(db_session):
     contentor = criar_contentor_recolhido(db_session)
     carrinha = criar_carrinha_aguardando_despejo(db_session)
-    configurar(monkeypatch, contentores=False, carrinhas=True)
     resposta = PedidoV24Agent(db_session).start_despejo(conversa(db_session))
-    assert f"#{contentor.id}" not in resposta
+    assert get_settings().feature_contentores_enabled is True
+    assert get_settings().feature_carrinhas_enabled is True
+    assert f"#{contentor.id}" in resposta
     assert f"#{carrinha.id}" in resposta
-    assert "Carrinha" in resposta

@@ -114,9 +114,14 @@ class PedidoV24Agent:
             if get_settings().feature_contentores_enabled
             else []
         )
+        pedidos_carrinha = (
+            self.service.pedidos_carrinha_aguardando_despejo()
+            if get_settings().feature_carrinhas_enabled
+            else []
+        )
         pedidos = self._merge_pedidos(
             pedidos_contentor,
-            self.service.pedidos_carrinha_aguardando_despejo(),
+            pedidos_carrinha,
         )
         if not pedidos:
             return self._idle(conversa, "Não existem contentores recolhidos aguardando despejo.")
@@ -168,6 +173,13 @@ class PedidoV24Agent:
             and self._contexto_despejo_tem_tipo(ctx, TipoEquipamentoPedido.CONTENTOR.value)
         ):
             return self._idle(conversa, self._contentor_despejo_desabilitado_message())
+        if (
+            state.startswith("v24_despejo_")
+            and state not in {"v24_despejo_pedido", "v24_despejo_ativo", "v24_despejo_contentor"}
+            and not get_settings().feature_carrinhas_enabled
+            and self._contexto_despejo_tem_tipo(ctx, TipoEquipamentoPedido.CARRINHA.value)
+        ):
+            return self._idle(conversa, self._carrinha_despejo_desabilitada_message())
 
         if state == "v24_cadastro_nome" and message.contact_name:
             name = message.contact_name.strip()
@@ -734,6 +746,12 @@ class PedidoV24Agent:
                 and not get_settings().feature_contentores_enabled
             ):
                 return self._idle(conversa, self._contentor_despejo_desabilitado_message())
+            if (
+                contentor
+                and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+                and not get_settings().feature_carrinhas_enabled
+            ):
+                return self._idle(conversa, self._carrinha_despejo_desabilitada_message())
             if not self._is_despejo_pendente_do_pedido(contentor, ctx["pedido_id"]):
                 pendentes = self._despejo_pendentes_por_pedido(ctx["pedido_id"])
                 if pendentes:
@@ -769,6 +787,11 @@ class PedidoV24Agent:
                 and not get_settings().feature_contentores_enabled
             ):
                 return self._idle(conversa, self._contentor_despejo_desabilitado_message())
+            if (
+                contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+                and not get_settings().feature_carrinhas_enabled
+            ):
+                return self._idle(conversa, self._carrinha_despejo_desabilitada_message())
             ctx.update(
                 {
                     "contentor_id": contentor_id,
@@ -891,6 +914,12 @@ class PedidoV24Agent:
             and not get_settings().feature_contentores_enabled
         ):
             return self._idle(conversa, self._contentor_despejo_desabilitado_message())
+        if (
+            contentor
+            and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+            and not get_settings().feature_carrinhas_enabled
+        ):
+            return self._idle(conversa, self._carrinha_despejo_desabilitada_message())
         try:
             if contentor and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:
                 contentor = self.service.confirmar_despejo_carrinha(
@@ -986,6 +1015,7 @@ class PedidoV24Agent:
                 )
                 or (
                     contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+                    and get_settings().feature_carrinhas_enabled
                     and contentor.status_operacional_carrinha
                     == StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
                 )
@@ -1108,6 +1138,7 @@ class PedidoV24Agent:
             )
             or (
                 item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+                and get_settings().feature_carrinhas_enabled
                 and item.status_operacional_carrinha
                 == StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
             )
@@ -1135,6 +1166,10 @@ class PedidoV24Agent:
     @staticmethod
     def _contentor_despejo_desabilitado_message() -> str:
         return "O despejo de Contentor não está habilitado. A operação foi cancelada com segurança."
+
+    @staticmethod
+    def _carrinha_despejo_desabilitada_message() -> str:
+        return "O despejo de Carrinha não está habilitado. A operação foi cancelada com segurança."
 
     def _recover_disabled_avaria(self, conversa: ConversaWhatsApp, ctx: dict) -> str:
         ctx.pop("avariado", None)
