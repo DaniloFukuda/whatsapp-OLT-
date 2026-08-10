@@ -47,8 +47,13 @@ class PedidoV24Agent:
         return self._selecionar_tipo_solicitacao(conversa, {}, tipo)
 
     def start_entrega(self, conversa: ConversaWhatsApp) -> str:
+        pedidos_contentor = (
+            self.service.pedidos_pendentes_entrega()
+            if get_settings().feature_contentores_enabled
+            else []
+        )
         pedidos = self._merge_pedidos(
-            self.service.pedidos_pendentes_entrega(),
+            pedidos_contentor,
             self.service.pedidos_carrinha_aguardando_chegada(),
         )
         if not pedidos:
@@ -95,6 +100,14 @@ class PedidoV24Agent:
         ctx = dict(conversa.contexto_json or {})
         raw = (message.texto or "").strip()
         choice = self._norm(raw)
+
+        if (
+            state.startswith("v24_entrega_")
+            and state != "v24_entrega_pedido"
+            and not get_settings().feature_contentores_enabled
+            and self._contexto_entrega_tem_contentor(ctx)
+        ):
+            return self._idle(conversa, self._contentor_entrega_desabilitada_message())
 
         if state == "v24_cadastro_nome" and message.contact_name:
             name = message.contact_name.strip()
@@ -363,6 +376,11 @@ class PedidoV24Agent:
                 self.db.get(PedidoContentor, item_id).tipo_equipamento
                 for item_id in pendentes
             }
+            if (
+                TipoEquipamentoPedido.CONTENTOR.value in tipos
+                and not get_settings().feature_contentores_enabled
+            ):
+                return self._idle(conversa, self._contentor_entrega_desabilitada_message())
             if len(tipos) > 1:
                 return self._idle(
                     conversa,
@@ -1200,6 +1218,11 @@ class PedidoV24Agent:
 
     def _confirmar_entrega_preparada(self, conversa, ctx):
         try:
+            if (
+                not get_settings().feature_contentores_enabled
+                and self._contexto_entrega_tem_contentor(ctx)
+            ):
+                return self._idle(conversa, self._contentor_entrega_desabilitada_message())
             if conversa.estado_atual != "v24_entrega_confirmacao":
                 raise ValueError("A entrega não está pronta para confirmação.")
             campos_obrigatorios = {"pedido_id", "latitude", "longitude", "referencia_entrega", "entregas"}
@@ -1685,6 +1708,31 @@ class PedidoV24Agent:
         if contentor and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:
             return "Confirme o número da frota da carrinha alocada (ou digite 0 se não houver):"
         return "Digite o número do contentor que está a descarregar agora:"
+
+    def _contexto_entrega_tem_contentor(self, ctx) -> bool:
+        item_ids = list(ctx.get("contentores") or [])
+        item_ids.extend(
+            entrega.get("contentor_id")
+            for entrega in (ctx.get("entregas") or [])
+            if entrega.get("contentor_id")
+        )
+        for item_id in set(item_ids):
+            item = self.db.get(PedidoContentor, item_id)
+            if item and item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value:
+                return True
+        pedido_id = ctx.get("pedido_id")
+        pedido = self.service.get(pedido_id) if pedido_id else None
+        return bool(
+            pedido
+            and any(
+                item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+                for item in pedido.contentores
+            )
+        )
+
+    @staticmethod
+    def _contentor_entrega_desabilitada_message() -> str:
+        return "A entrega de Contentor não está habilitada. A operação foi cancelada com segurança."
 
     def _tipo_equipamento_prompt(self, ctx):
         index = len(ctx.get("itens") or []) + 1
