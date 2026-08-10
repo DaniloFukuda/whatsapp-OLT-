@@ -29,10 +29,22 @@ class PedidoV24Agent:
         self.service = PedidoService(db)
 
     def start_cadastro(self, conversa: ConversaWhatsApp) -> str:
-        conversa.estado_atual = "v24_cadastro_tipo_solicitacao"
-        conversa.contexto_json = {}
-        self.db.commit()
-        return self._tipo_solicitacao_prompt()
+        contentores_enabled, carrinhas_enabled = self._modalidades_habilitadas()
+        if not contentores_enabled and not carrinhas_enabled:
+            return self._idle(conversa, "Não há modalidade habilitada para criar um novo pedido.")
+        if contentores_enabled and carrinhas_enabled:
+            return self._advance(
+                conversa,
+                "v24_cadastro_tipo_solicitacao",
+                {},
+                self._tipo_solicitacao_prompt(),
+            )
+        tipo = (
+            TipoEquipamentoPedido.CONTENTOR.value
+            if contentores_enabled
+            else TipoEquipamentoPedido.CARRINHA.value
+        )
+        return self._selecionar_tipo_solicitacao(conversa, {}, tipo)
 
     def start_entrega(self, conversa: ConversaWhatsApp) -> str:
         pedidos = self._merge_pedidos(
@@ -116,10 +128,14 @@ class PedidoV24Agent:
             tipo = self._parse_tipo_solicitacao(choice)
             if not tipo:
                 return self._tipo_solicitacao_prompt()
-            ctx["tipo_solicitacao"] = tipo
-            if tipo == TipoEquipamentoPedido.CARRINHA.value:
-                return self._advance(conversa, "v24_cadastro_quantidade", ctx, self._quantidade_prompt(ctx))
-            return self._advance(conversa, "v24_cadastro_nome", ctx, "Qual é o nome do cliente?")
+            contentores_enabled, carrinhas_enabled = self._modalidades_habilitadas()
+            if not contentores_enabled and not carrinhas_enabled:
+                return self._idle(conversa, "Não há modalidade habilitada para criar um novo pedido.")
+            if tipo == TipoEquipamentoPedido.CONTENTOR.value and not contentores_enabled:
+                return "A modalidade Contentor não está habilitada. Selecione Carrinha."
+            if tipo == TipoEquipamentoPedido.CARRINHA.value and not carrinhas_enabled:
+                return "A modalidade Carrinha não está habilitada. Selecione Contentor."
+            return self._selecionar_tipo_solicitacao(conversa, ctx, tipo)
         if state == "v24_cadastro_data":
             now = datetime.now(self._lisbon_timezone())
             if choice in {"1", "hoje"}:
@@ -1683,6 +1699,29 @@ class PedidoV24Agent:
             "carrinha": TipoEquipamentoPedido.CARRINHA.value,
             "carrinhas": TipoEquipamentoPedido.CARRINHA.value,
         }.get(choice)
+
+    def _modalidades_habilitadas(self):
+        settings = get_settings()
+        return (
+            settings.feature_contentores_enabled,
+            settings.feature_carrinhas_enabled,
+        )
+
+    def _selecionar_tipo_solicitacao(self, conversa, ctx, tipo):
+        ctx["tipo_solicitacao"] = tipo
+        if tipo == TipoEquipamentoPedido.CARRINHA.value:
+            return self._advance(
+                conversa,
+                "v24_cadastro_quantidade",
+                ctx,
+                self._quantidade_prompt(ctx),
+            )
+        return self._advance(
+            conversa,
+            "v24_cadastro_nome",
+            ctx,
+            "Qual é o nome do cliente?",
+        )
 
     def _tipo_solicitacao_prompt(self):
         return "🚛 Qual é o tipo de solicitação?\n\n1️⃣ Contentor\n2️⃣ Carrinha"
