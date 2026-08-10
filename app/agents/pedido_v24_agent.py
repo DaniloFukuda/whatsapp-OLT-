@@ -78,14 +78,25 @@ class PedidoV24Agent:
         )
 
     def start_recolha(self, conversa: ConversaWhatsApp) -> str:
+        settings = get_settings()
+        if not settings.feature_contentores_enabled and not settings.feature_carrinhas_enabled:
+            return self._idle(
+                conversa,
+                "Não há modalidade operacional habilitada para recolha ou partida.",
+            )
         pedidos_contentor = (
             self.service.pedidos_para_recolha()
-            if get_settings().feature_contentores_enabled
+            if settings.feature_contentores_enabled
+            else []
+        )
+        pedidos_carrinha = (
+            self.service.pedidos_carrinha_aguardando_partida()
+            if settings.feature_carrinhas_enabled
             else []
         )
         pedidos = self._merge_pedidos(
             pedidos_contentor,
-            self.service.pedidos_carrinha_aguardando_partida(),
+            pedidos_carrinha,
         )
         if not pedidos:
             return self._idle(conversa, "Não existem equipamentos aguardando recolha / partida.")
@@ -135,9 +146,16 @@ class PedidoV24Agent:
             state.startswith("v24_recolha_")
             and state not in {"v24_recolha_pedido", "v24_recolha_ativo"}
             and not get_settings().feature_contentores_enabled
-            and self._contexto_recolha_tem_contentor(ctx)
+            and self._contexto_recolha_tem_tipo(ctx, TipoEquipamentoPedido.CONTENTOR.value)
         ):
             return self._idle(conversa, self._contentor_recolha_desabilitada_message())
+        if (
+            state.startswith("v24_recolha_")
+            and state not in {"v24_recolha_pedido", "v24_recolha_ativo"}
+            and not get_settings().feature_carrinhas_enabled
+            and self._contexto_recolha_tem_tipo(ctx, TipoEquipamentoPedido.CARRINHA.value)
+        ):
+            return self._idle(conversa, self._carrinha_partida_desabilitada_message())
 
         if state == "v24_cadastro_nome" and message.contact_name:
             name = message.contact_name.strip()
@@ -586,6 +604,12 @@ class PedidoV24Agent:
                 and not get_settings().feature_contentores_enabled
             ):
                 return self._idle(conversa, self._contentor_recolha_desabilitada_message())
+            if (
+                contentor
+                and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+                and not get_settings().feature_carrinhas_enabled
+            ):
+                return self._idle(conversa, self._carrinha_partida_desabilitada_message())
             if not self._is_recolha_pendente_do_pedido(contentor, ctx["pedido_id"]):
                 pendentes = self._recolha_pendentes_por_pedido(ctx["pedido_id"])
                 if pendentes:
@@ -610,6 +634,12 @@ class PedidoV24Agent:
                 and not get_settings().feature_contentores_enabled
             ):
                 return self._idle(conversa, self._contentor_recolha_desabilitada_message())
+            if (
+                contentor
+                and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+                and not get_settings().feature_carrinhas_enabled
+            ):
+                return self._idle(conversa, self._carrinha_partida_desabilitada_message())
             ctx.update({"contentor_id": contentor_id, "fotos_recolha": [], "avariado": None, "relato_avaria": None})
             return self._advance(conversa, "v24_recolha_foto", ctx, "Envie a foto do equipamento cheio antes do içamento.")
         if state == "v24_recolha_foto":
@@ -1089,6 +1119,12 @@ class PedidoV24Agent:
             and not get_settings().feature_contentores_enabled
         ):
             return self._idle(conversa, self._contentor_recolha_desabilitada_message())
+        if (
+            contentor
+            and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+            and not get_settings().feature_carrinhas_enabled
+        ):
+            return self._idle(conversa, self._carrinha_partida_desabilitada_message())
         is_carrinha = bool(
             contentor
             and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
@@ -1237,22 +1273,27 @@ class PedidoV24Agent:
             )
             or (
                 item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+                and get_settings().feature_carrinhas_enabled
                 and item.status_operacional_carrinha
                 == StatusOperacionalCarrinha.EM_ATENDIMENTO.value
             )
         ]
 
-    def _contexto_recolha_tem_contentor(self, ctx) -> bool:
+    def _contexto_recolha_tem_tipo(self, ctx, tipo_equipamento: str) -> bool:
         contentor_id = ctx.get("contentor_id")
         contentor = self.db.get(PedidoContentor, contentor_id) if contentor_id else None
         return bool(
             contentor
-            and contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+            and contentor.tipo_equipamento == tipo_equipamento
         )
 
     @staticmethod
     def _contentor_recolha_desabilitada_message() -> str:
         return "A recolha de Contentor não está habilitada. A operação foi cancelada com segurança."
+
+    @staticmethod
+    def _carrinha_partida_desabilitada_message() -> str:
+        return "A partida de Carrinha não está habilitada. A operação foi cancelada com segurança."
 
     @staticmethod
     def _merge_pedidos(*grupos):

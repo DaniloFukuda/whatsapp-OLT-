@@ -1,4 +1,4 @@
-"""FEATURE_CONTENTORES_ENABLED aplicada à recolha operacional de Contentor."""
+"""FEATURE_CARRINHAS_ENABLED aplicada à partida operacional de Carrinha."""
 
 from datetime import datetime, timezone
 
@@ -13,6 +13,7 @@ from app.models.conversa import ConversaWhatsApp
 from app.models.pedido import (
     StatusEntregaPedido,
     StatusOperacionalCarrinha,
+    StatusPagamento,
     StatusRecolhaPedido,
     StatusResolucaoPedido,
     TipoEquipamentoPedido,
@@ -51,7 +52,7 @@ def configurar(monkeypatch, *, contentores=True, carrinhas=True, avarias=True):
 
 def conversa(db_session, *, estado="idle", contexto=None):
     atual = ConversaWhatsApp(
-        telefone="351900049900",
+        telefone="351900059900",
         estado_atual=estado,
         contexto_json=contexto or {},
     )
@@ -62,49 +63,23 @@ def conversa(db_session, *, estado="idle", contexto=None):
 
 def mensagem(texto=None, *, tipo="text", media=None):
     return NormalizedWhatsAppMessage(
-        telefone="351900049900",
+        telefone="351900059900",
         tipo=tipo,
         texto=texto,
         media_id=media,
-        message_id=media or "modalidades-recolha-contentor",
+        message_id=media or "modalidades-partida-carrinha",
     )
 
 
-def criar_contentor_entregue(db_session):
+def criar_carrinha_em_atendimento(db_session, *, pago=True):
     service = PedidoService(db_session)
     pedido = service.criar(
-        nome_cliente="Cliente Contentor Entregue",
+        nome_cliente="Cliente Carrinha Em Atendimento",
         telefone_cliente="351912345678",
         data_planejada=datetime.now(timezone.utc),
         valor_global="300",
-        pago=True,
-        forma_pagamento="MBWay",
-        pedido_feito_por="gestor",
-        endereco_aproximado="Rua da Recolha",
-        ponto_referencia=None,
-        residuos=["Entulho Limpo"],
-    )
-    item = pedido.contentores[0]
-    service.confirmar_entrega_lote(
-        pedido.id,
-        "motorista-entrega",
-        38.7,
-        -9.1,
-        None,
-        [{"contentor_id": item.id, "numero_adesivo": "501", "fotos": ["foto-entrega"]}],
-    )
-    return pedido
-
-
-def criar_carrinha_em_atendimento(db_session):
-    service = PedidoService(db_session)
-    pedido = service.criar(
-        nome_cliente="Cliente Carrinha Partida",
-        telefone_cliente="351912345678",
-        data_planejada=datetime.now(timezone.utc),
-        valor_global="300",
-        pago=True,
-        forma_pagamento="MBWay",
+        pago=pago,
+        forma_pagamento="MBWay" if pago else None,
         pedido_feito_por="gestor",
         endereco_aproximado="Rua da Carrinha",
         ponto_referencia=None,
@@ -130,11 +105,37 @@ def criar_carrinha_em_atendimento(db_session):
     return pedido
 
 
-def concluir_recolha(agente, atual):
+def criar_contentor_entregue(db_session):
+    service = PedidoService(db_session)
+    pedido = service.criar(
+        nome_cliente="Cliente Contentor Recolha",
+        telefone_cliente="351912345678",
+        data_planejada=datetime.now(timezone.utc),
+        valor_global="300",
+        pago=True,
+        forma_pagamento="MBWay",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua do Contentor",
+        ponto_referencia=None,
+        residuos=["Entulho Limpo"],
+    )
+    item = pedido.contentores[0]
+    service.confirmar_entrega_lote(
+        pedido.id,
+        "motorista-entrega",
+        38.7,
+        -9.1,
+        None,
+        [{"contentor_id": item.id, "numero_adesivo": "601", "fotos": ["foto-entrega"]}],
+    )
+    return pedido
+
+
+def concluir_partida(agente, atual):
     agente.start_recolha(atual)
     agente.handle(atual, mensagem("1"))
     agente.handle(atual, mensagem("1"))
-    agente.handle(atual, mensagem(tipo="image", media="foto-recolha"))
+    agente.handle(atual, mensagem(tipo="image", media="foto-partida"))
     agente.handle(atual, mensagem("2"))
     agente.handle(atual, mensagem("1"))
     return agente.handle(atual, mensagem("1"))
@@ -147,17 +148,17 @@ def contexto_preparado(pedido, *, avariado=False, relato=None):
         "contentores": [item.id],
         "contentor_id": item.id,
         "recolhas": [],
-        "fotos_recolha": ["foto-recolha-preparada"],
+        "fotos_recolha": ["foto-partida-preparada"],
         "avariado": avariado,
         "relato_avaria": relato,
     }
 
 
 @pytest.fixture
-def tentativa_bloqueada(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True, avarias=True)
-    pedido = criar_contentor_entregue(db_session)
-    configurar(monkeypatch, contentores=False, avarias=True)
+def partida_bloqueada(db_session, monkeypatch):
+    configurar(monkeypatch, carrinhas=True, avarias=True)
+    pedido = criar_carrinha_em_atendimento(db_session, pago=False)
+    configurar(monkeypatch, carrinhas=False, avarias=True)
     atual = conversa(
         db_session,
         estado="v24_recolha_confirmacao",
@@ -170,33 +171,34 @@ def tentativa_bloqueada(db_session, monkeypatch):
     resposta = PedidoV24Agent(db_session).handle(atual, mensagem("1"))
     item = pedido.contentores[0]
     db_session.refresh(item)
+    db_session.refresh(pedido)
     return pedido, item, atual, resposta
 
 
-def test_contentor_on_aparece_para_recolha(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_entregue(db_session)
+def test_carrinha_on_aparece_para_partida(db_session, monkeypatch):
+    configurar(monkeypatch, carrinhas=True)
+    pedido = criar_carrinha_em_atendimento(db_session)
 
     resposta = PedidoV24Agent(db_session).start_recolha(conversa(db_session))
 
     assert pedido.nome_cliente in resposta
+    assert "Carrinha" in resposta
 
 
-def test_contentor_on_recolha_completa_funciona(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_entregue(db_session)
+def test_carrinha_on_partida_completa_funciona(db_session, monkeypatch):
+    configurar(monkeypatch, carrinhas=True)
+    pedido = criar_carrinha_em_atendimento(db_session)
 
-    concluir_recolha(PedidoV24Agent(db_session), conversa(db_session))
+    concluir_partida(PedidoV24Agent(db_session), conversa(db_session))
 
     db_session.refresh(pedido.contentores[0])
-    assert pedido.contentores[0].status_recolha == StatusRecolhaPedido.RECOLHIDO.value
-    assert db_session.query(ContentorFoto).filter_by(tipo_foto=TipoFoto.RECOLHA.value).count() == 1
+    assert pedido.contentores[0].status_operacional_carrinha == StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
 
 
-def test_contentor_off_nao_aparece_na_rotina(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_entregue(db_session)
-    configurar(monkeypatch, contentores=False)
+def test_carrinha_off_nao_aparece(db_session, monkeypatch):
+    configurar(monkeypatch, carrinhas=True)
+    pedido = criar_carrinha_em_atendimento(db_session)
+    configurar(monkeypatch, carrinhas=False)
 
     resposta = PedidoV24Agent(db_session).start_recolha(conversa(db_session))
 
@@ -204,10 +206,10 @@ def test_contentor_off_nao_aparece_na_rotina(db_session, monkeypatch):
     assert "não existem equipamentos" in resposta.lower()
 
 
-def test_contentor_antigo_entregue_fica_bloqueado(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_entregue(db_session)
-    configurar(monkeypatch, contentores=False)
+def test_carrinha_antiga_em_atendimento_e_bloqueada(db_session, monkeypatch):
+    configurar(monkeypatch, carrinhas=True)
+    pedido = criar_carrinha_em_atendimento(db_session)
+    configurar(monkeypatch, carrinhas=False)
     atual = conversa(
         db_session,
         estado="v24_recolha_ativo",
@@ -227,26 +229,26 @@ def test_contentor_antigo_entregue_fica_bloqueado(db_session, monkeypatch):
     assert atual.estado_atual == "idle"
 
 
-def test_contentor_off_status_recolha_nao_muda(tentativa_bloqueada):
-    _, item, _, _ = tentativa_bloqueada
-    assert item.status_recolha == StatusRecolhaPedido.PENDENTE.value
-    assert item.recolha_data_hora is None
-    assert item.recolha_feita_por is None
+def test_carrinha_off_status_operacional_permanece(partida_bloqueada):
+    _, item, _, _ = partida_bloqueada
+    assert item.status_operacional_carrinha == StatusOperacionalCarrinha.EM_ATENDIMENTO.value
 
 
-def test_contentor_off_nao_persiste_foto_recolha(db_session, tentativa_bloqueada):
+def test_carrinha_off_nao_persiste_foto_partida(db_session, partida_bloqueada):
     assert db_session.query(ContentorFoto).filter_by(tipo_foto=TipoFoto.RECOLHA.value).count() == 0
 
 
+def test_carrinha_off_nao_persiste_horario_ou_operador(partida_bloqueada):
+    _, item, _, _ = partida_bloqueada
+    assert item.partida_carrinha_data_hora is None
+    assert item.partida_carrinha_feita_por is None
+
+
 @pytest.mark.parametrize("avarias_enabled", [True, False])
-def test_contentor_off_nao_cria_avaria(
-    db_session,
-    monkeypatch,
-    avarias_enabled,
-):
-    configurar(monkeypatch, contentores=True, avarias=avarias_enabled)
-    pedido = criar_contentor_entregue(db_session)
-    configurar(monkeypatch, contentores=False, avarias=avarias_enabled)
+def test_carrinha_off_nao_cria_avaria(db_session, monkeypatch, avarias_enabled):
+    configurar(monkeypatch, carrinhas=True, avarias=avarias_enabled)
+    pedido = criar_carrinha_em_atendimento(db_session)
+    configurar(monkeypatch, carrinhas=False, avarias=avarias_enabled)
     atual = conversa(
         db_session,
         estado="v24_recolha_confirmacao",
@@ -264,19 +266,19 @@ def test_contentor_off_nao_cria_avaria(
     assert pedido.contentores[0].relato_avaria is None
 
 
-def test_tentativa_nao_modifica_avaria_existente(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True, avarias=True)
-    pedido = criar_contentor_entregue(db_session)
+def test_carrinha_off_preserva_avaria_existente(db_session, monkeypatch):
+    configurar(monkeypatch, carrinhas=True, avarias=True)
+    pedido = criar_carrinha_em_atendimento(db_session)
     item = pedido.contentores[0]
     item.contentor_avariado = True
     item.relato_avaria = "Avaria preexistente preservada"
     item.status_resolucao_avaria = StatusResolucaoPedido.PENDENTE.value
     db_session.commit()
-    configurar(monkeypatch, contentores=False, avarias=True)
+    configurar(monkeypatch, carrinhas=False, avarias=True)
     atual = conversa(
         db_session,
         estado="v24_recolha_confirmacao",
-        contexto=contexto_preparado(pedido, avariado=False),
+        contexto=contexto_preparado(pedido),
     )
 
     PedidoV24Agent(db_session).handle(atual, mensagem("1"))
@@ -288,9 +290,9 @@ def test_tentativa_nao_modifica_avaria_existente(db_session, monkeypatch):
 
 
 def test_contexto_residual_nao_permite_bypass(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_entregue(db_session)
-    configurar(monkeypatch, contentores=False)
+    configurar(monkeypatch, carrinhas=True)
+    pedido = criar_carrinha_em_atendimento(db_session)
+    configurar(monkeypatch, carrinhas=False)
     atual = conversa(
         db_session,
         estado="v24_recolha_foto",
@@ -308,9 +310,9 @@ def test_contexto_residual_nao_permite_bypass(db_session, monkeypatch):
 
 
 def test_selecao_direta_nao_permite_bypass(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_entregue(db_session)
-    configurar(monkeypatch, contentores=False)
+    configurar(monkeypatch, carrinhas=True)
+    pedido = criar_carrinha_em_atendimento(db_session)
+    configurar(monkeypatch, carrinhas=False)
     atual = conversa(
         db_session,
         estado="v24_recolha_contentor",
@@ -327,9 +329,9 @@ def test_selecao_direta_nao_permite_bypass(db_session, monkeypatch):
 
 
 def test_confirmacao_direta_nao_permite_bypass(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_entregue(db_session)
-    configurar(monkeypatch, contentores=False)
+    configurar(monkeypatch, carrinhas=True)
+    pedido = criar_carrinha_em_atendimento(db_session)
+    configurar(monkeypatch, carrinhas=False)
     atual = conversa(
         db_session,
         estado="v24_recolha_confirmacao",
@@ -343,45 +345,59 @@ def test_confirmacao_direta_nao_permite_bypass(db_session, monkeypatch):
 
     db_session.refresh(pedido.contentores[0])
     assert "não está habilitada" in resposta.lower()
-    assert pedido.contentores[0].status_recolha == StatusRecolhaPedido.PENDENTE.value
+    assert pedido.contentores[0].status_operacional_carrinha == StatusOperacionalCarrinha.EM_ATENDIMENTO.value
 
 
-def test_tentativa_bloqueada_nao_torna_elegivel_para_despejo(
-    db_session,
-    tentativa_bloqueada,
-):
-    assert PedidoService(db_session).contentores_para_despejo() == []
+def test_carrinha_off_nao_fica_elegivel_para_despejo(db_session, partida_bloqueada):
+    assert PedidoService(db_session).carrinhas_aguardando_despejo() == []
 
 
-@pytest.mark.parametrize("carrinhas_enabled", [True, False])
-def test_contentor_off_isola_partida_de_carrinha_pela_flag_propria(
-    db_session,
-    monkeypatch,
-    carrinhas_enabled,
-):
-    configurar(
-        monkeypatch,
-        contentores=False,
-        carrinhas=carrinhas_enabled,
-    )
-    pedido = criar_carrinha_em_atendimento(db_session)
+def test_contentor_on_carrinha_off_recolha_contentor_funciona(db_session, monkeypatch):
+    configurar(monkeypatch, contentores=True, carrinhas=False)
+    pedido = criar_contentor_entregue(db_session)
 
-    concluir_recolha(PedidoV24Agent(db_session), conversa(db_session))
+    concluir_partida(PedidoV24Agent(db_session), conversa(db_session))
 
     db_session.refresh(pedido.contentores[0])
-    if carrinhas_enabled:
-        assert (
-            pedido.contentores[0].status_operacional_carrinha
-            == StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
-        )
-    else:
-        assert pedido.contentores[0].status_operacional_carrinha == (
-            StatusOperacionalCarrinha.EM_ATENDIMENTO.value
-        )
+    assert pedido.contentores[0].status_recolha == StatusRecolhaPedido.RECOLHIDO.value
+
+
+def test_contentor_off_carrinha_on_partida_funciona(db_session, monkeypatch):
+    configurar(monkeypatch, contentores=False, carrinhas=True)
+    pedido = criar_carrinha_em_atendimento(db_session)
+
+    concluir_partida(PedidoV24Agent(db_session), conversa(db_session))
+
+    db_session.refresh(pedido.contentores[0])
+    assert pedido.contentores[0].status_operacional_carrinha == StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
+
+
+def test_off_off_nao_inicia_operacao(db_session, monkeypatch):
+    configurar(monkeypatch, contentores=False, carrinhas=False)
+    atual = conversa(db_session)
+
+    resposta = PedidoV24Agent(db_session).start_recolha(atual)
+
+    assert "não há modalidade operacional habilitada" in resposta.lower()
+    assert "selecione" not in resposta.lower()
+
+
+def test_off_off_contexto_seguro_idle(db_session, monkeypatch):
+    configurar(monkeypatch, contentores=False, carrinhas=False)
+    atual = conversa(
+        db_session,
+        estado="v24_recolha_foto",
+        contexto={"pedido_id": 99, "contentor_id": 88},
+    )
+
+    PedidoV24Agent(db_session).start_recolha(atual)
+
+    assert atual.estado_atual == "idle"
+    assert atual.contexto_json == {}
 
 
 def test_feature_avarias_permanece_independente(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=False, avarias=True)
+    configurar(monkeypatch, carrinhas=False, avarias=True)
 
     PedidoV24Agent(db_session).start_recolha(conversa(db_session))
 
@@ -390,47 +406,44 @@ def test_feature_avarias_permanece_independente(db_session, monkeypatch):
 
 def test_defaults_on_on_preservam_comportamento_anterior(db_session, monkeypatch):
     configurar(monkeypatch)
-    pedido = criar_contentor_entregue(db_session)
+    contentor = criar_contentor_entregue(db_session)
+    carrinha = criar_carrinha_em_atendimento(db_session)
 
     resposta = PedidoV24Agent(db_session).start_recolha(conversa(db_session))
 
-    assert pedido.nome_cliente in resposta
+    assert contentor.nome_cliente in resposta
+    assert carrinha.nome_cliente in resposta
 
 
-def test_reabilitar_contentor_devolve_recolha_sem_alterar_registro(
+def test_reabilitar_carrinha_devolve_partida_sem_alterar_registro(
     db_session,
     monkeypatch,
 ):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_entregue(db_session)
+    configurar(monkeypatch, carrinhas=True)
+    pedido = criar_carrinha_em_atendimento(db_session)
     item = pedido.contentores[0]
-    configurar(monkeypatch, contentores=False)
+    configurar(monkeypatch, carrinhas=False)
     atual = conversa(db_session)
     PedidoV24Agent(db_session).start_recolha(atual)
 
-    configurar(monkeypatch, contentores=True)
+    configurar(monkeypatch, carrinhas=True)
     resposta = PedidoV24Agent(db_session).start_recolha(atual)
 
     db_session.refresh(item)
     assert pedido.nome_cliente in resposta
+    assert item.status_operacional_carrinha == StatusOperacionalCarrinha.EM_ATENDIMENTO.value
+    assert item.partida_carrinha_data_hora is None
+
+
+def test_campos_legados_espelhados_nao_mudam(partida_bloqueada):
+    _, item, _, _ = partida_bloqueada
     assert item.status_recolha == StatusRecolhaPedido.PENDENTE.value
+    assert item.recolha_feita_por is None
     assert item.recolha_data_hora is None
+    assert item.status_entrega == StatusEntregaPedido.ENTREGUE.value
 
 
-def test_cancelamento_seguro_nao_deixa_mutacao_parcial(db_session, monkeypatch):
-    configurar(monkeypatch, contentores=True)
-    pedido = criar_contentor_entregue(db_session)
-    configurar(monkeypatch, contentores=False)
-    atual = conversa(
-        db_session,
-        estado="v24_recolha_confirmacao",
-        contexto=contexto_preparado(pedido),
-    )
-
-    PedidoV24Agent(db_session).handle(atual, mensagem("2"))
-
-    db_session.refresh(pedido.contentores[0])
-    assert atual.estado_atual == "idle"
-    assert atual.contexto_json == {}
-    assert pedido.contentores[0].status_recolha == StatusRecolhaPedido.PENDENTE.value
-    assert db_session.query(ContentorFoto).filter_by(tipo_foto=TipoFoto.RECOLHA.value).count() == 0
+def test_financeiro_permanece_inalterado(partida_bloqueada):
+    pedido, _, _, _ = partida_bloqueada
+    assert pedido.status_pagamento == StatusPagamento.PENDENTE.value
+    assert pedido.forma_pagamento is None
