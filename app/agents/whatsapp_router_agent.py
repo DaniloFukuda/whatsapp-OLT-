@@ -470,20 +470,33 @@ class WhatsappRouterAgent:
         return "\n".join(linhas)
 
     def _painel_v4_acoes_hoje(self, pedidos: list[Pedido], alugueres: list[AluguerContentor], today, perfil: PerfilOperador) -> str:
+        settings = get_settings()
         blocos = []
-        entregas = self._pedidos_por_entrega(pedidos, today, TipoEquipamentoPedido.CONTENTOR.value)
+        entregas = (
+            self._pedidos_por_entrega(pedidos, today, TipoEquipamentoPedido.CONTENTOR.value)
+            if settings.feature_contentores_enabled
+            else []
+        )
         if entregas:
             blocos.append("📦 *Entrega de Contentores:*\n" + "\n".join(
                 self._format_entrega_hoje(pedido, itens, incluir_horario=False)
                 for pedido, itens in entregas
             ))
-        carrinhas = self._pedidos_por_entrega(pedidos, today, TipoEquipamentoPedido.CARRINHA.value)
+        carrinhas = (
+            self._pedidos_por_entrega(pedidos, today, TipoEquipamentoPedido.CARRINHA.value)
+            if settings.feature_carrinhas_enabled
+            else []
+        )
         if carrinhas:
             blocos.append("🚛 *Chegada de Carrinhas:*\n" + "\n".join(
                 self._format_entrega_hoje(pedido, itens, incluir_horario=True)
                 for pedido, itens in carrinhas
             ))
-        carrinhas_em_atendimento = self._carrinhas_em_atendimento(pedidos)
+        carrinhas_em_atendimento = (
+            self._carrinhas_em_atendimento(pedidos)
+            if settings.feature_carrinhas_enabled
+            else []
+        )
         if carrinhas_em_atendimento:
             blocos.append(
                 "⏱️ *Carrinhas em atendimento:*\n"
@@ -492,7 +505,7 @@ class WhatsappRouterAgent:
                     for item in carrinhas_em_atendimento
                 )
             )
-        if perfil == PerfilOperador.GESTOR:
+        if perfil == PerfilOperador.GESTOR and settings.feature_contentores_enabled:
             renovacoes = self._contentores_vencendo_amanha(pedidos, today)
             renovacoes_legadas = self._alugueres_por_vencimento(alugueres, today + timedelta(days=1))
             if renovacoes:
@@ -508,16 +521,29 @@ class WhatsappRouterAgent:
         return "🟢 *1. AÇÕES PARA HOJE*\n" + conteudo
 
     def _painel_v4_proximos_dias(self, pedidos: list[Pedido], alugueres: list[AluguerContentor], tomorrow) -> str:
+        settings = get_settings()
         blocos = []
-        recolhas = self._contentores_para_recolha_em(pedidos, tomorrow)
-        recolhas_legadas = self._alugueres_por_vencimento(alugueres, tomorrow)
+        recolhas = (
+            self._contentores_para_recolha_em(pedidos, tomorrow)
+            if settings.feature_contentores_enabled
+            else []
+        )
+        recolhas_legadas = (
+            self._alugueres_por_vencimento(alugueres, tomorrow)
+            if settings.feature_contentores_enabled
+            else []
+        )
         if recolhas or recolhas_legadas:
             linhas = [f"• {pedido.nome_cliente} ({len(itens)} un)" for pedido, itens in recolhas]
             linhas.extend(f"• {aluguer.nome_cliente} (1 un)" for aluguer in recolhas_legadas)
             blocos.append("📦 *Recolher Amanhã:*\n" + "\n".join(
                 linhas
             ))
-        carrinhas = self._pedidos_por_entrega(pedidos, tomorrow, TipoEquipamentoPedido.CARRINHA.value)
+        carrinhas = (
+            self._pedidos_por_entrega(pedidos, tomorrow, TipoEquipamentoPedido.CARRINHA.value)
+            if settings.feature_carrinhas_enabled
+            else []
+        )
         if carrinhas:
             blocos.append("🚛 *Carrinhas para Amanhã:*\n" + "\n".join(
                 self._format_carrinha_amanha(pedido, itens) for pedido, itens in carrinhas
@@ -526,9 +552,10 @@ class WhatsappRouterAgent:
         return "🔵 *2. AÇÕES AGENDADAS PARA OS PRÓXIMOS DIAS*\n" + conteudo
 
     def _painel_v4_pendencias(self, pedidos: list[Pedido], alugueres: list[AluguerContentor], today, perfil: PerfilOperador) -> str:
+        settings = get_settings()
         blocos = []
-        vencidos = self._contentores_vencidos(pedidos, today)
-        vencidos_legados = self._alugueres_vencidos(alugueres, today)
+        vencidos = self._contentores_vencidos(pedidos, today) if settings.feature_contentores_enabled else []
+        vencidos_legados = self._alugueres_vencidos(alugueres, today) if settings.feature_contentores_enabled else []
         if vencidos or vencidos_legados:
             linhas = [
                 self._format_contentor_vencido(pedido, data_entrega, itens, today)
