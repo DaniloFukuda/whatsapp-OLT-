@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     authorized_operator_phones: str = ""
     timezone: str = "Europe/Lisbon"
     feature_avarias_enabled: bool = True
+    feature_contentores_enabled: bool = True
+    feature_carrinhas_enabled: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",
