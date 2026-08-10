@@ -13,7 +13,7 @@ from app.agents.contentor_agent import ContentorAgent
 from app.agents.entrega_agent import EntregaAgent
 from app.agents.gestao_aluguer_agent import GestaoAluguerAgent
 from app.agents.recolha_agent import RecolhaAgent
-from app.agents.pedido_v24_agent import PedidoV24Agent
+from app.agents.pedido_v24.router import PedidoV24OperationalRouter
 from app.agents.pagamento_pendente_agent import PagamentoPendenteAgent
 from app.agents.renovacao_agent import RenovacaoAgent
 from app.core.config import get_settings
@@ -130,13 +130,18 @@ class WhatsappRouterAgent:
         self.renovacao_agent = RenovacaoAgent(db)
         self.contentor_agent = ContentorAgent(db)
         self.recolha_agent = RecolhaAgent(db)
-        self.pedido_v24_agent = PedidoV24Agent(db)
+        self.pedido_v24_router = PedidoV24OperationalRouter(db)
         self.pagamento_pendente_agent = PagamentoPendenteAgent(db)
         self.pedido_service = PedidoService(db)
         self.aluguer_service = AluguerService(db)
         self.contentor_service = ContentorService(db)
         self.operador_service = OperadorService(db)
         self._pending_messages: list[str] = []
+
+    @property
+    def pedido_v24_agent(self):
+        """Compatibilidade temporária para consumidores do backend legado."""
+        return self.pedido_v24_router.backend
 
     def handle(self, message: NormalizedWhatsAppMessage) -> str:
         self._pending_messages = []
@@ -209,7 +214,7 @@ class WhatsappRouterAgent:
 
         if text in CANCEL_COMMANDS and not (text == "0" and conversa.estado_atual == "v24_entrega_adesivo"):
             if self._has_active_flow(conversa):
-                is_v24_flow = conversa.estado_atual.startswith(PedidoV24Agent.PREFIX)
+                is_v24_flow = conversa.estado_atual.startswith(PedidoV24OperationalRouter.PREFIX)
                 conversa.estado_atual = "idle"
                 conversa.contexto_json = {}
                 self.db.commit()
@@ -263,9 +268,9 @@ class WhatsappRouterAgent:
                 return FORBIDDEN_MESSAGE
             return self.pagamento_pendente_agent.start(conversa)
 
-        if conversa.estado_atual.startswith(PedidoV24Agent.PREFIX):
+        if conversa.estado_atual.startswith(PedidoV24OperationalRouter.PREFIX):
             return self._finalize_response(
-                self.pedido_v24_agent.handle(conversa, message),
+                self.pedido_v24_router.handle(conversa, message),
                 conversa,
                 message.telefone,
                 perfil,
@@ -313,7 +318,7 @@ class WhatsappRouterAgent:
         if text in {"1", "novo pedido", "cadastrar pedido"}:
             if perfil == PerfilOperador.FUNCIONARIO:
                 return "Seu perfil de motorista nÃ£o possui permissÃ£o para cadastrar pedidos."
-            return self.pedido_v24_agent.start_cadastro(conversa)
+            return self.pedido_v24_router.start_cadastro(conversa)
         if text in {
             "2", "confirmar entrega de contentor", "confirmar entrega do lote",
             "confirmar chegada", "confirmar chegada / entrega", "chegada",
@@ -322,7 +327,7 @@ class WhatsappRouterAgent:
                 self.pedido_service.pedidos_pendentes_entrega()
                 or self.pedido_service.carrinhas_aguardando_chegada()
             ):
-                return self.pedido_v24_agent.start_entrega(conversa)
+                return self.pedido_v24_router.start_entrega(conversa)
             return self.entrega_agent.start(conversa)
         if text in {
             "3", "confirmar recolha de contentor", "confirmar partida",
@@ -332,10 +337,10 @@ class WhatsappRouterAgent:
                 self.pedido_service.contentores_para_recolha()
                 or self.pedido_service.carrinhas_aguardando_partida()
             ):
-                return self.pedido_v24_agent.start_recolha(conversa)
+                return self.pedido_v24_router.start_recolha(conversa)
             return self.recolha_agent.start(conversa)
         if text in {"4", "confirmar despejo no vazadouro", "confirmar despejo"}:
-            return self.pedido_v24_agent.start_despejo(conversa)
+            return self.pedido_v24_router.start_despejo(conversa)
 
         if text == "6":
             return self._handle_operational_command("resumo", message.telefone, perfil)
@@ -1859,7 +1864,7 @@ class WhatsappRouterAgent:
             or conversa.estado_atual in RenovacaoAgent.ACTIVE_STATES
             or conversa.estado_atual in RecolhaAgent.ACTIVE_STATES
             or conversa.estado_atual in ContentorAgent.ACTIVE_STATES
-            or conversa.estado_atual.startswith(PedidoV24Agent.PREFIX)
+            or conversa.estado_atual.startswith(PedidoV24OperationalRouter.PREFIX)
             or conversa.estado_atual in PagamentoPendenteAgent.ACTIVE_STATES
         )
 
