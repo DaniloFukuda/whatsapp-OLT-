@@ -78,8 +78,13 @@ class PedidoV24Agent:
         )
 
     def start_recolha(self, conversa: ConversaWhatsApp) -> str:
+        pedidos_contentor = (
+            self.service.pedidos_para_recolha()
+            if get_settings().feature_contentores_enabled
+            else []
+        )
         pedidos = self._merge_pedidos(
-            self.service.pedidos_para_recolha(),
+            pedidos_contentor,
             self.service.pedidos_carrinha_aguardando_partida(),
         )
         if not pedidos:
@@ -126,6 +131,13 @@ class PedidoV24Agent:
             and self._contexto_entrega_tem_tipo(ctx, TipoEquipamentoPedido.CARRINHA.value)
         ):
             return self._idle(conversa, self._carrinha_chegada_desabilitada_message())
+        if (
+            state.startswith("v24_recolha_")
+            and state not in {"v24_recolha_pedido", "v24_recolha_ativo"}
+            and not get_settings().feature_contentores_enabled
+            and self._contexto_recolha_tem_contentor(ctx)
+        ):
+            return self._idle(conversa, self._contentor_recolha_desabilitada_message())
 
         if state == "v24_cadastro_nome" and message.contact_name:
             name = message.contact_name.strip()
@@ -568,6 +580,12 @@ class PedidoV24Agent:
             if not contentor_id:
                 return "Selecione um ativo da lista."
             contentor = self.db.get(PedidoContentor, contentor_id)
+            if (
+                contentor
+                and contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+                and not get_settings().feature_contentores_enabled
+            ):
+                return self._idle(conversa, self._contentor_recolha_desabilitada_message())
             if not self._is_recolha_pendente_do_pedido(contentor, ctx["pedido_id"]):
                 pendentes = self._recolha_pendentes_por_pedido(ctx["pedido_id"])
                 if pendentes:
@@ -585,6 +603,13 @@ class PedidoV24Agent:
             contentor_id = self._selected_id(raw, ctx["ids"])
             if not contentor_id:
                 return "Selecione um contentor da lista."
+            contentor = self.db.get(PedidoContentor, contentor_id)
+            if (
+                contentor
+                and contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+                and not get_settings().feature_contentores_enabled
+            ):
+                return self._idle(conversa, self._contentor_recolha_desabilitada_message())
             ctx.update({"contentor_id": contentor_id, "fotos_recolha": [], "avariado": None, "relato_avaria": None})
             return self._advance(conversa, "v24_recolha_foto", ctx, "Envie a foto do equipamento cheio antes do içamento.")
         if state == "v24_recolha_foto":
@@ -1058,6 +1083,12 @@ class PedidoV24Agent:
         relato = ctx.get("relato_avaria")
         fotos = list(ctx.get("fotos_recolha") or [])
         contentor = self.db.get(PedidoContentor, contentor_id)
+        if (
+            contentor
+            and contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+            and not get_settings().feature_contentores_enabled
+        ):
+            return self._idle(conversa, self._contentor_recolha_desabilitada_message())
         is_carrinha = bool(
             contentor
             and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
@@ -1200,6 +1231,7 @@ class PedidoV24Agent:
             for item in sorted(pedido.contentores, key=lambda item: (item.numero_adesivo_contentor or "", item.id))
             if (
                 item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+                and get_settings().feature_contentores_enabled
                 and item.status_entrega == "ENTREGUE"
                 and item.status_recolha == "PENDENTE"
             )
@@ -1209,6 +1241,18 @@ class PedidoV24Agent:
                 == StatusOperacionalCarrinha.EM_ATENDIMENTO.value
             )
         ]
+
+    def _contexto_recolha_tem_contentor(self, ctx) -> bool:
+        contentor_id = ctx.get("contentor_id")
+        contentor = self.db.get(PedidoContentor, contentor_id) if contentor_id else None
+        return bool(
+            contentor
+            and contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+        )
+
+    @staticmethod
+    def _contentor_recolha_desabilitada_message() -> str:
+        return "A recolha de Contentor não está habilitada. A operação foi cancelada com segurança."
 
     @staticmethod
     def _merge_pedidos(*grupos):
