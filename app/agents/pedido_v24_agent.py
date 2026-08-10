@@ -109,8 +109,13 @@ class PedidoV24Agent:
         )
 
     def start_despejo(self, conversa: ConversaWhatsApp) -> str:
+        pedidos_contentor = (
+            self.service.pedidos_para_despejo()
+            if get_settings().feature_contentores_enabled
+            else []
+        )
         pedidos = self._merge_pedidos(
-            self.service.pedidos_para_despejo(),
+            pedidos_contentor,
             self.service.pedidos_carrinha_aguardando_despejo(),
         )
         if not pedidos:
@@ -156,6 +161,13 @@ class PedidoV24Agent:
             and self._contexto_recolha_tem_tipo(ctx, TipoEquipamentoPedido.CARRINHA.value)
         ):
             return self._idle(conversa, self._carrinha_partida_desabilitada_message())
+        if (
+            state.startswith("v24_despejo_")
+            and state not in {"v24_despejo_pedido", "v24_despejo_ativo", "v24_despejo_contentor"}
+            and not get_settings().feature_contentores_enabled
+            and self._contexto_despejo_tem_tipo(ctx, TipoEquipamentoPedido.CONTENTOR.value)
+        ):
+            return self._idle(conversa, self._contentor_despejo_desabilitado_message())
 
         if state == "v24_cadastro_nome" and message.contact_name:
             name = message.contact_name.strip()
@@ -716,6 +728,12 @@ class PedidoV24Agent:
             if not contentor_id:
                 return "Selecione um ativo da lista."
             contentor = self.db.get(PedidoContentor, contentor_id)
+            if (
+                contentor
+                and contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+                and not get_settings().feature_contentores_enabled
+            ):
+                return self._idle(conversa, self._contentor_despejo_desabilitado_message())
             if not self._is_despejo_pendente_do_pedido(contentor, ctx["pedido_id"]):
                 pendentes = self._despejo_pendentes_por_pedido(ctx["pedido_id"])
                 if pendentes:
@@ -746,6 +764,11 @@ class PedidoV24Agent:
             contentor = self.db.get(PedidoContentor, contentor_id)
             if not contentor:
                 return "Selecione um contentor da lista."
+            if (
+                contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+                and not get_settings().feature_contentores_enabled
+            ):
+                return self._idle(conversa, self._contentor_despejo_desabilitado_message())
             ctx.update(
                 {
                     "contentor_id": contentor_id,
@@ -861,8 +884,14 @@ class PedidoV24Agent:
         contentor_id = ctx["contentor_id"]
         fotos = list(ctx.get("fotos_despejo") or [])
         tem_divergencia = self._despejo_tem_divergencia(ctx)
+        contentor = self.db.get(PedidoContentor, contentor_id)
+        if (
+            contentor
+            and contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+            and not get_settings().feature_contentores_enabled
+        ):
+            return self._idle(conversa, self._contentor_despejo_desabilitado_message())
         try:
-            contentor = self.db.get(PedidoContentor, contentor_id)
             if contentor and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:
                 contentor = self.service.confirmar_despejo_carrinha(
                     contentor_id,
@@ -951,6 +980,7 @@ class PedidoV24Agent:
             and (
                 (
                     contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+                    and get_settings().feature_contentores_enabled
                     and contentor.status_recolha == "RECOLHIDO"
                     and contentor.status_ciclo == "EM_ANDAMENTO"
                 )
@@ -1072,6 +1102,7 @@ class PedidoV24Agent:
             for item in sorted(pedido.contentores, key=lambda item: (item.numero_adesivo_contentor or "", item.id))
             if (
                 item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+                and get_settings().feature_contentores_enabled
                 and item.status_recolha == "RECOLHIDO"
                 and item.status_ciclo == "EM_ANDAMENTO"
             )
@@ -1095,6 +1126,15 @@ class PedidoV24Agent:
         ctx.setdefault("carga_errada", None)
         ctx.setdefault("relato_carga", None)
         ctx.setdefault("fotos_despejo", [])
+
+    def _contexto_despejo_tem_tipo(self, ctx, tipo_equipamento: str) -> bool:
+        contentor_id = ctx.get("contentor_id")
+        contentor = self.db.get(PedidoContentor, contentor_id) if contentor_id else None
+        return bool(contentor and contentor.tipo_equipamento == tipo_equipamento)
+
+    @staticmethod
+    def _contentor_despejo_desabilitado_message() -> str:
+        return "O despejo de Contentor não está habilitado. A operação foi cancelada com segurança."
 
     def _recover_disabled_avaria(self, conversa: ConversaWhatsApp, ctx: dict) -> str:
         ctx.pop("avariado", None)
