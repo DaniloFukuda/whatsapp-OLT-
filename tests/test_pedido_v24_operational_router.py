@@ -34,6 +34,49 @@ class BackendSpy:
     def handle(self, conversa, message):
         return self._call("handle", conversa, message)
 
+    def start(self, operation, conversa):
+        return self._call("start", operation, conversa)
+
+
+@pytest.mark.parametrize(
+    "operation,method",
+    [
+        ("cadastro", "start_cadastro"),
+        ("entrega", "start_entrega"),
+        ("recolha", "start_recolha"),
+        ("despejo", "start_despejo"),
+    ],
+)
+def test_start_mapeia_operacao_e_delega_uma_vez(operation, method):
+    backend = BackendSpy()
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = object()
+
+    resposta = router.start(operation, conversa)
+
+    assert resposta == f"retorno:{method}"
+    assert backend.calls == [(method, (conversa,))]
+
+
+def test_start_preserva_excecao_do_backend():
+    backend = Mock()
+    backend.start_entrega.side_effect = RuntimeError("erro original")
+    router = PedidoV24OperationalRouter(backend=backend)
+
+    with pytest.raises(RuntimeError, match="erro original"):
+        router.start("entrega", object())
+
+
+def test_start_rejeita_operacao_invalida_sem_chamar_backend():
+    backend = Mock()
+    router = PedidoV24OperationalRouter(backend=backend)
+
+    with pytest.raises(ValueError, match="Operação operacional inválida"):
+        router.start("inexistente", object())
+
+    backend.assert_not_called()
+    assert backend.mock_calls == []
+
 
 @pytest.mark.parametrize(
     "method",
@@ -130,9 +173,10 @@ def test_opcoes_um_a_quatro_passam_uma_vez_pelo_seam(
 
     resposta = router.handle(mensagem(opcao))
 
-    assert resposta == f"retorno:{method}"
+    assert resposta == "retorno:start"
     assert len(spy.calls) == 1
-    assert spy.calls[0][0] == method
+    assert spy.calls[0][0] == "start"
+    assert spy.calls[0][1][0] == method.removeprefix("start_")
 
 
 def test_estado_v24_ativo_e_retomado_via_handle(whatsapp_router):

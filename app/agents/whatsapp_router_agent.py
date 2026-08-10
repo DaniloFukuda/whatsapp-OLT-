@@ -318,7 +318,7 @@ class WhatsappRouterAgent:
         if text in {"1", "novo pedido", "cadastrar pedido"}:
             if perfil == PerfilOperador.FUNCIONARIO:
                 return "Seu perfil de motorista nÃ£o possui permissÃ£o para cadastrar pedidos."
-            return self.pedido_v24_router.start_cadastro(conversa)
+            return self.pedido_v24_router.start("cadastro", conversa)
         if text in {
             "2", "confirmar entrega de contentor", "confirmar entrega do lote",
             "confirmar chegada", "confirmar chegada / entrega", "chegada",
@@ -327,7 +327,7 @@ class WhatsappRouterAgent:
                 self.pedido_service.pedidos_pendentes_entrega()
                 or self.pedido_service.carrinhas_aguardando_chegada()
             ):
-                return self.pedido_v24_router.start_entrega(conversa)
+                return self.pedido_v24_router.start("entrega", conversa)
             return self.entrega_agent.start(conversa)
         if text in {
             "3", "confirmar recolha de contentor", "confirmar partida",
@@ -337,10 +337,10 @@ class WhatsappRouterAgent:
                 self.pedido_service.contentores_para_recolha()
                 or self.pedido_service.carrinhas_aguardando_partida()
             ):
-                return self.pedido_v24_router.start_recolha(conversa)
+                return self.pedido_v24_router.start("recolha", conversa)
             return self.recolha_agent.start(conversa)
         if text in {"4", "confirmar despejo no vazadouro", "confirmar despejo"}:
-            return self.pedido_v24_router.start_despejo(conversa)
+            return self.pedido_v24_router.start("despejo", conversa)
 
         if text == "6":
             return self._handle_operational_command("resumo", message.telefone, perfil)

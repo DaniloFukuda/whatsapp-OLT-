@@ -11,6 +11,12 @@ class PedidoV24OperationalRouter:
     """Delega operações V24 sem interpretar estado, contexto ou modalidade."""
 
     PREFIX = PedidoV24Agent.PREFIX
+    _START_METHODS = {
+        "cadastro": "start_cadastro",
+        "entrega": "start_entrega",
+        "recolha": "start_recolha",
+        "despejo": "start_despejo",
+    }
 
     def __init__(self, db: Session | None = None, *, backend=None):
         if backend is None:
@@ -22,6 +28,12 @@ class PedidoV24OperationalRouter:
     @property
     def backend(self):
         return self._backend
+
+    def start(self, operation: str, conversa: ConversaWhatsApp) -> str:
+        method_name = self._START_METHODS.get(operation)
+        if method_name is None:
+            raise ValueError(f"Operação operacional inválida: {operation}")
+        return getattr(self._backend, method_name)(conversa)
 
     def start_cadastro(self, conversa: ConversaWhatsApp) -> str:
         return self._backend.start_cadastro(conversa)
