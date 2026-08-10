@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy.orm import sessionmaker
@@ -63,7 +64,7 @@ def criar_pedido(
     pedido = Pedido(
         nome_cliente=nome,
         telefone_cliente="351911111111",
-        data_planejada=datetime.now(timezone.utc),
+        data_planejada=datetime.now(ZoneInfo("Europe/Lisbon")),
         valor_global=Decimal(valor),
         status_pagamento=StatusPagamento.PAGO.value if pago else StatusPagamento.PENDENTE.value,
         forma_pagamento="MBWay" if pago else None,

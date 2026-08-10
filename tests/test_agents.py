@@ -1,7 +1,10 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
+import pytest
 import app.services.operador_service as operador_service_module
+import app.agents.whatsapp_router_agent as router_module
 from app.agents.aluguer_agent import AluguerAgent
 from app.agents.recolha_agent import RecolhaAgent
 from app.agents.whatsapp_router_agent import (
@@ -126,6 +129,74 @@ def preparar_resumo_paulo(db_session):
     amanha.data_vencimento = now + timedelta(days=1)
     db_session.commit()
     return hoje, amanha
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (datetime(2026, 8, 9, 23, 48), datetime(2026, 8, 10, 0, 48, tzinfo=ZoneInfo("Europe/Lisbon"))),
+        (datetime(2026, 8, 9, 23, 48, tzinfo=timezone.utc), datetime(2026, 8, 10, 0, 48, tzinfo=ZoneInfo("Europe/Lisbon"))),
+        (datetime(2026, 8, 10, 0, 48, tzinfo=ZoneInfo("Europe/Lisbon")), datetime(2026, 8, 10, 0, 48, tzinfo=ZoneInfo("Europe/Lisbon"))),
+    ],
+)
+def test_painel_converte_instantes_para_timezone_local(monkeypatch, value, expected):
+    monkeypatch.setattr(
+        router_module,
+        "get_settings",
+        lambda: SimpleNamespace(timezone="Europe/Lisbon"),
+    )
+    router = WhatsappRouterAgent.__new__(WhatsappRouterAgent)
+
+    converted = router._to_local_datetime(value)
+
+    assert converted == expected
+    assert converted.tzinfo == ZoneInfo("Europe/Lisbon")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (datetime(2026, 8, 10, 23, 48), datetime(2026, 8, 10).date()),
+        (datetime(2026, 8, 9, 23, 48, tzinfo=timezone.utc), datetime(2026, 8, 10).date()),
+        (datetime(2026, 8, 10, 23, 48, tzinfo=ZoneInfo("Europe/Lisbon")), datetime(2026, 8, 10).date()),
+    ],
+)
+def test_painel_preserva_contrato_civil_de_data_planejada(monkeypatch, value, expected):
+    monkeypatch.setattr(
+        router_module,
+        "get_settings",
+        lambda: SimpleNamespace(timezone="Europe/Lisbon"),
+    )
+    router = WhatsappRouterAgent.__new__(WhatsappRouterAgent)
+
+    assert router._planned_date(value) == expected
+
+
+def test_painel_classifica_vencimento_sqlite_na_data_local_correta(db_session, monkeypatch):
+    monkeypatch.setattr(
+        router_module,
+        "get_settings",
+        lambda: SimpleNamespace(timezone="Europe/Lisbon"),
+    )
+    SeedService(db_session).seed_contentores_iniciais()
+    aluguer = AluguerService(db_session).registrar_novo_aluguer(
+        nome_cliente="Cliente Fronteira UTC",
+        telefone_cliente="351912345678",
+        valor="100",
+        forma_pagamento="mbway",
+        pago=True,
+        data_entrega=datetime(2026, 8, 4, 23, 48, tzinfo=timezone.utc),
+    )
+    aluguer.data_vencimento = datetime(2026, 8, 9, 23, 48, tzinfo=timezone.utc)
+    db_session.commit()
+    db_session.expire_all()
+    recarregado = db_session.get(AluguerContentor, aluguer.id)
+    router = WhatsappRouterAgent.__new__(WhatsappRouterAgent)
+
+    assert recarregado.data_vencimento.tzinfo is None
+    assert router._alugueres_por_vencimento(
+        [recarregado], datetime(2026, 8, 10).date()
+    ) == [recarregado]
 
 
 def avancar_cadastro_ate_confirmacao_data(router, db_session, telefone: str = "351900001000"):

@@ -1,10 +1,12 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
 import app.services.operador_service as operador_service_module
+import app.agents.whatsapp_router_agent as router_module
 from app.agents.pedido_v24_agent import PedidoV24Agent
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.agents.whatsapp_router_agent import MAIN_MENU
@@ -2561,10 +2563,11 @@ def test_resumo_v32_gestor_ve_blocos_contentores_carrinhas_financeiro_e_menu_sep
     operador(db_session, gestor, PerfilOperador.GESTOR)
     service = PedidoService(db_session)
     now = datetime.now(timezone.utc)
+    planned_today = datetime.now(ZoneInfo("Europe/Lisbon"))
     pedido_contentores = service.criar(
         nome_cliente="Cliente Agrupado",
         telefone_cliente="351912345678",
-        data_planejada=now,
+        data_planejada=planned_today,
         valor_global="100",
         pago=True,
         forma_pagamento="MBWay",
@@ -2577,7 +2580,7 @@ def test_resumo_v32_gestor_ve_blocos_contentores_carrinhas_financeiro_e_menu_sep
     pedido_carrinha = service.criar(
         nome_cliente="Cliente Carrinha Painel",
         telefone_cliente="351900000222",
-        data_planejada=now,
+        data_planejada=planned_today,
         valor_global="80",
         pago=True,
         forma_pagamento="Dinheiro",
@@ -2598,7 +2601,7 @@ def test_resumo_v32_gestor_ve_blocos_contentores_carrinhas_financeiro_e_menu_sep
         db_session,
         nome="Cliente Misto",
         telefone="351900000333",
-        data_planejada=now,
+        data_planejada=planned_today,
         valor="100",
         pago=False,
         carrinha_horario="15:00",
@@ -2786,7 +2789,7 @@ def test_resumo_v4_entregas_hoje_contentor_carrinha_endereco_e_horario_seguro(db
     gestor = "351900010005"
     operador(db_session, gestor, PerfilOperador.GESTOR)
     service = PedidoService(db_session)
-    today = datetime.now(timezone.utc)
+    today = datetime.now(ZoneInfo("Europe/Lisbon"))
     pedido_contentor = service.criar(
         nome_cliente="Cliente Entrega Maps",
         telefone_cliente="351912345680",
@@ -2827,6 +2830,39 @@ def test_resumo_v4_entregas_hoje_contentor_carrinha_endereco_e_horario_seguro(db
     assert "📍 Endereço: Rua Textual" in response
     assert "[Abrir endereço]" not in response
     assert "None" not in response
+
+
+def test_painel_classifica_entrega_sqlite_na_data_local_correta(db_session, monkeypatch):
+    monkeypatch.setattr(
+        router_module,
+        "get_settings",
+        lambda: SimpleNamespace(timezone="Europe/Lisbon"),
+    )
+    pedido = PedidoService(db_session).criar(
+        nome_cliente="Cliente Renovacao Fronteira",
+        telefone_cliente="351912345678",
+        data_planejada=datetime(2026, 8, 10),
+        valor_global="100",
+        pago=True,
+        forma_pagamento="MBWay",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua",
+        ponto_referencia=None,
+        residuos=["Entulho Limpo"],
+    )
+    item = pedido.contentores[0]
+    item.status_entrega = StatusEntregaPedido.ENTREGUE.value
+    item.status_recolha = StatusRecolhaPedido.PENDENTE.value
+    item.entrega_data_hora = datetime(2026, 8, 5, 23, 48, tzinfo=timezone.utc)
+    db_session.commit()
+    db_session.expire_all()
+    recarregado = db_session.get(Pedido, pedido.id)
+    router = WhatsappRouterAgent.__new__(WhatsappRouterAgent)
+
+    assert recarregado.contentores[0].entrega_data_hora.tzinfo is None
+    assert router._contentores_vencendo_amanha(
+        [recarregado], date(2026, 8, 10)
+    ) == [(recarregado, recarregado.contentores)]
 
 
 def test_resumo_v4_financeiro_nao_duplica_multiequipamento_nem_sum_distinct(db_session):

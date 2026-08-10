@@ -629,7 +629,7 @@ class WhatsappRouterAgent:
     def _pedidos_por_entrega(self, pedidos: list[Pedido], target_date, tipo: str) -> list[tuple[Pedido, list[PedidoContentor]]]:
         resultado = []
         for pedido in pedidos:
-            if self._local_date(pedido.data_planejada) != target_date:
+            if self._planned_date(pedido.data_planejada) != target_date:
                 continue
             itens = [
                 item for item in pedido.contentores
@@ -943,7 +943,7 @@ class WhatsappRouterAgent:
             carrinhas = [
                 item for item in pedido.contentores
                 if self._is_carrinha_para_recolha(item)
-                and self._local_date(pedido.data_planejada) == target_date
+                and self._planned_date(pedido.data_planejada) == target_date
             ]
             if carrinhas:
                 linhas.append(self._render_recolha_carrinhas(pedido, carrinhas))
@@ -1770,11 +1770,16 @@ class WhatsappRouterAgent:
 
     def _to_local_datetime(self, value: datetime) -> datetime:
         if value.tzinfo is None:
-            return value
+            value = value.replace(tzinfo=timezone.utc)
         return value.astimezone(self._timezone())
 
     def _local_date(self, value: datetime):
         return self._to_local_datetime(value).date()
+
+    def _planned_date(self, value: datetime):
+        if value.tzinfo is None:
+            return value.date()
+        return value.astimezone(self._timezone()).date()
 
     def _timezone(self):
         try:
