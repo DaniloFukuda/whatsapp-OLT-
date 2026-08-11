@@ -1483,6 +1483,9 @@ class PedidoV24Agent:
             raise
         return response
 
+    def entrega_confirmacao_prompt(self, ctx):
+        return self._entrega_confirmacao_prompt(ctx)
+
     def _entrega_confirmacao_prompt(self, ctx):
         pedido = self.service.get(ctx["pedido_id"])
         entregas = ctx.get("entregas") or []

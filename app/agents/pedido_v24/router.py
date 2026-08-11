@@ -64,6 +64,9 @@ class PedidoV24OperationalRouter:
     def start_despejo(self, conversa: ConversaWhatsApp) -> str:
         return self._backend.start_despejo(conversa)
 
+    def entrega_confirmacao_prompt(self, context) -> str:
+        return self._backend.entrega_confirmacao_prompt(context)
+
     def handle(
         self,
         conversa: ConversaWhatsApp,

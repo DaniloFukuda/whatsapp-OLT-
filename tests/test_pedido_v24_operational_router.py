@@ -815,6 +815,96 @@ def test_estado_referencia_opcao_continua_integralmente_legado(db_session):
     router._contentor.assert_not_called()
 
 
+def test_adapter_prompt_confirmacao_delega_mesmo_contexto_e_retorno(db_session):
+    agent = PedidoV24Agent(db_session)
+    context = {"pedido_id": 17, "entregas": []}
+    agent._entrega_confirmacao_prompt = Mock(return_value="prompt legado")
+
+    assert agent.entrega_confirmacao_prompt(context) == "prompt legado"
+    agent._entrega_confirmacao_prompt.assert_called_once_with(context)
+
+
+def test_adapter_prompt_confirmacao_preserva_consultas_contexto_e_commit(db_session):
+    agent = PedidoV24Agent(db_session)
+    agent.service.get = Mock(
+        return_value=SimpleNamespace(nome_cliente="Cliente", status_pagamento="PAGO")
+    )
+    contentor = SimpleNamespace(
+        id=5,
+        tipo_equipamento=TipoEquipamentoPedido.CONTENTOR.value,
+        numero_adesivo_contentor=None,
+    )
+    agent.db.get = Mock(return_value=contentor)
+    agent.db.commit = Mock()
+    context = {
+        "pedido_id": 17,
+        "entregas": [
+            {"contentor_id": 5, "numero_adesivo": "101", "fotos": ["foto"]},
+        ],
+        "referencia_entrega": None,
+    }
+    snapshot = {
+        "pedido_id": 17,
+        "entregas": [
+            {"contentor_id": 5, "numero_adesivo": "101", "fotos": ["foto"]},
+        ],
+        "referencia_entrega": None,
+    }
+
+    response = agent.entrega_confirmacao_prompt(context)
+
+    assert response == (
+        "Confirme a entrega preparada:\n\nCliente: Cliente\nPedido: #17\n"
+        "Quantidade de ativos: 1\n1. 📦 Contentor 5 | identificação: 101 | fotos: 1\n"
+        "Ponto de referência: sem referência\nPagamento: pago\n\n"
+        "1. ✅ Confirmar entrega\n2. ❌ Cancelar"
+    )
+    agent.service.get.assert_called_once_with(17)
+    assert agent.db.get.call_count == 2
+    assert context == snapshot
+    agent.db.commit.assert_not_called()
+
+
+def test_adapter_prompt_confirmacao_preserva_excecao(db_session):
+    agent = PedidoV24Agent(db_session)
+    context = {"pedido_id": 17}
+    agent._entrega_confirmacao_prompt = Mock(side_effect=RuntimeError("consulta falhou"))
+
+    with pytest.raises(RuntimeError, match="consulta falhou"):
+        agent.entrega_confirmacao_prompt(context)
+
+
+def test_router_delega_prompt_confirmacao_sem_alterar_argumento():
+    backend = Mock()
+    backend.entrega_confirmacao_prompt.return_value = "prompt"
+    router = PedidoV24OperationalRouter(backend=backend)
+    context = {"pedido_id": 17}
+
+    assert router.entrega_confirmacao_prompt(context) == "prompt"
+    backend.entrega_confirmacao_prompt.assert_called_once_with(context)
+
+
+def test_referencia_opcao_contentor_tipificado_continua_legado(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado-referencia")
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_referencia_opcao",
+        contexto_json={
+            "pedido_id": 17,
+            "operational_options": [
+                {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
+            ],
+        },
+    )
+    entrada = mensagem("2")
+
+    assert router.handle(conversa, entrada) == "legado-referencia"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.assert_not_called()
+
+
 def test_excecao_do_backend_nao_e_convertida():
     backend = Mock()
     backend.start_cadastro.side_effect = RuntimeError("erro original")
