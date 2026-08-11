@@ -159,3 +159,26 @@ class ContentorOperationalAgent:
             ctx,
             "Deseja informar algum ponto de referência para a entrega?\n\n1. Sim\n2. Não",
         )
+
+    def decide_entrega_referencia_opcao(self, conversa, message):
+        """Decide a referência da entrega sem persistir estado."""
+        normalized = unicodedata.normalize("NFKD", message.texto or "")
+        choice = "".join(
+            char for char in normalized if not unicodedata.combining(char)
+        ).strip().lower()
+        ctx = dict(conversa.contexto_json or {})
+        if choice in {"1", "sim", "entrega_referencia:sim"}:
+            return AdvanceTransition(
+                "v24_entrega_referencia",
+                ctx,
+                "Digite o ponto de referência.",
+            )
+        if choice in {"2", "nao", "entrega_referencia:nao"}:
+            ctx["referencia_entrega"] = None
+            prompt = self._legacy_backend.entrega_confirmacao_prompt(ctx)
+            return AdvanceTransition(
+                "v24_entrega_confirmacao",
+                ctx,
+                prompt,
+            )
+        return "Selecione Sim ou Não."
