@@ -989,10 +989,99 @@ def test_referencia_opcao_carrinha_legado_ou_ambiguo_permanece_no_backend(
     router._contentor.decide_entrega_referencia_opcao.assert_not_called()
 
 
+def test_referencia_contentor_inequivoco_usa_modulo_e_adapter(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.apply_operational_transition = Mock(return_value="referencia-aplicada")
+    router = PedidoV24OperationalRouter(backend=backend)
+    decision = AdvanceTransition(
+        "v24_entrega_confirmacao",
+        {"pedido_id": 17, "referencia_entrega": "Portão azul"},
+        "prompt legado",
+    )
+    router._contentor = Mock()
+    router._contentor.decide_entrega_referencia.return_value = decision
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_referencia",
+        contexto_json={
+            "pedido_id": 17,
+            "operational_options": [
+                {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
+            ],
+        },
+    )
+    entrada = mensagem("Portão azul")
+
+    assert router.handle(conversa, entrada) == "referencia-aplicada"
+    router._contentor.decide_entrega_referencia.assert_called_once_with(
+        conversa, entrada
+    )
+    backend.apply_operational_transition.assert_called_once_with(conversa, decision)
+
+
+def test_referencia_valida_preserva_contexto_resposta_estado_seam_e_sem_commit():
+    backend = Mock()
+    backend.entrega_confirmacao_prompt.return_value = "prompt legado"
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    original = {"pedido_id": 17, "entregas": [{"contentor_id": 5}]}
+    conversa = SimpleNamespace(contexto_json=original)
+
+    decision = agent.decide_entrega_referencia(
+        conversa, mensagem("  Portão azul  ")
+    )
+
+    expected_context = {**original, "referencia_entrega": "Portão azul"}
+    assert decision == AdvanceTransition(
+        "v24_entrega_confirmacao",
+        expected_context,
+        "prompt legado",
+    )
+    backend.entrega_confirmacao_prompt.assert_called_once_with(expected_context)
+    assert conversa.contexto_json == original
+    backend.db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("texto", ["", " " * 3, "x" * 51])
+def test_referencia_invalida_preserva_resposta_sem_prompt_ou_commit(texto):
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    conversa = SimpleNamespace(contexto_json={"pedido_id": 17})
+
+    assert agent.decide_entrega_referencia(conversa, mensagem(texto)) == (
+        "O ponto de referência deve ter no máximo 50 caracteres."
+    )
+    backend.entrega_confirmacao_prompt.assert_not_called()
+    backend.db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "contexto",
+    [
+        {"pedido_id": 17, "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CARRINHA"]}]},
+        {"pedido_id": 17, "referencia_entrega": None},
+        {"pedido_id": 17, "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CONTENTOR", "CARRINHA"]}]},
+        {"pedido_id": 17, "tipo_solicitacao": "CONTENTOR", "tipo_equipamento": "CARRINHA"},
+    ],
+)
+def test_referencia_carrinha_legado_ou_ambiguo_permanece_no_backend(
+    db_session, contexto
+):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado-referencia")
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_referencia", contexto_json=contexto
+    )
+    entrada = mensagem("Portão azul")
+
+    assert router.handle(conversa, entrada) == "legado-referencia"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_entrega_referencia.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "estado",
     [
-        "v24_entrega_referencia",
         "v24_entrega_confirmacao",
         "v24_entrega_pagou",
         "v24_entrega_forma",

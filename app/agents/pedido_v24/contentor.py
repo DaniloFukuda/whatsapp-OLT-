@@ -182,3 +182,18 @@ class ContentorOperationalAgent:
                 prompt,
             )
         return "Selecione Sim ou Não."
+
+    def decide_entrega_referencia(self, conversa, message):
+        """Decide o texto da referência sem persistir estado."""
+        raw = (message.texto or "").strip()
+        if not 1 <= len(raw) <= 50:
+            return "O ponto de referência deve ter no máximo 50 caracteres."
+
+        ctx = dict(conversa.contexto_json or {})
+        ctx["referencia_entrega"] = raw
+        prompt = self._legacy_backend.entrega_confirmacao_prompt(ctx)
+        return AdvanceTransition(
+            "v24_entrega_confirmacao",
+            ctx,
+            prompt,
+        )
