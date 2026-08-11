@@ -5,10 +5,55 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.router import PedidoV24OperationalRouter
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.operador import PerfilOperador
+from app.models.pedido import TipoEquipamentoPedido
+
+
+@pytest.mark.parametrize(
+    "context,expected",
+    [
+        ({"tipo_solicitacao": "CONTENTOR"}, TipoEquipamentoPedido.CONTENTOR),
+        ({"tipo_equipamento": "CARRINHA"}, TipoEquipamentoPedido.CARRINHA),
+        ({"item_atual": {"tipo_equipamento": "CONTENTOR"}}, TipoEquipamentoPedido.CONTENTOR),
+        ({"itens": [{"tipo_equipamento": "CARRINHA"}]}, TipoEquipamentoPedido.CARRINHA),
+        ({}, None),
+        ({"contentor_id": 42}, None),
+        ({"estado_atual": "v24_recolha_contentor"}, None),
+        ({"tipo_solicitacao": "CONTENTOR", "itens": [{"tipo_equipamento": "CARRINHA"}]}, None),
+        ({"tipo_solicitacao": "DESCONHECIDO", "itens": [{"tipo_equipamento": "CONTENTOR"}]}, None),
+    ],
+)
+def test_resolve_modalidade_somente_com_evidencia_explicita(context, expected):
+    assert resolve_operational_modality(context) is expected
+
+
+def test_resolver_nao_modifica_contexto():
+    context = {
+        "tipo_solicitacao": "CONTENTOR",
+        "item_atual": {"tipo_equipamento": "CONTENTOR"},
+        "itens": [{"tipo_equipamento": "CONTENTOR"}],
+    }
+    snapshot = {
+        "tipo_solicitacao": "CONTENTOR",
+        "item_atual": {"tipo_equipamento": "CONTENTOR"},
+        "itens": [{"tipo_equipamento": "CONTENTOR"}],
+    }
+
+    assert resolve_operational_modality(context) is TipoEquipamentoPedido.CONTENTOR
+    assert context == snapshot
+
+
+def test_operational_router_apenas_expoe_resolucao_sem_mudar_dispatch():
+    backend = BackendSpy()
+    router = PedidoV24OperationalRouter(backend=backend)
+    context = {"tipo_solicitacao": "CARRINHA"}
+
+    assert router.resolve_modality(context) is TipoEquipamentoPedido.CARRINHA
+    assert backend.calls == []
 
 
 class BackendSpy:

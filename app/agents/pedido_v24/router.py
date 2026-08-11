@@ -2,6 +2,7 @@
 
 from sqlalchemy.orm import Session
 
+from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24_agent import PedidoV24Agent
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.conversa import ConversaWhatsApp
@@ -28,6 +29,10 @@ class PedidoV24OperationalRouter:
     @property
     def backend(self):
         return self._backend
+
+    @staticmethod
+    def resolve_modality(context):
+        return resolve_operational_modality(context)
 
     def start(self, operation: str, conversa: ConversaWhatsApp) -> str:
         method_name = self._START_METHODS.get(operation)
