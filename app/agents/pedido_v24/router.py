@@ -39,8 +39,8 @@ class PedidoV24OperationalRouter:
         return self._backend
 
     @staticmethod
-    def resolve_modality(context):
-        return resolve_operational_modality(context)
+    def resolve_modality(context, selected_pedido_id: int | None = None):
+        return resolve_operational_modality(context, selected_pedido_id)
 
     def start(self, operation: str, conversa: ConversaWhatsApp) -> str:
         method_name = self._START_METHODS.get(operation)

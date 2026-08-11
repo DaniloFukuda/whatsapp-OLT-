@@ -80,7 +80,18 @@ class PedidoV24Agent:
         return self._advance(
             conversa,
             "v24_entrega_pedido",
-            {"ids": [p.id for p in pedidos]},
+            {
+                "ids": [p.id for p in pedidos],
+                "operational_options": [
+                    {
+                        "pedido_id": pedido.id,
+                        "tipos_equipamento": sorted(
+                            self._pedido_entrega_tipos(pedido)
+                        ),
+                    }
+                    for pedido in pedidos
+                ],
+            },
             "Selecione o cliente para confirmar a chegada / entrega.\n\n"
             + "\n".join(self._pedido_entrega_option(p, i) for i, p in enumerate(pedidos, 1)),
         )
@@ -1820,7 +1831,7 @@ class PedidoV24Agent:
 
     def _pedido_entrega_label(self, pedido) -> str:
         pendentes = self._itens_aguardando_chegada_ou_entrega(pedido)
-        tipos = {item.tipo_equipamento for item in pendentes}
+        tipos = self._pedido_entrega_tipos(pedido)
         if tipos == {TipoEquipamentoPedido.CARRINHA.value}:
             tipo = "Carrinha"
         elif tipos == {TipoEquipamentoPedido.CONTENTOR.value}:
@@ -1832,7 +1843,7 @@ class PedidoV24Agent:
 
     def _pedido_entrega_option(self, pedido, index: int) -> str:
         pendentes = self._itens_aguardando_chegada_ou_entrega(pedido)
-        tipos = {item.tipo_equipamento for item in pendentes}
+        tipos = self._pedido_entrega_tipos(pedido)
         if tipos == {TipoEquipamentoPedido.CARRINHA.value}:
             tipo = "Carrinha"
         elif tipos == {TipoEquipamentoPedido.CONTENTOR.value}:
@@ -1848,6 +1859,12 @@ class PedidoV24Agent:
             f"   Tipo: {tipo} x{quantidade} - {data}\n"
             f"   ID: entrega_pedido:{pedido.id}"
         )
+
+    def _pedido_entrega_tipos(self, pedido) -> set[str]:
+        return {
+            item.tipo_equipamento
+            for item in self._itens_aguardando_chegada_ou_entrega(pedido)
+        }
 
     def _pedido_recolha_label(self, pedido) -> str:
         pendentes = self._recolha_pendentes(pedido)

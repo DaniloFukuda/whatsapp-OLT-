@@ -48,6 +48,44 @@ def test_resolver_nao_modifica_contexto():
     assert context == snapshot
 
 
+@pytest.mark.parametrize(
+    "tipo,expected",
+    [
+        ("CONTENTOR", TipoEquipamentoPedido.CONTENTOR),
+        ("CARRINHA", TipoEquipamentoPedido.CARRINHA),
+    ],
+)
+def test_resolver_modalidade_da_opcao_tipificada(tipo, expected):
+    context = {
+        "ids": [17],
+        "operational_options": [
+            {"pedido_id": 17, "tipos_equipamento": [tipo]},
+        ],
+    }
+
+    assert resolve_operational_modality(context, 17) is expected
+
+
+def test_resolver_contexto_legado_sem_metadado_permanece_indeterminado():
+    assert resolve_operational_modality({"ids": [17]}, 17) is None
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [{"pedido_id": 17, "tipos_equipamento": ["CONTENTOR", "CARRINHA"]}],
+        [
+            {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
+            {"pedido_id": 17, "tipos_equipamento": ["CARRINHA"]},
+        ],
+    ],
+)
+def test_resolver_opcao_ambigua_permanece_indeterminado(options):
+    context = {"ids": [17], "operational_options": options}
+
+    assert resolve_operational_modality(context, 17) is None
+
+
 def test_operational_router_apenas_expoe_resolucao_sem_mudar_dispatch():
     backend = BackendSpy()
     router = PedidoV24OperationalRouter(backend=backend)

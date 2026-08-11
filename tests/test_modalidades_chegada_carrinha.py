@@ -5,12 +5,15 @@ from datetime import datetime, timezone
 import pytest
 
 import app.core.config as config_module
+from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24_agent import PedidoV24Agent
 from app.core.config import Settings, get_settings
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.aluguer import ContentorFoto
 from app.models.conversa import ConversaWhatsApp
 from app.models.pedido import (
+    Pedido,
+    PedidoContentor,
     StatusEntregaPedido,
     StatusOperacionalCarrinha,
     TipoEquipamentoPedido,
@@ -327,11 +330,66 @@ def test_defaults_on_on_preservam_comportamento_anterior(db_session, monkeypatch
     configurar(monkeypatch)
     contentor = criar_pedido(db_session, TipoEquipamentoPedido.CONTENTOR.value)
     carrinha = criar_pedido(db_session, TipoEquipamentoPedido.CARRINHA.value)
+    atual = conversa(db_session)
 
-    resposta = PedidoV24Agent(db_session).start_entrega(conversa(db_session))
+    resposta = PedidoV24Agent(db_session).start_entrega(atual)
 
     assert contentor.nome_cliente in resposta
     assert carrinha.nome_cliente in resposta
+    assert atual.contexto_json["ids"] == [contentor.id, carrinha.id]
+    assert atual.contexto_json["operational_options"] == [
+        {
+            "pedido_id": contentor.id,
+            "tipos_equipamento": [TipoEquipamentoPedido.CONTENTOR.value],
+        },
+        {
+            "pedido_id": carrinha.id,
+            "tipos_equipamento": [TipoEquipamentoPedido.CARRINHA.value],
+        },
+    ]
+
+
+def test_pedido_misto_tem_uma_opcao_explicitamente_ambigua(db_session, monkeypatch):
+    configurar(monkeypatch)
+    pedido = Pedido(
+        nome_cliente="Cliente Misto",
+        telefone_cliente="351912345678",
+        data_planejada=datetime.now(timezone.utc),
+        valor_global="300",
+        status_pagamento="PAGO",
+        forma_pagamento="MBWay",
+        pedido_feito_por="gestor",
+        endereco_aproximado="Rua Operacional",
+        ponto_referencia=None,
+        contentores=[
+            PedidoContentor(
+                tipo_equipamento=TipoEquipamentoPedido.CONTENTOR.value,
+                residuo_contratado="Entulho Limpo",
+            ),
+            PedidoContentor(
+                tipo_equipamento=TipoEquipamentoPedido.CARRINHA.value,
+                residuo_contratado="Entulho Limpo",
+                horario_agendado="14:00",
+            ),
+        ],
+    )
+    db_session.add(pedido)
+    db_session.commit()
+    atual = conversa(db_session)
+
+    PedidoV24Agent(db_session).start_entrega(atual)
+
+    assert atual.contexto_json["ids"] == [pedido.id]
+    assert atual.contexto_json["operational_options"] == [
+        {
+            "pedido_id": pedido.id,
+            "tipos_equipamento": [
+                TipoEquipamentoPedido.CARRINHA.value,
+                TipoEquipamentoPedido.CONTENTOR.value,
+            ],
+        }
+    ]
+    assert resolve_operational_modality(atual.contexto_json, pedido.id) is None
 
 
 def test_reabilitar_carrinha_retorna_fluxo_sem_modificar_registro(db_session, monkeypatch):
