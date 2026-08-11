@@ -1,9 +1,12 @@
 """Entrada operacional de entrega de Contentor no fluxo V2.4."""
 
+import re
 from collections.abc import Callable
 from typing import Any
 
+from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
 from app.models.conversa import ConversaWhatsApp
+from app.models.pedido import PedidoContentor, TipoEquipamentoPedido
 
 
 class ContentorOperationalAgent:
@@ -27,3 +30,48 @@ class ContentorOperationalAgent:
     def select_entrega_pedido(self, conversa, message) -> str:
         """Executa somente a selecao de Contentor; os estados seguintes seguem legados."""
         return self._legacy_backend.handle(conversa, message)
+
+    def decide_entrega_adesivo(self, conversa, message):
+        """Produz a decisão da identificação do Contentor sem persistir estado."""
+        ctx = dict(conversa.contexto_json or {})
+        if message.tipo == "interactive":
+            return "Digite o número físico do equipamento para continuar."
+
+        number = (message.texto or "").strip()
+        contentor = self._legacy_backend.db.get(
+            PedidoContentor,
+            ctx["contentores"][ctx["indice"]],
+        )
+        if contentor and contentor.tipo_equipamento != TipoEquipamentoPedido.CONTENTOR.value:
+            return None
+        if not contentor or contentor.status_entrega != "PENDENTE":
+            return IdleTransition("Esse ativo já não está pendente. Reinicie a entrega.")
+        if not re.fullmatch(r"\d{1,6}", number) or number == "0":
+            return "Informe somente o número visível no contentor."
+        if number in [
+            str(item.get("numero_adesivo"))
+            for item in ctx.get("entregas") or []
+        ]:
+            return "Esse adesivo ja foi informado neste lote."
+
+        duplicate = self._legacy_backend.db.query(PedidoContentor).filter(
+            PedidoContentor.numero_adesivo_contentor == number,
+            PedidoContentor.status_ciclo == "EM_ANDAMENTO",
+        ).first()
+        if duplicate:
+            return "Esse adesivo já está em um ciclo ativo."
+
+        entregas = list(ctx.get("entregas") or [])
+        entregas.append(
+            {
+                "contentor_id": ctx["contentores"][ctx["indice"]],
+                "numero_adesivo": number,
+                "fotos": [],
+            }
+        )
+        ctx["entregas"] = entregas
+        return AdvanceTransition(
+            "v24_entrega_foto",
+            ctx,
+            f"Envie a foto do Contentor {number} posicionado no local.",
+        )

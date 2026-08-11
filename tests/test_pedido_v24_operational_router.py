@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.agents.pedido_v24.contentor import ContentorOperationalAgent
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.router import PedidoV24OperationalRouter
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
@@ -350,6 +351,129 @@ def test_decisoes_de_transicao_sao_puras_e_imutaveis():
     assert idle.response == "fim"
     with pytest.raises(AttributeError):
         advance.next_state = "outro"
+
+
+def test_adesivo_contentor_inequivoco_usa_modulo_e_adapter(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.apply_operational_transition = Mock(return_value="aplicada")
+    router = PedidoV24OperationalRouter(backend=backend)
+    decision = AdvanceTransition("v24_entrega_foto", {"entregas": []}, "foto")
+    router._contentor = Mock()
+    router._contentor.decide_entrega_adesivo.return_value = decision
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_adesivo",
+        contexto_json={
+            "pedido_id": 17,
+            "operational_options": [
+                {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
+            ],
+        },
+    )
+    entrada = mensagem("101")
+
+    assert router.handle(conversa, entrada) == "aplicada"
+    router._contentor.decide_entrega_adesivo.assert_called_once_with(conversa, entrada)
+    backend.apply_operational_transition.assert_called_once_with(conversa, decision)
+
+
+def test_adesivo_contentor_invalido_preserva_resposta_sem_aplicar_transicao(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.apply_operational_transition = Mock()
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    router._contentor.decide_entrega_adesivo.return_value = "Informe somente o número visível no contentor."
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_adesivo",
+        contexto_json={
+            "pedido_id": 17,
+            "operational_options": [
+                {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
+            ],
+        },
+    )
+
+    assert "número visível" in router.handle(conversa, mensagem("0"))
+    backend.apply_operational_transition.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "contexto",
+    [
+        {"pedido_id": 17, "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CARRINHA"]}]},
+        {"pedido_id": 17, "contentores": [5]},
+        {"pedido_id": 17, "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CONTENTOR", "CARRINHA"]}]},
+    ],
+)
+def test_adesivo_carrinha_legado_ou_ambiguo_permanece_no_backend(db_session, contexto):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual="v24_entrega_adesivo", contexto_json=contexto)
+    entrada = mensagem("77")
+
+    assert router.handle(conversa, entrada) == "legado"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_entrega_adesivo.assert_not_called()
+
+
+def test_decisao_adesivo_valido_preserva_contexto_resposta_e_proximo_estado():
+    backend = Mock()
+    backend.db.get.return_value = SimpleNamespace(
+        tipo_equipamento=TipoEquipamentoPedido.CONTENTOR.value,
+        status_entrega="PENDENTE",
+    )
+    backend.db.query.return_value.filter.return_value.first.return_value = None
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    original = {
+        "pedido_id": 17,
+        "contentores": [5],
+        "indice": 0,
+        "entregas": [],
+    }
+    conversa = SimpleNamespace(contexto_json=original)
+
+    decision = agent.decide_entrega_adesivo(conversa, mensagem("101"))
+
+    assert decision == AdvanceTransition(
+        "v24_entrega_foto",
+        {
+            **original,
+            "entregas": [
+                {"contentor_id": 5, "numero_adesivo": "101", "fotos": []},
+            ],
+        },
+        "Envie a foto do Contentor 101 posicionado no local.",
+    )
+    assert original["entregas"] == []
+    backend.db.commit.assert_not_called()
+
+
+def test_decisao_adesivo_ativo_invalido_produz_idle_sem_commit():
+    backend = Mock()
+    backend.db.get.return_value = None
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    conversa = SimpleNamespace(
+        contexto_json={"contentores": [5], "indice": 0, "entregas": []},
+    )
+
+    assert agent.decide_entrega_adesivo(conversa, mensagem("101")) == IdleTransition(
+        "Esse ativo já não está pendente. Reinicie a entrega."
+    )
+    backend.db.commit.assert_not_called()
+
+
+def test_estado_de_foto_continua_integralmente_legado(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado-foto")
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual="v24_entrega_foto", contexto_json={})
+    entrada = mensagem("foto")
+
+    assert router.handle(conversa, entrada) == "legado-foto"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.assert_not_called()
 
 
 def test_excecao_do_backend_nao_e_convertida():
