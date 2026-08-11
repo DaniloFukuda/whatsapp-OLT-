@@ -7,6 +7,7 @@ import pytest
 
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.router import PedidoV24OperationalRouter
+from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
 from app.agents.pedido_v24_agent import PedidoV24Agent
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
@@ -289,6 +290,66 @@ def test_selecao_tipificada_ignora_campos_legados_conflitantes():
     }
 
     assert resolve_operational_modality(context, 17) is TipoEquipamentoPedido.CONTENTOR
+
+
+def test_adapter_advance_preserva_estado_contexto_resposta_e_commit(db_session):
+    agent = PedidoV24Agent(db_session)
+    agent.db.commit = Mock()
+    conversa = SimpleNamespace(estado_atual="anterior", contexto_json={"antigo": True})
+    context = {"pedido_id": 17}
+
+    response = agent.apply_operational_transition(
+        conversa,
+        AdvanceTransition("v24_entrega_foto", context, "Envie a foto."),
+    )
+
+    assert response == "Envie a foto."
+    assert conversa.estado_atual == "v24_entrega_foto"
+    assert conversa.contexto_json is context
+    agent.db.commit.assert_called_once_with()
+
+
+def test_adapter_idle_preserva_limpeza_resposta_e_commit(db_session):
+    agent = PedidoV24Agent(db_session)
+    agent.db.commit = Mock()
+    conversa = SimpleNamespace(estado_atual="v24_entrega_adesivo", contexto_json={"pedido_id": 17})
+
+    response = agent.apply_operational_transition(
+        conversa,
+        IdleTransition("Operação encerrada."),
+    )
+
+    assert response == "Operação encerrada."
+    assert conversa.estado_atual == "idle"
+    assert conversa.contexto_json == {}
+    agent.db.commit.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "transition",
+    [
+        AdvanceTransition("v24_entrega_foto", {}, "resposta"),
+        IdleTransition("resposta"),
+    ],
+)
+def test_adapter_preserva_excecao_do_commit(db_session, transition):
+    agent = PedidoV24Agent(db_session)
+    agent.db.commit = Mock(side_effect=RuntimeError("commit falhou"))
+    conversa = SimpleNamespace(estado_atual="anterior", contexto_json={})
+
+    with pytest.raises(RuntimeError, match="commit falhou"):
+        agent.apply_operational_transition(conversa, transition)
+
+
+def test_decisoes_de_transicao_sao_puras_e_imutaveis():
+    advance = AdvanceTransition("proximo", {"chave": "valor"}, "resposta")
+    idle = IdleTransition("fim")
+
+    assert advance.next_state == "proximo"
+    assert advance.context == {"chave": "valor"}
+    assert idle.response == "fim"
+    with pytest.raises(AttributeError):
+        advance.next_state = "outro"
 
 
 def test_excecao_do_backend_nao_e_convertida():

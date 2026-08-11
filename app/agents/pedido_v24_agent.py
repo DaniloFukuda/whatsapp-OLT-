@@ -2075,6 +2075,24 @@ class PedidoV24Agent:
         formatted = f"{amount:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
         return f"{formatted} €"
 
+    def apply_operational_transition(
+        self,
+        conversa: ConversaWhatsApp,
+        transition: object,
+    ) -> str:
+        from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
+
+        if isinstance(transition, AdvanceTransition):
+            return self._advance(
+                conversa,
+                transition.next_state,
+                transition.context,
+                transition.response,
+            )
+        if isinstance(transition, IdleTransition):
+            return self._idle(conversa, transition.response)
+        raise TypeError("Transição operacional inválida.")
+
     def _advance(self, conversa, state, ctx, response):
         if state == "v24_cadastro_tipo_solicitacao":
             response = self._tipo_solicitacao_prompt()
