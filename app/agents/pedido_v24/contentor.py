@@ -75,3 +75,28 @@ class ContentorOperationalAgent:
             ctx,
             f"Envie a foto do Contentor {number} posicionado no local.",
         )
+
+    def decide_entrega_foto(self, conversa, message):
+        """Produz a decisão de registro da foto sem persistir estado."""
+        photo = (
+            message.media_id or message.filename or message.message_id
+            if message.tipo == "image"
+            else None
+        )
+        if not photo:
+            return "Envie uma imagem para continuar."
+
+        ctx = dict(conversa.contexto_json or {})
+        entregas = list(ctx.get("entregas") or [])
+        entrega_atual = dict(entregas[-1])
+        fotos = list(entrega_atual.get("fotos") or [])
+        if photo not in fotos:
+            fotos.append(photo)
+        entrega_atual["fotos"] = fotos
+        entregas[-1] = entrega_atual
+        ctx["entregas"] = entregas
+        return AdvanceTransition(
+            "v24_entrega_foto_acao",
+            ctx,
+            "Foto guardada. O que deseja fazer?\n\n1. ➕ Outra Foto\n2. ➡️ Próximo Passo",
+        )
