@@ -23,3 +23,7 @@ class ContentorOperationalAgent:
             conversa,
             pedidos_contentor,
         )
+
+    def select_entrega_pedido(self, conversa, message) -> str:
+        """Executa somente a selecao de Contentor; os estados seguintes seguem legados."""
+        return self._legacy_backend.handle(conversa, message)

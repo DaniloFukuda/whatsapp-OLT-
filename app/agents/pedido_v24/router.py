@@ -8,6 +8,7 @@ from app.agents.pedido_v24_agent import PedidoV24Agent
 from app.core.config import get_settings
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.conversa import ConversaWhatsApp
+from app.models.pedido import TipoEquipamentoPedido
 
 
 class PedidoV24OperationalRouter:
@@ -67,4 +68,17 @@ class PedidoV24OperationalRouter:
         conversa: ConversaWhatsApp,
         message: NormalizedWhatsAppMessage,
     ) -> str:
+        if getattr(conversa, "estado_atual", None) == "v24_entrega_pedido" and self._contentor is not None:
+            context = conversa.contexto_json or {}
+            raw = (message.texto or "").strip()
+            pedido_id = self._backend._selected_entrega_pedido_id(
+                raw,
+                context.get("ids", []),
+            )
+            if (
+                pedido_id is not None
+                and self.resolve_modality(context, pedido_id)
+                is TipoEquipamentoPedido.CONTENTOR
+            ):
+                return self._contentor.select_entrega_pedido(conversa, message)
         return self._backend.handle(conversa, message)

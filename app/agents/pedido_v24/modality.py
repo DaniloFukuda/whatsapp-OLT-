@@ -35,19 +35,6 @@ def resolve_operational_modality(
             return
         evidence.append(modality)
 
-    collect(context.get("tipo_solicitacao"))
-    collect(context.get("tipo_equipamento"))
-
-    current_item = context.get("item_atual")
-    if isinstance(current_item, Mapping) and "tipo_equipamento" in current_item:
-        collect(current_item.get("tipo_equipamento"))
-
-    items = context.get("itens")
-    if isinstance(items, (list, tuple)):
-        for item in items:
-            if isinstance(item, Mapping) and "tipo_equipamento" in item:
-                collect(item.get("tipo_equipamento"))
-
     if selected_pedido_id is not None:
         operational_options = context.get("operational_options")
         if not isinstance(operational_options, (list, tuple)):
@@ -65,6 +52,19 @@ def resolve_operational_modality(
             return None
         for tipo in tipos:
             collect(tipo)
+    else:
+        collect(context.get("tipo_solicitacao"))
+        collect(context.get("tipo_equipamento"))
+
+        current_item = context.get("item_atual")
+        if isinstance(current_item, Mapping) and "tipo_equipamento" in current_item:
+            collect(current_item.get("tipo_equipamento"))
+
+        items = context.get("itens")
+        if isinstance(items, (list, tuple)):
+            for item in items:
+                if isinstance(item, Mapping) and "tipo_equipamento" in item:
+                    collect(item.get("tipo_equipamento"))
 
     if invalid_explicit_type or not evidence or len(set(evidence)) != 1:
         return None

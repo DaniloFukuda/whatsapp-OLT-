@@ -220,6 +220,77 @@ def test_handle_preserva_instancias_argumentos_e_retorno():
     assert backend.calls == [("handle", (conversa, message))]
 
 
+def test_selecao_contentor_inequivoca_usa_modulo_novo(db_session):
+    backend = PedidoV24Agent(db_session)
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    router._contentor.select_entrega_pedido.return_value = "selecao-contentor"
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_pedido",
+        contexto_json={
+            "ids": [17],
+            "operational_options": [
+                {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
+            ],
+        },
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "selecao-contentor"
+    router._contentor.select_entrega_pedido.assert_called_once_with(conversa, entrada)
+
+
+@pytest.mark.parametrize(
+    "contexto",
+    [
+        {"ids": [17], "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CARRINHA"]}]},
+        {"ids": [17]},
+        {"ids": [17], "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CONTENTOR", "CARRINHA"]}]},
+    ],
+)
+def test_selecao_nao_contentor_permanece_no_legado(db_session, contexto):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual="v24_entrega_pedido", contexto_json=contexto)
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "legado"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.select_entrega_pedido.assert_not_called()
+
+
+def test_opcao_invalida_e_estado_posterior_permanecem_no_legado(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    contexto = {
+        "ids": [17],
+        "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]}],
+    }
+
+    invalida = SimpleNamespace(estado_atual="v24_entrega_pedido", contexto_json=contexto)
+    posterior = SimpleNamespace(estado_atual="v24_entrega_adesivo", contexto_json=contexto)
+    assert router.handle(invalida, mensagem("9")) == "legado"
+    assert router.handle(posterior, mensagem("101")) == "legado"
+    assert backend.handle.call_count == 2
+    router._contentor.select_entrega_pedido.assert_not_called()
+
+
+def test_selecao_tipificada_ignora_campos_legados_conflitantes():
+    context = {
+        "tipo_solicitacao": "CARRINHA",
+        "ids": [17],
+        "operational_options": [
+            {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
+        ],
+    }
+
+    assert resolve_operational_modality(context, 17) is TipoEquipamentoPedido.CONTENTOR
+
+
 def test_excecao_do_backend_nao_e_convertida():
     backend = Mock()
     backend.start_cadastro.side_effect = RuntimeError("erro original")
