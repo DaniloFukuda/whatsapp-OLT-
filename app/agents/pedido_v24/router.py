@@ -131,4 +131,19 @@ class PedidoV24OperationalRouter:
                         decision,
                     )
                 return decision
+        if getattr(conversa, "estado_atual", None) == "v24_entrega_gps" and self._contentor is not None:
+            context = conversa.contexto_json or {}
+            pedido_id = context.get("pedido_id")
+            if (
+                pedido_id is not None
+                and self.resolve_modality(context, pedido_id)
+                is TipoEquipamentoPedido.CONTENTOR
+            ):
+                decision = self._contentor.decide_entrega_gps(conversa, message)
+                if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                    return self._backend.apply_operational_transition(
+                        conversa,
+                        decision,
+                    )
+                return decision
         return self._backend.handle(conversa, message)

@@ -135,3 +135,27 @@ class ContentorOperationalAgent:
             f"Contentor {registrado} de {total} registrado.\n\n"
             "Compartilhe a localização GPS da obra.",
         )
+
+    def decide_entrega_gps(self, conversa, message):
+        """Produz a decisão de localização sem persistir estado."""
+        coords = None
+        if message.tipo == "location":
+            if message.latitude is not None and message.longitude is not None:
+                coords = float(message.latitude), float(message.longitude)
+            else:
+                match = re.search(
+                    r"(?:q=|@|!3d)(-?\d{1,2}\.\d+)[,!3d]*[,\s!4d]+(-?\d{1,3}\.\d+)",
+                    message.texto or "",
+                )
+                if match:
+                    coords = float(match.group(1)), float(match.group(2))
+        if not coords:
+            return "Compartilhe a localização nativa do WhatsApp para confirmar a entrega."
+
+        ctx = dict(conversa.contexto_json or {})
+        ctx["latitude"], ctx["longitude"] = coords
+        return AdvanceTransition(
+            "v24_entrega_referencia_opcao",
+            ctx,
+            "Deseja informar algum ponto de referência para a entrega?\n\n1. Sim\n2. Não",
+        )

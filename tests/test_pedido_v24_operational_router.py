@@ -696,6 +696,125 @@ def test_estado_gps_continua_integralmente_legado(db_session):
     router._contentor.assert_not_called()
 
 
+def test_gps_contentor_inequivoco_usa_modulo_e_adapter(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.apply_operational_transition = Mock(return_value="gps-aplicado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    decision = AdvanceTransition(
+        "v24_entrega_referencia_opcao",
+        {"latitude": 38.7, "longitude": -9.1},
+        "referência",
+    )
+    router._contentor = Mock()
+    router._contentor.decide_entrega_gps.return_value = decision
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_gps",
+        contexto_json={
+            "pedido_id": 17,
+            "operational_options": [
+                {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
+            ],
+        },
+    )
+    entrada = SimpleNamespace(
+        tipo="location", texto=None, latitude=38.7, longitude=-9.1
+    )
+
+    assert router.handle(conversa, entrada) == "gps-aplicado"
+    router._contentor.decide_entrega_gps.assert_called_once_with(conversa, entrada)
+    backend.apply_operational_transition.assert_called_once_with(conversa, decision)
+
+
+def test_decisao_gps_nativo_preserva_coordenadas_contexto_resposta_e_estado():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    original = {"pedido_id": 17, "entregas": []}
+    conversa = SimpleNamespace(contexto_json=original)
+    entrada = SimpleNamespace(
+        tipo="location", texto=None, latitude="38.7001", longitude="-9.1002"
+    )
+
+    decision = agent.decide_entrega_gps(conversa, entrada)
+
+    assert decision == AdvanceTransition(
+        "v24_entrega_referencia_opcao",
+        {**original, "latitude": 38.7001, "longitude": -9.1002},
+        "Deseja informar algum ponto de referência para a entrega?\n\n1. Sim\n2. Não",
+    )
+    assert original == {"pedido_id": 17, "entregas": []}
+    backend.db.commit.assert_not_called()
+
+
+def test_decisao_gps_location_com_texto_preserva_parser_legado():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    conversa = SimpleNamespace(contexto_json={"pedido_id": 17})
+    entrada = SimpleNamespace(
+        tipo="location",
+        texto="https://maps.google.com/?q=38.7001,-9.1002",
+        latitude=None,
+        longitude=None,
+    )
+
+    decision = agent.decide_entrega_gps(conversa, entrada)
+
+    assert decision.context["latitude"] == 38.7001
+    assert decision.context["longitude"] == -9.1002
+    assert decision.next_state == "v24_entrega_referencia_opcao"
+
+
+def test_gps_invalido_preserva_resposta_sem_transicao_ou_commit():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    conversa = SimpleNamespace(contexto_json={"pedido_id": 17})
+    entrada = SimpleNamespace(
+        tipo="text", texto="38.7001,-9.1002", latitude=None, longitude=None
+    )
+
+    assert agent.decide_entrega_gps(conversa, entrada) == (
+        "Compartilhe a localização nativa do WhatsApp para confirmar a entrega."
+    )
+    backend.db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "contexto",
+    [
+        {"pedido_id": 17, "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CARRINHA"]}]},
+        {"pedido_id": 17, "entregas": [{"contentor_id": 5}]},
+        {"pedido_id": 17, "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CONTENTOR", "CARRINHA"]}]},
+    ],
+)
+def test_gps_carrinha_legado_ou_ambiguo_permanece_no_backend(db_session, contexto):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual="v24_entrega_gps", contexto_json=contexto)
+    entrada = SimpleNamespace(
+        tipo="location", texto=None, latitude=38.7, longitude=-9.1
+    )
+
+    assert router.handle(conversa, entrada) == "legado"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_entrega_gps.assert_not_called()
+
+
+def test_estado_referencia_opcao_continua_integralmente_legado(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado-referencia")
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_referencia_opcao", contexto_json={}
+    )
+    entrada = mensagem("2")
+
+    assert router.handle(conversa, entrada) == "legado-referencia"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.assert_not_called()
+
+
 def test_excecao_do_backend_nao_e_convertida():
     backend = Mock()
     backend.start_cadastro.side_effect = RuntimeError("erro original")
