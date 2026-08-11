@@ -576,6 +576,126 @@ def test_estado_foto_acao_continua_integralmente_legado(db_session):
     router._contentor.assert_not_called()
 
 
+def test_foto_acao_contentor_inequivoco_usa_modulo_e_adapter(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.apply_operational_transition = Mock(return_value="acao-aplicada")
+    router = PedidoV24OperationalRouter(backend=backend)
+    decision = AdvanceTransition("v24_entrega_foto", {"indice": 0}, "outra")
+    router._contentor = Mock()
+    router._contentor.decide_entrega_foto_acao.return_value = decision
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_foto_acao",
+        contexto_json={
+            "pedido_id": 17,
+            "operational_options": [
+                {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
+            ],
+        },
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "acao-aplicada"
+    router._contentor.decide_entrega_foto_acao.assert_called_once_with(conversa, entrada)
+    backend.apply_operational_transition.assert_called_once_with(conversa, decision)
+
+
+def test_foto_acao_outra_foto_preserva_contexto_resposta_e_estado():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    context = {"pedido_id": 17, "contentores": [5], "indice": 0, "entregas": []}
+    conversa = SimpleNamespace(contexto_json=context)
+
+    decision = agent.decide_entrega_foto_acao(conversa, mensagem("Outra Foto"))
+
+    assert decision == AdvanceTransition(
+        "v24_entrega_foto",
+        context,
+        "Envie a próxima foto deste contentor.",
+    )
+    assert conversa.contexto_json is context
+    backend.db.commit.assert_not_called()
+
+
+def test_foto_acao_continuar_com_proximo_contentor_preserva_transicao():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    context = {"pedido_id": 17, "contentores": [5, 6], "indice": 0, "entregas": []}
+    conversa = SimpleNamespace(contexto_json=context)
+
+    decision = agent.decide_entrega_foto_acao(conversa, mensagem("Próximo Passo"))
+
+    assert decision == AdvanceTransition(
+        "v24_entrega_adesivo",
+        {**context, "indice": 1},
+        "Contentor 1 de 2 registrado.\n\nVamos registrar o próximo.\n\n"
+        "Digite o número do contentor que está a descarregar agora:",
+    )
+    assert context["indice"] == 0
+    backend.db.commit.assert_not_called()
+
+
+def test_foto_acao_continuar_ultimo_contentor_preserva_transicao_gps():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    context = {"pedido_id": 17, "contentores": [5], "indice": 0, "entregas": []}
+    conversa = SimpleNamespace(contexto_json=context)
+
+    decision = agent.decide_entrega_foto_acao(conversa, mensagem("2"))
+
+    assert decision == AdvanceTransition(
+        "v24_entrega_gps",
+        {**context, "indice": 1},
+        "Contentor 1 de 1 registrado.\n\nCompartilhe a localização GPS da obra.",
+    )
+    assert context["indice"] == 0
+    backend.db.commit.assert_not_called()
+
+
+def test_foto_acao_invalida_preserva_resposta_sem_commit():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    conversa = SimpleNamespace(contexto_json={"indice": 0, "contentores": [5]})
+
+    assert agent.decide_entrega_foto_acao(conversa, mensagem("9")) == (
+        "Selecione Outra Foto ou Próximo Passo."
+    )
+    backend.db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "contexto",
+    [
+        {"pedido_id": 17, "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CARRINHA"]}]},
+        {"pedido_id": 17, "indice": 0, "contentores": [5]},
+        {"pedido_id": 17, "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CONTENTOR", "CARRINHA"]}]},
+    ],
+)
+def test_foto_acao_carrinha_legado_ou_ambiguo_permanece_no_backend(db_session, contexto):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual="v24_entrega_foto_acao", contexto_json=contexto)
+    entrada = mensagem("2")
+
+    assert router.handle(conversa, entrada) == "legado"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_entrega_foto_acao.assert_not_called()
+
+
+def test_estado_gps_continua_integralmente_legado(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado-gps")
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual="v24_entrega_gps", contexto_json={})
+    entrada = mensagem("localização")
+
+    assert router.handle(conversa, entrada) == "legado-gps"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.assert_not_called()
+
+
 def test_excecao_do_backend_nao_e_convertida():
     backend = Mock()
     backend.start_cadastro.side_effect = RuntimeError("erro original")

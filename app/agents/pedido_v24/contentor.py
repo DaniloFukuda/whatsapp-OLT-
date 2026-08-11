@@ -1,6 +1,7 @@
 """Entrada operacional de entrega de Contentor no fluxo V2.4."""
 
 import re
+import unicodedata
 from collections.abc import Callable
 from typing import Any
 
@@ -99,4 +100,38 @@ class ContentorOperationalAgent:
             "v24_entrega_foto_acao",
             ctx,
             "Foto guardada. O que deseja fazer?\n\n1. ➕ Outra Foto\n2. ➡️ Próximo Passo",
+        )
+
+    def decide_entrega_foto_acao(self, conversa, message):
+        """Produz a decisão após a foto sem persistir estado."""
+        normalized = unicodedata.normalize("NFKD", message.texto or "")
+        choice = "".join(
+            char for char in normalized if not unicodedata.combining(char)
+        ).strip().lower()
+        ctx = dict(conversa.contexto_json or {})
+        if choice in {"1", "outra foto", "➕ outra foto"}:
+            return AdvanceTransition(
+                "v24_entrega_foto",
+                ctx,
+                "Envie a próxima foto deste contentor.",
+            )
+        if choice not in {"2", "proximo passo", "➡️ proximo passo"}:
+            return "Selecione Outra Foto ou Próximo Passo."
+
+        registrado = ctx["indice"] + 1
+        total = len(ctx["contentores"])
+        ctx["indice"] += 1
+        if ctx["indice"] < total:
+            progresso = f"Contentor {registrado} de {total} registrado."
+            return AdvanceTransition(
+                "v24_entrega_adesivo",
+                ctx,
+                f"{progresso}\n\nVamos registrar o próximo.\n\n"
+                "Digite o número do contentor que está a descarregar agora:",
+            )
+        return AdvanceTransition(
+            "v24_entrega_gps",
+            ctx,
+            f"Contentor {registrado} de {total} registrado.\n\n"
+            "Compartilhe a localização GPS da obra.",
         )
