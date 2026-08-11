@@ -58,6 +58,14 @@ class PedidoV24Agent:
             if settings.feature_contentores_enabled
             else []
         )
+        return self._start_entrega_com_pedidos_contentor(conversa, pedidos_contentor)
+
+    def _start_entrega_com_pedidos_contentor(
+        self,
+        conversa: ConversaWhatsApp,
+        pedidos_contentor,
+    ) -> str:
+        settings = get_settings()
         pedidos_carrinha = (
             self.service.pedidos_carrinha_aguardando_chegada()
             if settings.feature_carrinhas_enabled

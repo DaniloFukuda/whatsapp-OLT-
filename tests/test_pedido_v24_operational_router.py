@@ -7,6 +7,7 @@ import pytest
 
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.router import PedidoV24OperationalRouter
+from app.agents.pedido_v24_agent import PedidoV24Agent
 from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.operador import PerfilOperador
@@ -110,6 +111,37 @@ def test_start_preserva_excecao_do_backend():
 
     with pytest.raises(RuntimeError, match="erro original"):
         router.start("entrega", object())
+
+
+def test_contentor_on_usa_novo_modulo_na_entrada(db_session, monkeypatch):
+    backend = PedidoV24Agent(db_session)
+    router = PedidoV24OperationalRouter(backend=backend)
+    novo_modulo = Mock()
+    novo_modulo.start_entrega.return_value = "entrada-contentor"
+    router._contentor = novo_modulo
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    conversa = object()
+
+    assert router.start_entrega(conversa) == "entrada-contentor"
+    novo_modulo.start_entrega.assert_called_once_with(conversa)
+
+
+def test_contentor_off_mantem_entrada_no_backend_legado(db_session, monkeypatch):
+    backend = BackendSpy()
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=False),
+    )
+    conversa = object()
+
+    assert router.start_entrega(conversa) == "retorno:start_entrega"
+    assert backend.calls == [("start_entrega", (conversa,))]
+    router._contentor.start_entrega.assert_not_called()
 
 
 def test_start_rejeita_operacao_invalida_sem_chamar_backend():

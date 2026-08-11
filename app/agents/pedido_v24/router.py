@@ -2,8 +2,10 @@
 
 from sqlalchemy.orm import Session
 
+from app.agents.pedido_v24.contentor import ContentorOperationalAgent
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24_agent import PedidoV24Agent
+from app.core.config import get_settings
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.conversa import ConversaWhatsApp
 
@@ -25,6 +27,12 @@ class PedidoV24OperationalRouter:
                 raise TypeError("db é obrigatório quando backend não é fornecido")
             backend = PedidoV24Agent(db)
         self._backend = backend
+        self._contentor = None
+        if isinstance(backend, PedidoV24Agent):
+            self._contentor = ContentorOperationalAgent(
+                backend.service.pedidos_pendentes_entrega,
+                backend,
+            )
 
     @property
     def backend(self):
@@ -44,6 +52,8 @@ class PedidoV24OperationalRouter:
         return self._backend.start_cadastro(conversa)
 
     def start_entrega(self, conversa: ConversaWhatsApp) -> str:
+        if self._contentor is not None and get_settings().feature_contentores_enabled:
+            return self._contentor.start_entrega(conversa)
         return self._backend.start_entrega(conversa)
 
     def start_recolha(self, conversa: ConversaWhatsApp) -> str:
