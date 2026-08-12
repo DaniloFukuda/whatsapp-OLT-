@@ -324,6 +324,16 @@ class ContentorOperationalAgent:
             selection["foto_prompt"],
         )
 
+    def decide_despejo_ativo(self, conversa, selection):
+        """Prepara o despejo do Contentor selecionado sem acessar persistencia."""
+        ctx = dict(conversa.contexto_json or {})
+        ctx.update(selection["context_updates"])
+        return AdvanceTransition(
+            selection["next_state"],
+            ctx,
+            selection["response"],
+        )
+
     def decide_recolha_foto(self, conversa, message):
         """Registra a decisao de foto sem persistir estado ou acessar banco."""
         photo = (

@@ -80,6 +80,30 @@ class PedidoV24OperationalRouter:
         message: NormalizedWhatsAppMessage,
     ) -> str:
         if (
+            getattr(conversa, "estado_atual", None) == "v24_despejo_ativo"
+            and self._contentor is not None
+            and get_settings().feature_contentores_enabled
+        ):
+            context = conversa.contexto_json or {}
+            selection = self._backend.resolve_despejo_ativo_selection(
+                message,
+                context,
+            )
+            if (
+                selection is not None
+                and selection["modality"] is TipoEquipamentoPedido.CONTENTOR
+            ):
+                decision = self._contentor.decide_despejo_ativo(
+                    conversa,
+                    selection,
+                )
+                if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                    return self._backend.apply_operational_transition(
+                        conversa,
+                        decision,
+                    )
+                return decision
+        if (
             getattr(conversa, "estado_atual", None) == "v24_recolha_ativo"
             and self._contentor is not None
             and get_settings().feature_contentores_enabled

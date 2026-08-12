@@ -1712,6 +1712,228 @@ def test_recolha_ativo_contentor_off_nao_consulta_adapter(monkeypatch):
     router._contentor.decide_recolha_ativo.assert_not_called()
 
 
+def _despejo_backend(item, cotas):
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.db = Mock()
+    backend.db.get.return_value = item
+    backend.service = Mock()
+    backend.service.cotas_residuos.return_value = cotas
+    return backend
+
+
+def _item_despejo(**overrides):
+    values = {
+        "id": 17,
+        "pedido_id": 9,
+        "tipo_equipamento": "CONTENTOR",
+        "status_recolha": "RECOLHIDO",
+        "status_ciclo": "EM_ANDAMENTO",
+        "status_operacional_carrinha": None,
+        "residuo_contratado": "Entulho Limpo",
+        "numero_adesivo_contentor": "42",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_contentor_decide_selecao_despejo_sem_banco_ou_service():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    contexto = {"pedido_id": 9, "contentores": [17], "despejos": []}
+    conversa = SimpleNamespace(contexto_json=contexto)
+    selection = {
+        "contentor_id": 17,
+        "modality": TipoEquipamentoPedido.CONTENTOR,
+        "context_updates": {
+            "contentor_id": 17,
+            "fotos_despejo": [],
+            "residuo_contratado": "Entulho Limpo",
+            "residuo_efetivo": None,
+            "residuo_assumido": None,
+            "carga_errada": None,
+            "relato_carga": None,
+            "saldo_cotas_visualizado": {"limpo": 1, "misto": 1},
+            "residuos_disponiveis": ["Entulho Limpo", "Entulho Misto"],
+        },
+        "next_state": "v24_despejo_residuo",
+        "response": "prompt legado",
+    }
+
+    decision = agent.decide_despejo_ativo(conversa, selection)
+
+    assert decision.next_state == "v24_despejo_residuo"
+    assert decision.context["contentor_id"] == 17
+    assert decision.context["fotos_despejo"] == []
+    assert decision.response == "prompt legado"
+    assert contexto == {"pedido_id": 9, "contentores": [17], "despejos": []}
+    backend.assert_not_called()
+    assert not hasattr(agent, "service")
+
+
+@pytest.mark.parametrize(
+    "cotas,next_state",
+    [
+        (
+            {
+                "Entulho Limpo": {"saldo": 1},
+                "Entulho Misto": {"saldo": 1},
+            },
+            "v24_despejo_residuo",
+        ),
+        (
+            {
+                "Entulho Limpo": {"saldo": 1},
+                "Entulho Misto": {"saldo": 0},
+            },
+            "v24_despejo_conformidade",
+        ),
+    ],
+)
+def test_adapter_despejo_comprova_contentor_e_prepara_cotas(
+    monkeypatch, cotas, next_state
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24_agent.get_settings",
+        lambda: SimpleNamespace(
+            feature_contentores_enabled=True,
+            feature_carrinhas_enabled=True,
+        ),
+    )
+    contexto = {
+        "pedido_id": 9,
+        "contentores": [17],
+        "terminar_indice": 2,
+        "despejos": [],
+    }
+    backend = _despejo_backend(_item_despejo(), cotas)
+
+    selection = backend.resolve_despejo_ativo_selection(
+        mensagem("1"), contexto
+    )
+
+    assert selection["contentor_id"] == 17
+    assert selection["modality"] is TipoEquipamentoPedido.CONTENTOR
+    assert selection["next_state"] == next_state
+    assert selection["context_updates"]["contentor_id"] == 17
+    assert selection["context_updates"]["fotos_despejo"] == []
+    assert selection["context_updates"]["saldo_cotas_visualizado"] == {
+        "limpo": 1,
+        "misto": cotas["Entulho Misto"]["saldo"],
+    }
+    assert contexto == {
+        "pedido_id": 9,
+        "contentores": [17],
+        "terminar_indice": 2,
+        "despejos": [],
+    }
+    backend.db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        None,
+        _item_despejo(pedido_id=10),
+        _item_despejo(status_recolha="PENDENTE"),
+        _item_despejo(status_ciclo="CONCLUIDO"),
+        _item_despejo(tipo_equipamento="DESCONHECIDO"),
+    ],
+)
+def test_adapter_despejo_recusa_desaparecido_desvinculado_inelegivel_ou_indeterminado(
+    monkeypatch, item
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24_agent.get_settings",
+        lambda: SimpleNamespace(
+            feature_contentores_enabled=True,
+            feature_carrinhas_enabled=True,
+        ),
+    )
+    backend = _despejo_backend(item, {})
+
+    assert backend.resolve_despejo_ativo_selection(
+        mensagem("1"),
+        {"pedido_id": 9, "contentores": [17], "terminar_indice": 2},
+    ) is None
+    backend.service.cotas_residuos.assert_not_called()
+    backend.db.commit.assert_not_called()
+
+
+def test_despejo_ativo_contentor_comprovado_usa_modulo(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    selection = {
+        "contentor_id": 17,
+        "modality": TipoEquipamentoPedido.CONTENTOR,
+        "context_updates": {"contentor_id": 17},
+        "next_state": "v24_despejo_residuo",
+        "response": "prompt",
+    }
+    backend.resolve_despejo_ativo_selection.return_value = selection
+    backend.apply_operational_transition.return_value = "aplicada"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    decision = AdvanceTransition("v24_despejo_residuo", {}, "prompt")
+    router._contentor.decide_despejo_ativo.return_value = decision
+    conversa = SimpleNamespace(
+        estado_atual="v24_despejo_ativo", contexto_json={"pedido_id": 9}
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "aplicada"
+    router._contentor.decide_despejo_ativo.assert_called_once_with(
+        conversa, selection
+    )
+    backend.apply_operational_transition.assert_called_once_with(conversa, decision)
+    backend.handle.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        None,
+        {"contentor_id": 17, "modality": TipoEquipamentoPedido.CARRINHA},
+    ],
+)
+def test_despejo_ativo_invalido_ou_carrinha_permanece_legado(
+    monkeypatch, selection
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.resolve_despejo_ativo_selection.return_value = selection
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual="v24_despejo_ativo", contexto_json={})
+    entrada = mensagem("Terminar" if selection is None else "1")
+
+    assert router.handle(conversa, entrada) == "legado"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_despejo_ativo.assert_not_called()
+
+
+def test_despejo_ativo_contentor_off_permanece_legado(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=False),
+    )
+    backend = Mock()
+    backend.handle.return_value = "bloqueada-legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual="v24_despejo_ativo", contexto_json={})
+
+    assert router.handle(conversa, mensagem("1")) == "bloqueada-legado"
+    backend.resolve_despejo_ativo_selection.assert_not_called()
+    router._contentor.decide_despejo_ativo.assert_not_called()
+
+
 def test_contentor_recolha_foto_exige_imagem_e_preserva_estado():
     agent = ContentorOperationalAgent(lambda: [], Mock())
     conversa = SimpleNamespace(

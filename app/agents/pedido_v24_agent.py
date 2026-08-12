@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
+from app.agents.pedido_v24.transitions import AdvanceTransition
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.core.config import get_settings
 from app.models.conversa import ConversaWhatsApp
@@ -1044,10 +1045,15 @@ class PedidoV24Agent:
 
     def _despejo_decisao_residuo(self, conversa, ctx) -> str:
         try:
-            cotas = self.service.cotas_residuos(ctx["pedido_id"])
+            transition = self._prepare_despejo_decisao_residuo(ctx)
         except ValueError as exc:
             self._limpar_despejo_atual(ctx)
             return self._idle(conversa, str(exc))
+        return self.apply_operational_transition(conversa, transition)
+
+    def _prepare_despejo_decisao_residuo(self, ctx):
+        """Prepara a decisão de cotas sem persistir conversa ou operação."""
+        cotas = self.service.cotas_residuos(ctx["pedido_id"])
         saldo_limpo = cotas["Entulho Limpo"]["saldo"]
         saldo_misto = cotas["Entulho Misto"]["saldo"]
         ctx["saldo_cotas_visualizado"] = {
@@ -1055,12 +1061,10 @@ class PedidoV24Agent:
             "misto": saldo_misto,
         }
         if saldo_limpo <= 0 and saldo_misto <= 0:
-            self._limpar_despejo_atual(ctx)
-            return self._idle(conversa, "Não existem cotas de resíduo pendentes para este pedido.")
+            raise ValueError("Não existem cotas de resíduo pendentes para este pedido.")
         if saldo_limpo > 0 and saldo_misto > 0:
             ctx["residuos_disponiveis"] = ["Entulho Limpo", "Entulho Misto"]
-            return self._advance(
-                conversa,
+            return AdvanceTransition(
                 "v24_despejo_residuo",
                 ctx,
                 "Qual resíduo caiu no chão?\n\n1. 🟢 Entulho Limpo\n2. 🟠 Entulho Misto",
@@ -1068,7 +1072,66 @@ class PedidoV24Agent:
         residuo = "Entulho Limpo" if saldo_limpo > 0 else "Entulho Misto"
         ctx["residuo_assumido"] = residuo
         ctx["residuo_efetivo"] = None
-        return self._advance(conversa, "v24_despejo_conformidade", ctx, self._despejo_conformidade_prompt(ctx))
+        return AdvanceTransition(
+            "v24_despejo_conformidade",
+            ctx,
+            self._despejo_conformidade_prompt(ctx),
+        )
+
+    def resolve_despejo_ativo_selection(self, message, ctx):
+        """Resolve e comprova a seleção de despejo sem alterar estado ou banco."""
+        if not isinstance(ctx, Mapping):
+            return None
+        raw = (message.texto or "").strip()
+        choice = self._norm(raw)
+        if self._is_despejo_terminar(message, choice, ctx):
+            return None
+        contentor_id = self._selected_despejo_contentor_id(raw, ctx)
+        pedido_id = ctx.get("pedido_id")
+        if contentor_id is None or not isinstance(pedido_id, int):
+            return None
+        contentor = self.db.get(PedidoContentor, contentor_id)
+        if not self._is_despejo_pendente_do_pedido(contentor, pedido_id):
+            return None
+        if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:
+            if not get_settings().feature_carrinhas_enabled:
+                return None
+            return {
+                "contentor_id": contentor.id,
+                "modality": TipoEquipamentoPedido.CARRINHA,
+            }
+        if contentor.tipo_equipamento != TipoEquipamentoPedido.CONTENTOR.value:
+            return None
+        if not get_settings().feature_contentores_enabled:
+            return None
+
+        prepared_context = dict(ctx)
+        prepared_context.update(
+            {
+                "contentor_id": contentor.id,
+                "fotos_despejo": [],
+                "residuo_contratado": contentor.residuo_contratado,
+                "residuo_efetivo": None,
+                "residuo_assumido": None,
+                "carga_errada": None,
+                "relato_carga": None,
+            }
+        )
+        try:
+            transition = self._prepare_despejo_decisao_residuo(prepared_context)
+        except ValueError:
+            return None
+        return {
+            "contentor_id": contentor.id,
+            "modality": TipoEquipamentoPedido.CONTENTOR,
+            "context_updates": {
+                key: value
+                for key, value in transition.context.items()
+                if key not in ctx or ctx.get(key) != value
+            },
+            "next_state": transition.next_state,
+            "response": transition.response,
+        }
 
     def _despejo_foto_prompt(self, ctx) -> str:
         contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
