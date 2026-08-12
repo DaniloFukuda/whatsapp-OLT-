@@ -34,6 +34,20 @@ class PrepararConfirmacaoRecolhaContentor:
     response_prefix: str = ""
 
 
+@dataclass(frozen=True)
+class ConfirmarRecolhaContentor:
+    """Solicita ao boundary legado a confirmacao da recolha."""
+
+    context: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CancelarRecolhaContentor:
+    """Solicita ao boundary legado o cancelamento da recolha atual."""
+
+    context: dict[str, Any]
+
+
 class ContentorOperationalAgent:
     """Carrega Contentores pendentes e entrega a composição ao legado."""
 
@@ -397,6 +411,30 @@ class ContentorOperationalAgent:
         ctx["avariado"] = True
         ctx["relato_avaria"] = relato
         return PrepararConfirmacaoRecolhaContentor(ctx)
+
+    def decide_recolha_confirmacao(
+        self,
+        conversa,
+        message,
+        *,
+        avarias_enabled,
+    ):
+        """Decide confirmar ou cancelar sem executar o fluxo persistente."""
+        ctx = dict(conversa.contexto_json or {})
+        if not avarias_enabled and (
+            ctx.get("avariado") or ctx.get("relato_avaria")
+        ):
+            return self._recover_disabled_recolha_avaria(ctx)
+
+        normalized = unicodedata.normalize("NFKD", message.texto or "")
+        choice = "".join(
+            char for char in normalized if not unicodedata.combining(char)
+        ).strip().lower()
+        if choice in {"1", "confirmar recolha", "confirmar"}:
+            return ConfirmarRecolhaContentor(ctx)
+        if choice in {"2", "cancelar ativo", "cancelar"}:
+            return CancelarRecolhaContentor(ctx)
+        return "Escolha Confirmar recolha ou Cancelar ativo."
 
     @staticmethod
     def _recover_disabled_recolha_avaria(ctx):

@@ -6,7 +6,9 @@ from unittest.mock import Mock, call
 import pytest
 
 from app.agents.pedido_v24.contentor import (
+    CancelarRecolhaContentor,
     ConfirmEntregaContentor,
+    ConfirmarRecolhaContentor,
     ContentorOperationalAgent,
     PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
@@ -2098,6 +2100,186 @@ def test_recolha_avaria_carrinha_ou_indeterminada_permanece_legado(
     backend.handle.assert_called_once_with(conversa, entrada)
     router._contentor.decide_recolha_avaria.assert_not_called()
     router._contentor.decide_recolha_relato.assert_not_called()
+
+
+@pytest.mark.parametrize("entrada", ["1", "Confirmar recolha", "confirmar"])
+def test_contentor_decide_confirmar_recolha_preservando_aliases(entrada):
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    contexto = {"pedido_id": 9, "contentor_id": 17, "avariado": False}
+
+    decision = agent.decide_recolha_confirmacao(
+        SimpleNamespace(contexto_json=contexto),
+        mensagem(entrada),
+        avarias_enabled=True,
+    )
+
+    assert decision == ConfirmarRecolhaContentor(contexto)
+    backend.assert_not_called()
+
+
+@pytest.mark.parametrize("entrada", ["2", "Cancelar ativo", "cancelar"])
+def test_contentor_decide_cancelar_recolha_preservando_aliases(entrada):
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    contexto = {"pedido_id": 9, "contentor_id": 17, "avariado": False}
+
+    assert agent.decide_recolha_confirmacao(
+        SimpleNamespace(contexto_json=contexto),
+        mensagem(entrada),
+        avarias_enabled=True,
+    ) == CancelarRecolhaContentor(contexto)
+
+
+def test_contentor_confirmacao_invalida_preserva_estado_contexto_e_mensagem():
+    contexto = {"pedido_id": 9, "contentor_id": 17, "avariado": False}
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_confirmacao", contexto_json=contexto
+    )
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+
+    assert agent.decide_recolha_confirmacao(
+        conversa, mensagem("talvez"), avarias_enabled=True
+    ) == "Escolha Confirmar recolha ou Cancelar ativo."
+    assert conversa.estado_atual == "v24_recolha_confirmacao"
+    assert conversa.contexto_json == contexto
+
+
+def test_contentor_confirmacao_avarias_off_saneia_antes_de_confirmar():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    decision = agent.decide_recolha_confirmacao(
+        SimpleNamespace(
+            contexto_json={
+                "pedido_id": 9,
+                "contentor_id": 17,
+                "avariado": True,
+                "relato_avaria": "residual antigo",
+            }
+        ),
+        mensagem("1"),
+        avarias_enabled=False,
+    )
+
+    assert isinstance(decision, PrepararConfirmacaoRecolhaContentor)
+    assert "avariado" not in decision.context
+    assert "relato_avaria" not in decision.context
+    assert "subfluxo foi cancelado" in decision.response_prefix
+
+
+@pytest.mark.parametrize(
+    "command,boundary",
+    [
+        (ConfirmarRecolhaContentor({"pedido_id": 9, "contentor_id": 17}), "confirm_recolha_contentor"),
+        (CancelarRecolhaContentor({"pedido_id": 9, "contentor_id": 17}), "cancel_recolha_contentor"),
+    ],
+)
+def test_recolha_confirmacao_contentor_usa_apenas_boundary_especifico(
+    monkeypatch, command, boundary
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(
+            feature_contentores_enabled=True,
+            feature_avarias_enabled=True,
+        ),
+    )
+    backend = Mock()
+    backend.resolve_recolha_context_modality.return_value = TipoEquipamentoPedido.CONTENTOR
+    getattr(backend, boundary).return_value = "boundary"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    router._contentor.decide_recolha_confirmacao.return_value = command
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_confirmacao",
+        contexto_json={"pedido_id": 9, "contentor_id": 17},
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "boundary"
+    getattr(backend, boundary).assert_called_once_with(conversa, command.context)
+    backend.handle.assert_not_called()
+    backend.apply_operational_transition.assert_not_called()
+
+
+@pytest.mark.parametrize("method", ["confirm_recolha_contentor", "cancel_recolha_contentor"])
+def test_boundary_recolha_contentor_recomprova_modalidade_e_delega(method):
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.resolve_recolha_context_modality = Mock(
+        return_value=TipoEquipamentoPedido.CONTENTOR
+    )
+    backend._confirmar_recolha_atual = Mock(return_value="confirmada")
+    backend._cancelar_recolha_atual = Mock(return_value="cancelada")
+    conversa = object()
+    contexto = {"pedido_id": 9, "contentor_id": 17}
+
+    response = getattr(backend, method)(conversa, contexto)
+
+    target = (
+        backend._confirmar_recolha_atual
+        if method == "confirm_recolha_contentor"
+        else backend._cancelar_recolha_atual
+    )
+    target.assert_called_once_with(conversa, contexto)
+    assert response in {"confirmada", "cancelada"}
+
+
+@pytest.mark.parametrize("method", ["confirm_recolha_contentor", "cancel_recolha_contentor"])
+def test_boundary_recolha_contentor_recusa_modalidade_nao_comprovada(method):
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.resolve_recolha_context_modality = Mock(return_value=None)
+    backend._confirmar_recolha_atual = Mock()
+    backend._cancelar_recolha_atual = Mock()
+
+    with pytest.raises(ValueError, match="aceita apenas contentores"):
+        getattr(backend, method)(object(), {"pedido_id": 9, "contentor_id": 17})
+
+    backend._confirmar_recolha_atual.assert_not_called()
+    backend._cancelar_recolha_atual.assert_not_called()
+
+
+@pytest.mark.parametrize("modality", [TipoEquipamentoPedido.CARRINHA, None])
+def test_recolha_confirmacao_carrinha_ou_indeterminada_permanece_legado(
+    monkeypatch, modality
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(
+            feature_contentores_enabled=True,
+            feature_avarias_enabled=True,
+        ),
+    )
+    backend = Mock()
+    backend.resolve_recolha_context_modality.return_value = modality
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_confirmacao", contexto_json={}
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "legado"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_recolha_confirmacao.assert_not_called()
+
+
+def test_recolha_confirmacao_contentor_desabilitado_permanece_legado(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(
+            feature_contentores_enabled=False,
+            feature_avarias_enabled=True,
+        ),
+    )
+    backend = Mock()
+    backend.handle.return_value = "bloqueada-legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_confirmacao", contexto_json={}
+    )
+
+    assert router.handle(conversa, mensagem("1")) == "bloqueada-legado"
+    backend.resolve_recolha_context_modality.assert_not_called()
 
 
 def test_excecao_do_backend_nao_e_convertida():

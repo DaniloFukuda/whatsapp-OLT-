@@ -3,7 +3,9 @@
 from sqlalchemy.orm import Session
 
 from app.agents.pedido_v24.contentor import (
+    CancelarRecolhaContentor,
     ConfirmEntregaContentor,
+    ConfirmarRecolhaContentor,
     ContentorOperationalAgent,
     PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
@@ -160,6 +162,48 @@ class PedidoV24OperationalRouter:
                     message,
                     avarias_enabled=settings.feature_avarias_enabled,
                 )
+                if isinstance(decision, PrepararConfirmacaoRecolhaContentor):
+                    prompt = self._backend.recolha_confirmacao_prompt(
+                        decision.context
+                    )
+                    decision = AdvanceTransition(
+                        "v24_recolha_confirmacao",
+                        decision.context,
+                        decision.response_prefix + prompt,
+                    )
+                if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                    return self._backend.apply_operational_transition(
+                        conversa,
+                        decision,
+                    )
+                return decision
+        if (
+            getattr(conversa, "estado_atual", None)
+            == "v24_recolha_confirmacao"
+            and self._contentor is not None
+        ):
+            context = conversa.contexto_json or {}
+            settings = get_settings()
+            if (
+                settings.feature_contentores_enabled
+                and self._backend.resolve_recolha_context_modality(context)
+                is TipoEquipamentoPedido.CONTENTOR
+            ):
+                decision = self._contentor.decide_recolha_confirmacao(
+                    conversa,
+                    message,
+                    avarias_enabled=settings.feature_avarias_enabled,
+                )
+                if isinstance(decision, ConfirmarRecolhaContentor):
+                    return self._backend.confirm_recolha_contentor(
+                        conversa,
+                        decision.context,
+                    )
+                if isinstance(decision, CancelarRecolhaContentor):
+                    return self._backend.cancel_recolha_contentor(
+                        conversa,
+                        decision.context,
+                    )
                 if isinstance(decision, PrepararConfirmacaoRecolhaContentor):
                     prompt = self._backend.recolha_confirmacao_prompt(
                         decision.context

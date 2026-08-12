@@ -1344,6 +1344,24 @@ class PedidoV24Agent:
         """Expoe o prompt legado de confirmacao sem persistir estado."""
         return self._recolha_confirmacao_prompt(ctx)
 
+    def confirm_recolha_contentor(self, conversa, ctx):
+        """Recomprova Contentor e delega a confirmacao ao fluxo legado."""
+        if (
+            self.resolve_recolha_context_modality(ctx)
+            is not TipoEquipamentoPedido.CONTENTOR
+        ):
+            raise ValueError("Esta operação aceita apenas contentores.")
+        return self._confirmar_recolha_atual(conversa, ctx)
+
+    def cancel_recolha_contentor(self, conversa, ctx):
+        """Recomprova Contentor e delega o cancelamento ao fluxo legado."""
+        if (
+            self.resolve_recolha_context_modality(ctx)
+            is not TipoEquipamentoPedido.CONTENTOR
+        ):
+            raise ValueError("Esta operação aceita apenas contentores.")
+        return self._cancelar_recolha_atual(conversa, ctx)
+
     def _is_recolha_terminar(self, message, choice, ctx) -> bool:
         if choice in {"terminar", "terminar recolhas deste cliente", "🏁 terminar recolhas deste cliente"}:
             return True
