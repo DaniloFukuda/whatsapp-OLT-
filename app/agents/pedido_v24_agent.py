@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -1424,6 +1425,23 @@ class PedidoV24Agent:
             ctx,
             expected_tipo=TipoEquipamentoPedido.CONTENTOR.value,
         )
+
+    def resolve_entrega_pagamento_modality(self, ctx):
+        """Resolve a modalidade pelos itens persistidos, sem alterar o pedido."""
+        if not isinstance(ctx, Mapping):
+            return None
+        pedido_id = ctx.get("pedido_id")
+        if not isinstance(pedido_id, int) or isinstance(pedido_id, bool):
+            return None
+        pedido = self.service.get(pedido_id)
+        if not pedido or not pedido.contentores:
+            return None
+        tipos = {item.tipo_equipamento for item in pedido.contentores}
+        if tipos == {TipoEquipamentoPedido.CONTENTOR.value}:
+            return TipoEquipamentoPedido.CONTENTOR
+        if tipos == {TipoEquipamentoPedido.CARRINHA.value}:
+            return TipoEquipamentoPedido.CARRINHA
+        return None
 
     def _confirmar_entrega_preparada(self, conversa, ctx, expected_tipo=None):
         try:

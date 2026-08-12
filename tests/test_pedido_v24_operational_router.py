@@ -1232,9 +1232,111 @@ def test_confirmacao_carrinha_legado_ou_ambiguo_permanece_no_backend(
 
 
 @pytest.mark.parametrize(
+    "entrada,transition_type,next_state,response",
+    [
+        ("1", AdvanceTransition, "v24_entrega_forma", "Selecione a forma recebida:"),
+        ("sim", AdvanceTransition, "v24_entrega_forma", "Selecione a forma recebida:"),
+        ("✅ Sim, foi pago", AdvanceTransition, "v24_entrega_forma", "Selecione a forma recebida:"),
+        ("2", IdleTransition, None, "Pagamento permanece pendente."),
+        ("não", IdleTransition, None, "Pagamento permanece pendente."),
+        ("🕒 Não, continua pendente", IdleTransition, None, "Pagamento permanece pendente."),
+    ],
+)
+def test_contentor_decide_entrega_pagou_sem_mutacao_financeira(
+    entrada, transition_type, next_state, response
+):
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    contexto = {"pedido_id": 17}
+    conversa = SimpleNamespace(contexto_json=contexto)
+
+    decision = agent.decide_entrega_pagou(conversa, mensagem(entrada))
+
+    assert isinstance(decision, transition_type)
+    assert getattr(decision, "next_state", None) == next_state
+    assert response in decision.response
+    assert contexto == {"pedido_id": 17}
+    backend.assert_not_called()
+    assert not hasattr(agent, "service")
+
+
+def test_contentor_entrega_pagou_invalido_preserva_estado_e_mensagem():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_pagou",
+        contexto_json={"pedido_id": 17},
+    )
+
+    assert agent.decide_entrega_pagou(conversa, mensagem("talvez")) == "Selecione Sim ou Não."
+    assert conversa.estado_atual == "v24_entrega_pagou"
+    assert conversa.contexto_json == {"pedido_id": 17}
+
+
+@pytest.mark.parametrize(
+    "tipos,expected",
+    [
+        (["CONTENTOR"], TipoEquipamentoPedido.CONTENTOR),
+        (["CARRINHA"], TipoEquipamentoPedido.CARRINHA),
+        (["CONTENTOR", "CARRINHA"], None),
+        (["DESCONHECIDO"], None),
+        ([], None),
+    ],
+)
+def test_adapter_pagamento_resolve_itens_persistidos_sem_escrita(tipos, expected):
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.service = Mock()
+    backend.service.get.return_value = SimpleNamespace(
+        contentores=[SimpleNamespace(tipo_equipamento=tipo) for tipo in tipos]
+    )
+    contexto = {"pedido_id": 17}
+
+    assert backend.resolve_entrega_pagamento_modality(contexto) is expected
+    assert contexto == {"pedido_id": 17}
+    backend.service.get.assert_called_once_with(17)
+    backend.service.registrar_pagamento.assert_not_called()
+    backend.service.db.commit.assert_not_called()
+
+
+def test_pagou_contentor_comprovado_usa_modulo_e_transition_seam():
+    backend = Mock()
+    backend.resolve_entrega_pagamento_modality.return_value = TipoEquipamentoPedido.CONTENTOR
+    backend.apply_operational_transition.return_value = "aplicada"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    decision = AdvanceTransition("v24_entrega_forma", {"pedido_id": 17}, "forma")
+    router._contentor.decide_entrega_pagou.return_value = decision
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_pagou", contexto_json={"pedido_id": 17}
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "aplicada"
+    router._contentor.decide_entrega_pagou.assert_called_once_with(conversa, entrada)
+    backend.apply_operational_transition.assert_called_once_with(conversa, decision)
+    backend.handle.assert_not_called()
+    backend.registrar_pagamento.assert_not_called()
+
+
+@pytest.mark.parametrize("modality", [TipoEquipamentoPedido.CARRINHA, None])
+def test_pagou_carrinha_ou_indeterminado_permanece_legado(modality):
+    backend = Mock()
+    backend.resolve_entrega_pagamento_modality.return_value = modality
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_pagou", contexto_json={"pedido_id": 17}
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "legado"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_entrega_pagou.assert_not_called()
+
+
+@pytest.mark.parametrize(
     "estado",
     [
-        "v24_entrega_pagou",
         "v24_entrega_forma",
         "v24_entrega_forma_outro",
     ],

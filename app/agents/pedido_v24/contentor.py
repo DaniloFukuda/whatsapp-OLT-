@@ -219,3 +219,22 @@ class ContentorOperationalAgent:
                 "Entrega cancelada. Nenhum ativo foi marcado como entregue."
             )
         return "Escolha Confirmar entrega ou Cancelar."
+
+    def decide_entrega_pagou(self, conversa, message):
+        """Decide o pagamento informado sem executar qualquer mutacao financeira."""
+        normalized = unicodedata.normalize("NFKD", message.texto or "")
+        choice = "".join(
+            char for char in normalized if not unicodedata.combining(char)
+        ).strip().lower()
+        ctx = dict(conversa.contexto_json or {})
+        if choice in {"2", "nao", "nao, continua pendente", "🕒 nao, continua pendente"}:
+            return IdleTransition(
+                "✅ Entrega confirmada com sucesso para todos os ativos processados. Pagamento permanece pendente."
+            )
+        if choice in {"1", "sim", "sim, foi pago", "✅ sim, foi pago"}:
+            return AdvanceTransition(
+                "v24_entrega_forma",
+                ctx,
+                "Selecione a forma recebida:\n\n1. MBWay\n2. Transferência\n3. Dinheiro\n4. Outro",
+            )
+        return "Selecione Sim ou Não."

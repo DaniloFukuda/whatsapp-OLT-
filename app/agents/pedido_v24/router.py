@@ -211,4 +211,17 @@ class PedidoV24OperationalRouter:
                         decision,
                     )
                 return decision
+        if getattr(conversa, "estado_atual", None) == "v24_entrega_pagou" and self._contentor is not None:
+            context = conversa.contexto_json or {}
+            if (
+                self._backend.resolve_entrega_pagamento_modality(context)
+                is TipoEquipamentoPedido.CONTENTOR
+            ):
+                decision = self._contentor.decide_entrega_pagou(conversa, message)
+                if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                    return self._backend.apply_operational_transition(
+                        conversa,
+                        decision,
+                    )
+                return decision
         return self._backend.handle(conversa, message)
