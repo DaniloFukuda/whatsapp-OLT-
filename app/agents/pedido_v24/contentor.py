@@ -31,6 +31,7 @@ class PrepararConfirmacaoRecolhaContentor:
     """Solicita ao backend somente o prompt legado de confirmacao."""
 
     context: dict[str, Any]
+    response_prefix: str = ""
 
 
 class ContentorOperationalAgent:
@@ -360,3 +361,49 @@ class ContentorOperationalAgent:
                 "1. ✅ Não, está perfeito\n2. 💥 Sim, está estragado",
             )
         return "Selecione Outra Foto ou Próximo Passo."
+
+    def decide_recolha_avaria(self, conversa, message, *, avarias_enabled):
+        """Decide o subfluxo de avaria sem acessar persistencia."""
+        ctx = dict(conversa.contexto_json or {})
+        if not avarias_enabled:
+            return self._recover_disabled_recolha_avaria(ctx)
+
+        normalized = unicodedata.normalize("NFKD", message.texto or "")
+        choice = "".join(
+            char for char in normalized if not unicodedata.combining(char)
+        ).strip().lower()
+        if choice in {"1", "nao, esta perfeito", "✅ nao, esta perfeito"}:
+            ctx["avariado"] = False
+            ctx["relato_avaria"] = None
+            return PrepararConfirmacaoRecolhaContentor(ctx)
+        if choice in {"2", "sim, esta estragado", "💥 sim, esta estragado"}:
+            ctx["avariado"] = True
+            return AdvanceTransition(
+                "v24_recolha_relato",
+                ctx,
+                "Descreva a avaria com pelo menos 10 caracteres.",
+            )
+        return "Selecione uma das opções de avaria."
+
+    def decide_recolha_relato(self, conversa, message, *, avarias_enabled):
+        """Valida o relato de avaria sem acessar persistencia."""
+        ctx = dict(conversa.contexto_json or {})
+        if not avarias_enabled:
+            return self._recover_disabled_recolha_avaria(ctx)
+
+        relato = (message.texto or "").strip()
+        if len(relato) < 10:
+            return "O relato da avaria precisa ter pelo menos 10 caracteres."
+        ctx["avariado"] = True
+        ctx["relato_avaria"] = relato
+        return PrepararConfirmacaoRecolhaContentor(ctx)
+
+    @staticmethod
+    def _recover_disabled_recolha_avaria(ctx):
+        ctx.pop("avariado", None)
+        ctx.pop("relato_avaria", None)
+        return PrepararConfirmacaoRecolhaContentor(
+            ctx,
+            "A funcionalidade de avarias não está disponível nesta empresa. "
+            "O subfluxo foi cancelado com segurança.\n\n",
+        )

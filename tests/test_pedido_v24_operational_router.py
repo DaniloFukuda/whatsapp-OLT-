@@ -1930,6 +1930,176 @@ def test_recolha_foto_carrinha_ou_indeterminada_permanece_legado(
     router._contentor.decide_recolha_foto_acao.assert_not_called()
 
 
+@pytest.mark.parametrize("entrada", ["1", "Não, está perfeito", "✅ Não, está perfeito"])
+def test_contentor_recolha_avaria_nao_prepara_confirmacao(entrada):
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    decision = agent.decide_recolha_avaria(
+        SimpleNamespace(contexto_json={"pedido_id": 9, "contentor_id": 17}),
+        mensagem(entrada),
+        avarias_enabled=True,
+    )
+
+    assert isinstance(decision, PrepararConfirmacaoRecolhaContentor)
+    assert decision.context["avariado"] is False
+    assert decision.context["relato_avaria"] is None
+
+
+@pytest.mark.parametrize("entrada", ["2", "Sim, está estragado", "💥 Sim, está estragado"])
+def test_contentor_recolha_avaria_sim_avanca_para_relato(entrada):
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    decision = agent.decide_recolha_avaria(
+        SimpleNamespace(contexto_json={"pedido_id": 9, "contentor_id": 17}),
+        mensagem(entrada),
+        avarias_enabled=True,
+    )
+
+    assert decision.next_state == "v24_recolha_relato"
+    assert decision.context["avariado"] is True
+    assert decision.response == "Descreva a avaria com pelo menos 10 caracteres."
+
+
+def test_contentor_recolha_avaria_invalida_preserva_estado_contexto_e_mensagem():
+    contexto = {"pedido_id": 9, "contentor_id": 17, "avariado": None}
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_avaria", contexto_json=contexto
+    )
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+
+    assert agent.decide_recolha_avaria(
+        conversa, mensagem("talvez"), avarias_enabled=True
+    ) == "Selecione uma das opções de avaria."
+    assert conversa.estado_atual == "v24_recolha_avaria"
+    assert conversa.contexto_json == contexto
+
+
+def test_contentor_recolha_relato_curto_preserva_rejeicao():
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_relato",
+        contexto_json={"pedido_id": 9, "contentor_id": 17, "avariado": True},
+    )
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+
+    assert agent.decide_recolha_relato(
+        conversa, mensagem("curto"), avarias_enabled=True
+    ) == "O relato da avaria precisa ter pelo menos 10 caracteres."
+    assert conversa.estado_atual == "v24_recolha_relato"
+
+
+def test_contentor_recolha_relato_valido_preserva_strip_e_prepara_confirmacao():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    decision = agent.decide_recolha_relato(
+        SimpleNamespace(
+            contexto_json={"pedido_id": 9, "contentor_id": 17, "avariado": True}
+        ),
+        mensagem("  porta lateral danificada  "),
+        avarias_enabled=True,
+    )
+
+    assert decision == PrepararConfirmacaoRecolhaContentor(
+        {
+            "pedido_id": 9,
+            "contentor_id": 17,
+            "avariado": True,
+            "relato_avaria": "porta lateral danificada",
+        }
+    )
+
+
+@pytest.mark.parametrize("estado", ["v24_recolha_avaria", "v24_recolha_relato"])
+def test_contentor_recolha_avarias_off_saneia_residual(estado):
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    decide = (
+        agent.decide_recolha_avaria
+        if estado == "v24_recolha_avaria"
+        else agent.decide_recolha_relato
+    )
+
+    decision = decide(
+        SimpleNamespace(
+            contexto_json={
+                "pedido_id": 9,
+                "contentor_id": 17,
+                "avariado": True,
+                "relato_avaria": "residual antigo",
+            }
+        ),
+        mensagem("qualquer"),
+        avarias_enabled=False,
+    )
+
+    assert "avariado" not in decision.context
+    assert "relato_avaria" not in decision.context
+    assert decision.response_prefix == (
+        "A funcionalidade de avarias não está disponível nesta empresa. "
+        "O subfluxo foi cancelado com segurança.\n\n"
+    )
+
+
+@pytest.mark.parametrize("estado", ["v24_recolha_avaria", "v24_recolha_relato"])
+def test_recolha_avaria_contentor_comprovado_usa_modulo_e_prompt_legado(
+    monkeypatch, estado
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(
+            feature_contentores_enabled=True,
+            feature_avarias_enabled=False,
+        ),
+    )
+    backend = Mock()
+    backend.resolve_recolha_context_modality.return_value = TipoEquipamentoPedido.CONTENTOR
+    backend.recolha_confirmacao_prompt.return_value = "prompt legado"
+    backend.apply_operational_transition.return_value = "aplicada"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    command = PrepararConfirmacaoRecolhaContentor(
+        {"pedido_id": 9, "contentor_id": 17}, "recuperada\n\n"
+    )
+    decide = (
+        router._contentor.decide_recolha_avaria
+        if estado == "v24_recolha_avaria"
+        else router._contentor.decide_recolha_relato
+    )
+    decide.return_value = command
+    conversa = SimpleNamespace(
+        estado_atual=estado,
+        contexto_json={"pedido_id": 9, "contentor_id": 17},
+    )
+
+    assert router.handle(conversa, mensagem("x")) == "aplicada"
+    backend.recolha_confirmacao_prompt.assert_called_once_with(command.context)
+    transition = backend.apply_operational_transition.call_args.args[1]
+    assert transition == AdvanceTransition(
+        "v24_recolha_confirmacao", command.context, "recuperada\n\nprompt legado"
+    )
+
+
+@pytest.mark.parametrize("modality", [TipoEquipamentoPedido.CARRINHA, None])
+@pytest.mark.parametrize("estado", ["v24_recolha_avaria", "v24_recolha_relato"])
+def test_recolha_avaria_carrinha_ou_indeterminada_permanece_legado(
+    monkeypatch, modality, estado
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(
+            feature_contentores_enabled=True,
+            feature_avarias_enabled=True,
+        ),
+    )
+    backend = Mock()
+    backend.resolve_recolha_context_modality.return_value = modality
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual=estado, contexto_json={})
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "legado"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_recolha_avaria.assert_not_called()
+    router._contentor.decide_recolha_relato.assert_not_called()
+
+
 def test_excecao_do_backend_nao_e_convertida():
     backend = Mock()
     backend.start_cadastro.side_effect = RuntimeError("erro original")
