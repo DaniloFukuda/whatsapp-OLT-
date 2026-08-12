@@ -5,9 +5,11 @@ from sqlalchemy.orm import Session
 from app.agents.pedido_v24.contentor import (
     CancelarRecolhaContentor,
     ConfirmEntregaContentor,
+    ConfirmarDespejoContentor,
     ConfirmarRecolhaContentor,
     ContentorOperationalAgent,
     PrepararConfirmacaoDespejoContentor,
+    PrepararConformidadeDespejoContentor,
     PrepararFotoDespejoContentor,
     PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
@@ -159,6 +161,43 @@ class PedidoV24OperationalRouter:
                         "v24_despejo_foto",
                         decision.context,
                         self._backend.despejo_foto_prompt(decision.context),
+                    )
+                if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                    return self._backend.apply_operational_transition(
+                        conversa,
+                        decision,
+                    )
+                return decision
+        if (
+            getattr(conversa, "estado_atual", None) == "v24_despejo_confirmacao"
+            and self._contentor is not None
+        ):
+            context = conversa.contexto_json or {}
+            if (
+                get_settings().feature_contentores_enabled
+                and self._backend.despejo_context_is_modern(
+                    context,
+                    "v24_despejo_confirmacao",
+                )
+                and self._backend.resolve_despejo_context_modality(context)
+                is TipoEquipamentoPedido.CONTENTOR
+            ):
+                decision = self._contentor.decide_despejo_confirmacao(
+                    conversa,
+                    message,
+                )
+                if isinstance(decision, ConfirmarDespejoContentor):
+                    return self._backend.confirm_despejo_contentor(
+                        conversa,
+                        decision.context,
+                    )
+                if isinstance(decision, PrepararConformidadeDespejoContentor):
+                    decision = AdvanceTransition(
+                        "v24_despejo_conformidade",
+                        decision.context,
+                        self._backend.despejo_conformidade_prompt(
+                            decision.context
+                        ),
                     )
                 if isinstance(decision, (AdvanceTransition, IdleTransition)):
                     return self._backend.apply_operational_transition(

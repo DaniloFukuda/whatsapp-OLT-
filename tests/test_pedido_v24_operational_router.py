@@ -8,9 +8,11 @@ import pytest
 from app.agents.pedido_v24.contentor import (
     CancelarRecolhaContentor,
     ConfirmEntregaContentor,
+    ConfirmarDespejoContentor,
     ConfirmarRecolhaContentor,
     ContentorOperationalAgent,
     PrepararConfirmacaoDespejoContentor,
+    PrepararConformidadeDespejoContentor,
     PrepararFotoDespejoContentor,
     PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
@@ -2334,6 +2336,152 @@ def test_despejo_residuo_contentor_desabilitado_permanece_legado(monkeypatch):
 
     assert router.handle(conversa, mensagem("1")) == "bloqueada-legado"
     backend.despejo_context_is_modern.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "entrada", ["1", "Confirmar despejo", "confirmar", "✅ Confirmar despejo"]
+)
+def test_contentor_decide_confirmar_despejo_preserva_aliases(entrada):
+    backend = Mock()
+    contexto = _contexto_despejo_moderno(fotos_despejo=["foto"])
+    decision = ContentorOperationalAgent(
+        lambda: [], backend
+    ).decide_despejo_confirmacao(
+        SimpleNamespace(contexto_json=contexto),
+        mensagem(entrada),
+    )
+
+    assert decision == ConfirmarDespejoContentor(contexto)
+    backend.assert_not_called()
+
+
+@pytest.mark.parametrize("entrada", ["2", "Voltar", "↩️ Voltar"])
+def test_contentor_decide_voltar_despejo_preserva_aliases_contexto_prompt(entrada):
+    contexto = _contexto_despejo_moderno(fotos_despejo=["foto"])
+    decision = ContentorOperationalAgent(
+        lambda: [], Mock()
+    ).decide_despejo_confirmacao(
+        SimpleNamespace(contexto_json=contexto),
+        mensagem(entrada),
+    )
+
+    assert decision == PrepararConformidadeDespejoContentor(contexto)
+
+
+@pytest.mark.parametrize("entrada", ["3", "Cancelar", "❌ Cancelar"])
+def test_contentor_decide_cancelar_despejo_preserva_aliases(entrada):
+    contexto = _contexto_despejo_moderno(fotos_despejo=["foto"])
+    decision = ContentorOperationalAgent(
+        lambda: [], Mock()
+    ).decide_despejo_confirmacao(
+        SimpleNamespace(contexto_json=contexto),
+        mensagem(entrada),
+    )
+
+    assert decision == IdleTransition(
+        "Despejo cancelado. Nenhuma foto foi salva e o ativo permanece em andamento."
+    )
+
+
+def test_contentor_confirmacao_despejo_invalida_preserva_estado_contexto():
+    contexto = _contexto_despejo_moderno(fotos_despejo=["foto"])
+    conversa = SimpleNamespace(
+        estado_atual="v24_despejo_confirmacao", contexto_json=contexto
+    )
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+
+    assert agent.decide_despejo_confirmacao(
+        conversa,
+        mensagem("talvez"),
+    ) == "Escolha Confirmar despejo, Voltar ou Cancelar."
+    assert conversa.estado_atual == "v24_despejo_confirmacao"
+    assert conversa.contexto_json == contexto
+
+
+def test_despejo_confirmacao_contentor_usa_boundary_legado(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.despejo_context_is_modern.return_value = True
+    backend.resolve_despejo_context_modality.return_value = TipoEquipamentoPedido.CONTENTOR
+    backend.despejo_conformidade_prompt.return_value = "prompt legado"
+    backend.confirm_despejo_contentor.return_value = "confirmada"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    contexto = _contexto_despejo_moderno(fotos_despejo=["foto"])
+    command = ConfirmarDespejoContentor(contexto)
+    router._contentor.decide_despejo_confirmacao.return_value = command
+    conversa = SimpleNamespace(
+        estado_atual="v24_despejo_confirmacao", contexto_json=contexto
+    )
+
+    assert router.handle(conversa, mensagem("1")) == "confirmada"
+    backend.confirm_despejo_contentor.assert_called_once_with(conversa, contexto)
+    backend.handle.assert_not_called()
+    backend.apply_operational_transition.assert_not_called()
+
+
+def test_boundary_despejo_contentor_recomprova_modalidade_e_delega():
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.resolve_despejo_context_modality = Mock(
+        return_value=TipoEquipamentoPedido.CONTENTOR
+    )
+    backend._confirmar_despejo_atual = Mock(return_value="confirmada")
+    conversa = object()
+    contexto = _contexto_despejo_moderno(fotos_despejo=["foto"])
+
+    assert backend.confirm_despejo_contentor(conversa, contexto) == "confirmada"
+    backend._confirmar_despejo_atual.assert_called_once_with(conversa, contexto)
+
+
+@pytest.mark.parametrize("modality", [TipoEquipamentoPedido.CARRINHA, None])
+def test_despejo_confirmacao_carrinha_ou_indeterminada_permanece_legado(
+    monkeypatch, modality
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.despejo_context_is_modern.return_value = True
+    backend.resolve_despejo_context_modality.return_value = modality
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_despejo_confirmacao", contexto_json={}
+    )
+
+    assert router.handle(conversa, mensagem("1")) == "legado"
+    router._contentor.decide_despejo_confirmacao.assert_not_called()
+
+
+def test_despejo_confirmacao_contexto_antigo_ou_contentor_off_faz_fallback(
+    monkeypatch,
+):
+    backend = Mock()
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_despejo_confirmacao", contexto_json={"contentor_id": 17}
+    )
+
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend.despejo_context_is_modern.return_value = False
+    assert router.handle(conversa, mensagem("1")) == "legado"
+
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=False),
+    )
+    assert router.handle(conversa, mensagem("1")) == "legado"
+    router._contentor.decide_despejo_confirmacao.assert_not_called()
 
 
 def test_contentor_recolha_foto_exige_imagem_e_preserva_estado():

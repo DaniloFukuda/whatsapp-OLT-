@@ -62,6 +62,20 @@ class PrepararFotoDespejoContentor:
     context: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ConfirmarDespejoContentor:
+    """Solicita ao boundary legado a confirmação persistente do despejo."""
+
+    context: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PrepararConformidadeDespejoContentor:
+    """Solicita ao backend o prompt legado ao voltar da confirmação."""
+
+    context: dict[str, Any]
+
+
 class ContentorOperationalAgent:
     """Carrega Contentores pendentes e entrega a composição ao legado."""
 
@@ -457,6 +471,20 @@ class ContentorOperationalAgent:
             or ctx.get("residuo_contratado")
         )
         return PrepararFotoDespejoContentor(ctx)
+
+    def decide_despejo_confirmacao(self, conversa, message):
+        """Decide confirmar, voltar ou cancelar sem acessar persistência."""
+        ctx = dict(conversa.contexto_json or {})
+        choice = self._normalize(message.texto or "")
+        if choice in {"1", "confirmar despejo", "confirmar", "✅ confirmar despejo"}:
+            return ConfirmarDespejoContentor(ctx)
+        if choice in {"2", "voltar", "↩️ voltar"}:
+            return PrepararConformidadeDespejoContentor(ctx)
+        if choice in {"3", "cancelar", "❌ cancelar"}:
+            return IdleTransition(
+                "Despejo cancelado. Nenhuma foto foi salva e o ativo permanece em andamento."
+            )
+        return "Escolha Confirmar despejo, Voltar ou Cancelar."
 
     @staticmethod
     def _normalize(value):

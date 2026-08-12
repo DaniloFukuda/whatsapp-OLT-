@@ -1164,12 +1164,26 @@ class PedidoV24Agent:
             "v24_despejo_residuo": common | {"residuos_disponiveis"},
             "v24_despejo_conformidade": common,
             "v24_despejo_relato": common,
+            "v24_despejo_confirmacao": common,
         }.get(state)
         return bool(required and required.issubset(ctx))
 
     def despejo_foto_prompt(self, ctx):
         """Expõe o prompt legado da foto sem persistir estado."""
         return self._despejo_foto_prompt(ctx)
+
+    def despejo_conformidade_prompt(self, ctx):
+        """Expõe o prompt legado de conformidade sem persistir estado."""
+        return self._despejo_conformidade_prompt(ctx)
+
+    def confirm_despejo_contentor(self, conversa, ctx):
+        """Delega a confirmação ao boundary legado já existente."""
+        if (
+            self.resolve_despejo_context_modality(ctx)
+            is not TipoEquipamentoPedido.CONTENTOR
+        ):
+            raise ValueError("Esta operação aceita apenas contentores.")
+        return self._confirmar_despejo_atual(conversa, ctx)
 
     def despejo_confirmacao_prompt(self, ctx):
         """Expõe o prompt legado da confirmação sem persistir estado."""
