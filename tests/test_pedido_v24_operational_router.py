@@ -8,6 +8,7 @@ import pytest
 from app.agents.pedido_v24.contentor import (
     ConfirmEntregaContentor,
     ContentorOperationalAgent,
+    PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
 )
 from app.agents.pedido_v24.modality import resolve_operational_modality
@@ -1707,6 +1708,226 @@ def test_recolha_ativo_contentor_off_nao_consulta_adapter(monkeypatch):
     assert router.handle(conversa, entrada) == "bloqueada-legado"
     backend.resolve_recolha_ativo_selection.assert_not_called()
     router._contentor.decide_recolha_ativo.assert_not_called()
+
+
+def test_contentor_recolha_foto_exige_imagem_e_preserva_estado():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_foto",
+        contexto_json={"pedido_id": 9, "contentor_id": 17, "fotos_recolha": []},
+    )
+
+    assert agent.decide_recolha_foto(conversa, mensagem("texto")) == (
+        "Envie uma imagem para continuar."
+    )
+    assert conversa.estado_atual == "v24_recolha_foto"
+    assert conversa.contexto_json["fotos_recolha"] == []
+
+
+def test_adapter_contexto_recolha_comprova_contentor_sem_escrita():
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.db = Mock()
+    backend.db.get.return_value = SimpleNamespace(
+        id=17,
+        pedido_id=9,
+        tipo_equipamento="CONTENTOR",
+        status_entrega="ENTREGUE",
+        status_recolha="PENDENTE",
+    )
+    contexto = {"pedido_id": 9, "contentor_id": 17}
+
+    assert backend.resolve_recolha_context_modality(contexto) is (
+        TipoEquipamentoPedido.CONTENTOR
+    )
+    assert contexto == {"pedido_id": 9, "contentor_id": 17}
+    backend.db.get.assert_called_once()
+    backend.db.commit.assert_not_called()
+
+
+def test_contentor_recolha_foto_deduplica_e_avanca_sem_backend():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    contexto = {
+        "pedido_id": 9,
+        "contentor_id": 17,
+        "fotos_recolha": ["foto-1"],
+    }
+    conversa = SimpleNamespace(contexto_json=contexto)
+    entrada = NormalizedWhatsAppMessage(
+        telefone="351900077700",
+        tipo="image",
+        texto=None,
+        media_id="foto-1",
+        message_id="foto-msg",
+    )
+
+    decision = agent.decide_recolha_foto(conversa, entrada)
+
+    assert decision.next_state == "v24_recolha_foto_acao"
+    assert decision.context["fotos_recolha"] == ["foto-1"]
+    assert decision.response == (
+        "Foto guardada.\n\n1. ➕ Outra Foto\n2. ➡️ Próximo Passo"
+    )
+    assert contexto["fotos_recolha"] == ["foto-1"]
+    backend.assert_not_called()
+
+
+def test_contentor_recolha_outra_foto_preserva_alias_e_estado_alvo():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    conversa = SimpleNamespace(contexto_json={"fotos_recolha": ["foto-1"]})
+
+    decision = agent.decide_recolha_foto_acao(
+        conversa,
+        mensagem("➕ Outra Foto"),
+        avarias_enabled=True,
+    )
+
+    assert decision == AdvanceTransition(
+        "v24_recolha_foto",
+        {"fotos_recolha": ["foto-1"]},
+        "Envie a próxima foto.",
+    )
+
+
+def test_contentor_recolha_proximo_passo_com_avarias_on():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    decision = agent.decide_recolha_foto_acao(
+        SimpleNamespace(contexto_json={"fotos_recolha": ["foto-1"]}),
+        mensagem("Próximo Passo"),
+        avarias_enabled=True,
+    )
+
+    assert decision.next_state == "v24_recolha_avaria"
+    assert decision.response == (
+        "O equipamento sofreu algum estrago ou avaria na obra?\n\n"
+        "1. ✅ Não, está perfeito\n2. 💥 Sim, está estragado"
+    )
+
+
+def test_contentor_recolha_proximo_passo_com_avarias_off_solicita_prompt():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    decision = agent.decide_recolha_foto_acao(
+        SimpleNamespace(
+            contexto_json={
+                "fotos_recolha": ["foto-1"],
+                "avariado": None,
+                "relato_avaria": None,
+            }
+        ),
+        mensagem("2"),
+        avarias_enabled=False,
+    )
+
+    assert decision == PrepararConfirmacaoRecolhaContentor(
+        {"fotos_recolha": ["foto-1"]}
+    )
+
+
+def test_contentor_recolha_foto_acao_invalida_preserva_mensagem():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    assert agent.decide_recolha_foto_acao(
+        SimpleNamespace(contexto_json={}),
+        mensagem("talvez"),
+        avarias_enabled=True,
+    ) == "Selecione Outra Foto ou Próximo Passo."
+
+
+@pytest.mark.parametrize("estado", ["v24_recolha_foto", "v24_recolha_foto_acao"])
+def test_recolha_foto_contentor_comprovado_usa_modulo(monkeypatch, estado):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(
+            feature_contentores_enabled=True,
+            feature_avarias_enabled=True,
+        ),
+    )
+    backend = Mock()
+    backend.resolve_recolha_context_modality.return_value = TipoEquipamentoPedido.CONTENTOR
+    backend.apply_operational_transition.return_value = "aplicada"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    decision = AdvanceTransition("seguinte", {}, "resposta")
+    method = (
+        router._contentor.decide_recolha_foto
+        if estado == "v24_recolha_foto"
+        else router._contentor.decide_recolha_foto_acao
+    )
+    method.return_value = decision
+    conversa = SimpleNamespace(estado_atual=estado, contexto_json={"contentor_id": 17})
+    entrada = mensagem("2")
+
+    assert router.handle(conversa, entrada) == "aplicada"
+    backend.apply_operational_transition.assert_called_once_with(conversa, decision)
+    backend.handle.assert_not_called()
+
+
+def test_recolha_foto_acao_avarias_off_reutiliza_prompt_legado(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(
+            feature_contentores_enabled=True,
+            feature_avarias_enabled=False,
+        ),
+    )
+    backend = Mock()
+    backend.resolve_recolha_context_modality.return_value = TipoEquipamentoPedido.CONTENTOR
+    backend.recolha_confirmacao_prompt.return_value = "prompt legado"
+    backend.apply_operational_transition.return_value = "aplicada"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    context = {"pedido_id": 9, "contentor_id": 17, "fotos_recolha": ["foto"]}
+    command = PrepararConfirmacaoRecolhaContentor(context)
+    router._contentor.decide_recolha_foto_acao.return_value = command
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_foto_acao", contexto_json=context
+    )
+
+    assert router.handle(conversa, mensagem("2")) == "aplicada"
+    backend.recolha_confirmacao_prompt.assert_called_once_with(context)
+    transition = backend.apply_operational_transition.call_args.args[1]
+    assert transition == AdvanceTransition(
+        "v24_recolha_confirmacao", context, "prompt legado"
+    )
+
+
+def test_recolha_foto_contentor_off_permanece_legado(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(
+            feature_contentores_enabled=False,
+            feature_avarias_enabled=True,
+        ),
+    )
+    backend = Mock()
+    backend.handle.return_value = "bloqueada-legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_foto", contexto_json={"contentor_id": 17}
+    )
+
+    assert router.handle(conversa, mensagem("x")) == "bloqueada-legado"
+    backend.resolve_recolha_context_modality.assert_not_called()
+    router._contentor.decide_recolha_foto.assert_not_called()
+
+
+@pytest.mark.parametrize("modality", [TipoEquipamentoPedido.CARRINHA, None])
+@pytest.mark.parametrize("estado", ["v24_recolha_foto", "v24_recolha_foto_acao"])
+def test_recolha_foto_carrinha_ou_indeterminada_permanece_legado(
+    modality, estado
+):
+    backend = Mock()
+    backend.resolve_recolha_context_modality.return_value = modality
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual=estado, contexto_json={"contentor_id": 17})
+    entrada = mensagem("2")
+
+    assert router.handle(conversa, entrada) == "legado"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_recolha_foto.assert_not_called()
+    router._contentor.decide_recolha_foto_acao.assert_not_called()
 
 
 def test_excecao_do_backend_nao_e_convertida():

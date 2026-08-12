@@ -1323,6 +1323,27 @@ class PedidoV24Agent:
             "foto_prompt": self._recolha_foto_prompt_for(contentor),
         }
 
+    def resolve_recolha_context_modality(self, ctx):
+        """Comprova a modalidade do ativo atual sem alterar estado ou banco."""
+        if not isinstance(ctx, Mapping):
+            return None
+        contentor_id = ctx.get("contentor_id")
+        pedido_id = ctx.get("pedido_id")
+        if not isinstance(contentor_id, int) or not isinstance(pedido_id, int):
+            return None
+        contentor = self.db.get(PedidoContentor, contentor_id)
+        if not self._is_recolha_pendente_do_pedido(contentor, pedido_id):
+            return None
+        if contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value:
+            return TipoEquipamentoPedido.CONTENTOR
+        if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:
+            return TipoEquipamentoPedido.CARRINHA
+        return None
+
+    def recolha_confirmacao_prompt(self, ctx):
+        """Expoe o prompt legado de confirmacao sem persistir estado."""
+        return self._recolha_confirmacao_prompt(ctx)
+
     def _is_recolha_terminar(self, message, choice, ctx) -> bool:
         if choice in {"terminar", "terminar recolhas deste cliente", "🏁 terminar recolhas deste cliente"}:
             return True

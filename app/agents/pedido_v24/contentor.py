@@ -26,6 +26,13 @@ class RegistrarPagamentoEntregaContentor:
     forma: str
 
 
+@dataclass(frozen=True)
+class PrepararConfirmacaoRecolhaContentor:
+    """Solicita ao backend somente o prompt legado de confirmacao."""
+
+    context: dict[str, Any]
+
+
 class ContentorOperationalAgent:
     """Carrega Contentores pendentes e entrega a composição ao legado."""
 
@@ -301,3 +308,55 @@ class ContentorOperationalAgent:
             ctx,
             selection["foto_prompt"],
         )
+
+    def decide_recolha_foto(self, conversa, message):
+        """Registra a decisao de foto sem persistir estado ou acessar banco."""
+        photo = (
+            message.media_id or message.filename or message.message_id
+            if message.tipo == "image"
+            else None
+        )
+        if not photo:
+            return "Envie uma imagem para continuar."
+        ctx = dict(conversa.contexto_json or {})
+        fotos = list(ctx.get("fotos_recolha") or [])
+        if photo not in fotos:
+            fotos.append(photo)
+        ctx["fotos_recolha"] = fotos
+        return AdvanceTransition(
+            "v24_recolha_foto_acao",
+            ctx,
+            "Foto guardada.\n\n1. ➕ Outra Foto\n2. ➡️ Próximo Passo",
+        )
+
+    def decide_recolha_foto_acao(
+        self,
+        conversa,
+        message,
+        *,
+        avarias_enabled,
+    ):
+        """Decide a acao seguinte da foto sem persistencia operacional."""
+        normalized = unicodedata.normalize("NFKD", message.texto or "")
+        choice = "".join(
+            char for char in normalized if not unicodedata.combining(char)
+        ).strip().lower()
+        ctx = dict(conversa.contexto_json or {})
+        if choice in {"1", "outra foto", "➕ outra foto"}:
+            return AdvanceTransition(
+                "v24_recolha_foto",
+                ctx,
+                "Envie a próxima foto.",
+            )
+        if choice in {"2", "proximo passo", "➡️ proximo passo"}:
+            if not avarias_enabled:
+                ctx.pop("avariado", None)
+                ctx.pop("relato_avaria", None)
+                return PrepararConfirmacaoRecolhaContentor(ctx)
+            return AdvanceTransition(
+                "v24_recolha_avaria",
+                ctx,
+                "O equipamento sofreu algum estrago ou avaria na obra?\n\n"
+                "1. ✅ Não, está perfeito\n2. 💥 Sim, está estragado",
+            )
+        return "Selecione Outra Foto ou Próximo Passo."
