@@ -7,6 +7,7 @@ from app.agents.pedido_v24.contentor import (
     ConfirmEntregaContentor,
     ConfirmarRecolhaContentor,
     ContentorOperationalAgent,
+    PrepararConfirmacaoDespejoContentor,
     PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
 )
@@ -97,6 +98,36 @@ class PedidoV24OperationalRouter:
                     conversa,
                     selection,
                 )
+                if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                    return self._backend.apply_operational_transition(
+                        conversa,
+                        decision,
+                    )
+                return decision
+        if getattr(conversa, "estado_atual", None) in {
+            "v24_despejo_foto",
+            "v24_despejo_foto_acao",
+        } and self._contentor is not None:
+            context = conversa.contexto_json or {}
+            if (
+                get_settings().feature_contentores_enabled
+                and self._backend.resolve_despejo_context_modality(context)
+                is TipoEquipamentoPedido.CONTENTOR
+            ):
+                decide = (
+                    self._contentor.decide_despejo_foto
+                    if conversa.estado_atual == "v24_despejo_foto"
+                    else self._contentor.decide_despejo_foto_acao
+                )
+                decision = decide(conversa, message)
+                if isinstance(decision, PrepararConfirmacaoDespejoContentor):
+                    decision = AdvanceTransition(
+                        "v24_despejo_confirmacao",
+                        decision.context,
+                        self._backend.despejo_confirmacao_prompt(
+                            decision.context
+                        ),
+                    )
                 if isinstance(decision, (AdvanceTransition, IdleTransition)):
                     return self._backend.apply_operational_transition(
                         conversa,

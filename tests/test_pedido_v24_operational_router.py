@@ -10,6 +10,7 @@ from app.agents.pedido_v24.contentor import (
     ConfirmEntregaContentor,
     ConfirmarRecolhaContentor,
     ContentorOperationalAgent,
+    PrepararConfirmacaoDespejoContentor,
     PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
 )
@@ -1932,6 +1933,206 @@ def test_despejo_ativo_contentor_off_permanece_legado(monkeypatch):
     assert router.handle(conversa, mensagem("1")) == "bloqueada-legado"
     backend.resolve_despejo_ativo_selection.assert_not_called()
     router._contentor.decide_despejo_ativo.assert_not_called()
+
+
+def _mensagem_imagem(media="foto-1"):
+    return SimpleNamespace(
+        tipo="image",
+        texto=None,
+        media_id=media,
+        filename=None,
+        message_id="mensagem-foto",
+    )
+
+
+def test_contentor_despejo_foto_valida_deduplica_e_nao_acessa_backend():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    contexto = {
+        "pedido_id": 9,
+        "contentor_id": 17,
+        "fotos_despejo": ["foto-1"],
+    }
+    conversa = SimpleNamespace(
+        estado_atual="v24_despejo_foto", contexto_json=contexto
+    )
+
+    decision = agent.decide_despejo_foto(conversa, _mensagem_imagem())
+
+    assert decision == AdvanceTransition(
+        "v24_despejo_foto_acao",
+        contexto,
+        "Foto guardada.\n\n1. ➕ Outra Foto\n2. ➡️ Próximo Passo",
+    )
+    assert decision.context["fotos_despejo"] == ["foto-1"]
+    assert conversa.contexto_json == contexto
+    backend.assert_not_called()
+
+
+def test_contentor_despejo_foto_exige_imagem_sem_mudar_estado_contexto():
+    contexto = {"pedido_id": 9, "contentor_id": 17, "fotos_despejo": []}
+    conversa = SimpleNamespace(
+        estado_atual="v24_despejo_foto", contexto_json=contexto
+    )
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+
+    assert agent.decide_despejo_foto(conversa, mensagem("texto")) == (
+        "Envie uma imagem para continuar."
+    )
+    assert conversa.estado_atual == "v24_despejo_foto"
+    assert conversa.contexto_json == contexto
+
+
+@pytest.mark.parametrize("entrada", ["1", "Outra Foto", "➕ Outra Foto"])
+def test_contentor_despejo_foto_acao_outra_foto_preserva_aliases(entrada):
+    contexto = {"pedido_id": 9, "contentor_id": 17, "fotos_despejo": ["foto"]}
+    decision = ContentorOperationalAgent(
+        lambda: [], Mock()
+    ).decide_despejo_foto_acao(
+        SimpleNamespace(contexto_json=contexto), mensagem(entrada)
+    )
+
+    assert decision == AdvanceTransition(
+        "v24_despejo_foto",
+        contexto,
+        "Envie a próxima foto do despejo.",
+    )
+
+
+@pytest.mark.parametrize("entrada", ["2", "Próximo Passo", "➡️ Próximo Passo"])
+def test_contentor_despejo_foto_acao_proximo_prepara_prompt_legado(entrada):
+    contexto = {"pedido_id": 9, "contentor_id": 17, "fotos_despejo": ["foto"]}
+    decision = ContentorOperationalAgent(
+        lambda: [], Mock()
+    ).decide_despejo_foto_acao(
+        SimpleNamespace(contexto_json=contexto), mensagem(entrada)
+    )
+
+    assert decision == PrepararConfirmacaoDespejoContentor(contexto)
+
+
+def test_contentor_despejo_foto_acao_exige_foto_e_preserva_invalido():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    sem_foto = SimpleNamespace(
+        estado_atual="v24_despejo_foto_acao",
+        contexto_json={"pedido_id": 9, "contentor_id": 17, "fotos_despejo": []},
+    )
+    invalido = SimpleNamespace(
+        estado_atual="v24_despejo_foto_acao",
+        contexto_json={"pedido_id": 9, "contentor_id": 17, "fotos_despejo": ["foto"]},
+    )
+
+    assert agent.decide_despejo_foto_acao(sem_foto, mensagem("2")) == (
+        "Envie pelo menos uma imagem para continuar."
+    )
+    assert agent.decide_despejo_foto_acao(invalido, mensagem("talvez")) == (
+        "Selecione Outra Foto ou Próximo Passo."
+    )
+    assert sem_foto.estado_atual == invalido.estado_atual == "v24_despejo_foto_acao"
+
+
+@pytest.mark.parametrize(
+    "item,expected",
+    [
+        (_item_despejo(), TipoEquipamentoPedido.CONTENTOR),
+        (
+            _item_despejo(
+                tipo_equipamento="CARRINHA",
+                status_recolha="PENDENTE",
+                status_operacional_carrinha="AGUARDANDO_DESPEJO",
+            ),
+            TipoEquipamentoPedido.CARRINHA,
+        ),
+        (_item_despejo(pedido_id=10), None),
+        (_item_despejo(status_ciclo="CONCLUIDO"), None),
+        (None, None),
+    ],
+)
+def test_adapter_contexto_despejo_comprova_modalidade_e_elegibilidade(
+    monkeypatch, item, expected
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24_agent.get_settings",
+        lambda: SimpleNamespace(
+            feature_contentores_enabled=True,
+            feature_carrinhas_enabled=True,
+        ),
+    )
+    backend = _despejo_backend(item, {})
+
+    assert backend.resolve_despejo_context_modality(
+        {"pedido_id": 9, "contentor_id": 17}
+    ) is expected
+    backend.db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("estado", ["v24_despejo_foto", "v24_despejo_foto_acao"])
+def test_despejo_foto_contentor_comprovado_usa_modulo(monkeypatch, estado):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.resolve_despejo_context_modality.return_value = TipoEquipamentoPedido.CONTENTOR
+    backend.apply_operational_transition.return_value = "aplicada"
+    backend.despejo_confirmacao_prompt.return_value = "prompt legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    context = {"pedido_id": 9, "contentor_id": 17, "fotos_despejo": ["foto"]}
+    conversa = SimpleNamespace(estado_atual=estado, contexto_json=context)
+    entrada = _mensagem_imagem() if estado.endswith("_foto") else mensagem("2")
+    if estado.endswith("_foto"):
+        decision = AdvanceTransition("v24_despejo_foto_acao", context, "foto")
+        router._contentor.decide_despejo_foto.return_value = decision
+    else:
+        command = PrepararConfirmacaoDespejoContentor(context)
+        router._contentor.decide_despejo_foto_acao.return_value = command
+
+    assert router.handle(conversa, entrada) == "aplicada"
+    backend.handle.assert_not_called()
+    transition = backend.apply_operational_transition.call_args.args[1]
+    if estado.endswith("_foto_acao"):
+        assert transition == AdvanceTransition(
+            "v24_despejo_confirmacao", context, "prompt legado"
+        )
+        backend.despejo_confirmacao_prompt.assert_called_once_with(context)
+
+
+@pytest.mark.parametrize("modality", [TipoEquipamentoPedido.CARRINHA, None])
+@pytest.mark.parametrize("estado", ["v24_despejo_foto", "v24_despejo_foto_acao"])
+def test_despejo_foto_carrinha_ou_indeterminado_permanece_legado(
+    monkeypatch, modality, estado
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.resolve_despejo_context_modality.return_value = modality
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual=estado, contexto_json={})
+    entrada = mensagem("2")
+
+    assert router.handle(conversa, entrada) == "legado"
+    router._contentor.decide_despejo_foto.assert_not_called()
+    router._contentor.decide_despejo_foto_acao.assert_not_called()
+
+
+def test_despejo_foto_contentor_off_permanece_legado(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=False),
+    )
+    backend = Mock()
+    backend.handle.return_value = "bloqueada-legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual="v24_despejo_foto", contexto_json={})
+
+    assert router.handle(conversa, mensagem("x")) == "bloqueada-legado"
+    backend.resolve_despejo_context_modality.assert_not_called()
 
 
 def test_contentor_recolha_foto_exige_imagem_e_preserva_estado():

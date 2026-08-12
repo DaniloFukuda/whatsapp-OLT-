@@ -48,6 +48,13 @@ class CancelarRecolhaContentor:
     context: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class PrepararConfirmacaoDespejoContentor:
+    """Solicita ao backend somente o prompt legado de confirmação do despejo."""
+
+    context: dict[str, Any]
+
+
 class ContentorOperationalAgent:
     """Carrega Contentores pendentes e entrega a composição ao legado."""
 
@@ -333,6 +340,45 @@ class ContentorOperationalAgent:
             ctx,
             selection["response"],
         )
+
+    def decide_despejo_foto(self, conversa, message):
+        """Registra a foto no contexto sem acessar persistência operacional."""
+        photo = (
+            message.media_id or message.filename or message.message_id
+            if message.tipo == "image"
+            else None
+        )
+        if not photo:
+            return "Envie uma imagem para continuar."
+        ctx = dict(conversa.contexto_json or {})
+        fotos = list(ctx.get("fotos_despejo") or [])
+        if photo not in fotos:
+            fotos.append(photo)
+        ctx["fotos_despejo"] = fotos
+        return AdvanceTransition(
+            "v24_despejo_foto_acao",
+            ctx,
+            "Foto guardada.\n\n1. ➕ Outra Foto\n2. ➡️ Próximo Passo",
+        )
+
+    def decide_despejo_foto_acao(self, conversa, message):
+        """Decide o passo seguinte da foto sem acessar persistência."""
+        normalized = unicodedata.normalize("NFKD", message.texto or "")
+        choice = "".join(
+            char for char in normalized if not unicodedata.combining(char)
+        ).strip().lower()
+        ctx = dict(conversa.contexto_json or {})
+        if choice in {"1", "outra foto", "➕ outra foto"}:
+            return AdvanceTransition(
+                "v24_despejo_foto",
+                ctx,
+                "Envie a próxima foto do despejo.",
+            )
+        if choice not in {"2", "proximo passo", "➡️ proximo passo"}:
+            return "Selecione Outra Foto ou Próximo Passo."
+        if not ctx.get("fotos_despejo"):
+            return "Envie pelo menos uma imagem para continuar."
+        return PrepararConfirmacaoDespejoContentor(ctx)
 
     def decide_recolha_foto(self, conversa, message):
         """Registra a decisao de foto sem persistir estado ou acessar banco."""

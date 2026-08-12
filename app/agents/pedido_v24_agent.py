@@ -1133,6 +1133,27 @@ class PedidoV24Agent:
             "response": transition.response,
         }
 
+    def resolve_despejo_context_modality(self, ctx):
+        """Comprova a modalidade do despejo atual sem alterar estado ou banco."""
+        if not isinstance(ctx, Mapping):
+            return None
+        contentor_id = ctx.get("contentor_id")
+        pedido_id = ctx.get("pedido_id")
+        if not isinstance(contentor_id, int) or not isinstance(pedido_id, int):
+            return None
+        contentor = self.db.get(PedidoContentor, contentor_id)
+        if not self._is_despejo_pendente_do_pedido(contentor, pedido_id):
+            return None
+        if contentor.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value:
+            return TipoEquipamentoPedido.CONTENTOR
+        if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:
+            return TipoEquipamentoPedido.CARRINHA
+        return None
+
+    def despejo_confirmacao_prompt(self, ctx):
+        """Expõe o prompt legado da confirmação sem persistir estado."""
+        return self._despejo_confirmacao_prompt(ctx)
+
     def _despejo_foto_prompt(self, ctx) -> str:
         contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
         label = self._equipamento_label(contentor) if contentor else "equipamento"
