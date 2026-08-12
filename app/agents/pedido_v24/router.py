@@ -2,7 +2,10 @@
 
 from sqlalchemy.orm import Session
 
-from app.agents.pedido_v24.contentor import ContentorOperationalAgent
+from app.agents.pedido_v24.contentor import (
+    ConfirmEntregaContentor,
+    ContentorOperationalAgent,
+)
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
 from app.agents.pedido_v24_agent import PedidoV24Agent
@@ -179,6 +182,29 @@ class PedidoV24OperationalRouter:
                     conversa,
                     message,
                 )
+                if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                    return self._backend.apply_operational_transition(
+                        conversa,
+                        decision,
+                    )
+                return decision
+        if getattr(conversa, "estado_atual", None) == "v24_entrega_confirmacao" and self._contentor is not None:
+            context = conversa.contexto_json or {}
+            pedido_id = context.get("pedido_id")
+            if (
+                pedido_id is not None
+                and self.resolve_modality(context, pedido_id)
+                is TipoEquipamentoPedido.CONTENTOR
+            ):
+                decision = self._contentor.decide_entrega_confirmacao(
+                    conversa,
+                    message,
+                )
+                if isinstance(decision, ConfirmEntregaContentor):
+                    return self._backend.confirm_entrega_contentor(
+                        conversa,
+                        decision.context,
+                    )
                 if isinstance(decision, (AdvanceTransition, IdleTransition)):
                     return self._backend.apply_operational_transition(
                         conversa,

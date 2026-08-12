@@ -5,7 +5,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.agents.pedido_v24.contentor import ContentorOperationalAgent
+from app.agents.pedido_v24.contentor import (
+    ConfirmEntregaContentor,
+    ContentorOperationalAgent,
+)
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.router import PedidoV24OperationalRouter
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
@@ -1079,10 +1082,158 @@ def test_referencia_carrinha_legado_ou_ambiguo_permanece_no_backend(
     router._contentor.decide_entrega_referencia.assert_not_called()
 
 
+def test_confirmacao_contentor_inequivoco_usa_modulo_e_boundary(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.confirm_entrega_contentor = Mock(return_value="confirmada")
+    router = PedidoV24OperationalRouter(backend=backend)
+    context = {
+        "pedido_id": 17,
+        "operational_options": [
+            {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
+        ],
+    }
+    command = ConfirmEntregaContentor(context)
+    router._contentor = Mock()
+    router._contentor.decide_entrega_confirmacao.return_value = command
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_confirmacao", contexto_json=context
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "confirmada"
+    router._contentor.decide_entrega_confirmacao.assert_called_once_with(
+        conversa, entrada
+    )
+    backend.confirm_entrega_contentor.assert_called_once_with(conversa, context)
+
+
+@pytest.mark.parametrize(
+    "texto",
+    ["1", "confirmar entrega", "✅ confirmar entrega"],
+)
+def test_decisao_confirmar_contentor_preserva_comando_e_contexto(texto):
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    context = {"pedido_id": 17, "entregas": [{"contentor_id": 5}]}
+    conversa = SimpleNamespace(contexto_json=context)
+
+    decision = agent.decide_entrega_confirmacao(conversa, mensagem(texto))
+
+    assert decision == ConfirmEntregaContentor(context)
+    assert decision.context is not context
+    assert conversa.contexto_json == context
+    backend.assert_not_called()
+    backend.db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("texto", ["2", "cancelar", "❌ cancelar"])
+def test_decisao_cancelar_contentor_preserva_idle_sem_commit(texto):
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    conversa = SimpleNamespace(contexto_json={"pedido_id": 17})
+
+    assert agent.decide_entrega_confirmacao(conversa, mensagem(texto)) == (
+        IdleTransition("Entrega cancelada. Nenhum ativo foi marcado como entregue.")
+    )
+    backend.assert_not_called()
+    backend.db.commit.assert_not_called()
+
+
+def test_decisao_confirmacao_invalida_preserva_resposta_sem_commit():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    conversa = SimpleNamespace(contexto_json={"pedido_id": 17})
+
+    assert agent.decide_entrega_confirmacao(conversa, mensagem("3")) == (
+        "Escolha Confirmar entrega ou Cancelar."
+    )
+    backend.assert_not_called()
+    backend.db.commit.assert_not_called()
+
+
+def test_cancelamento_contentor_usa_adapter_idle_e_um_commit(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.apply_operational_transition = Mock(return_value="cancelada")
+    backend.confirm_entrega_contentor = Mock()
+    router = PedidoV24OperationalRouter(backend=backend)
+    decision = IdleTransition(
+        "Entrega cancelada. Nenhum ativo foi marcado como entregue."
+    )
+    router._contentor = Mock()
+    router._contentor.decide_entrega_confirmacao.return_value = decision
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_confirmacao",
+        contexto_json={
+            "pedido_id": 17,
+            "operational_options": [
+                {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
+            ],
+        },
+    )
+    entrada = mensagem("2")
+
+    assert router.handle(conversa, entrada) == "cancelada"
+    backend.apply_operational_transition.assert_called_once_with(conversa, decision)
+    backend.confirm_entrega_contentor.assert_not_called()
+
+
+def test_boundary_contentor_reutiliza_confirmacao_transacional_legada(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend._confirmar_entrega_preparada = Mock(return_value="confirmada")
+    conversa = SimpleNamespace(estado_atual="v24_entrega_confirmacao")
+    context = {"pedido_id": 17}
+
+    assert backend.confirm_entrega_contentor(conversa, context) == "confirmada"
+    backend._confirmar_entrega_preparada.assert_called_once_with(
+        conversa,
+        context,
+        expected_tipo=TipoEquipamentoPedido.CONTENTOR.value,
+    )
+
+
+@pytest.mark.parametrize("erro", [ValueError("inválida"), RuntimeError("falha")])
+def test_boundary_contentor_preserva_excecao_da_confirmacao_legada(
+    db_session, erro
+):
+    backend = PedidoV24Agent(db_session)
+    backend._confirmar_entrega_preparada = Mock(side_effect=erro)
+
+    with pytest.raises(type(erro), match=str(erro)):
+        backend.confirm_entrega_contentor(
+            SimpleNamespace(estado_atual="v24_entrega_confirmacao"),
+            {"pedido_id": 17},
+        )
+
+
+@pytest.mark.parametrize(
+    "contexto",
+    [
+        {"pedido_id": 17, "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CARRINHA"]}]},
+        {"pedido_id": 17, "entregas": [{"contentor_id": 5}]},
+        {"pedido_id": 17, "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CONTENTOR", "CARRINHA"]}]},
+        {"pedido_id": 17, "tipo_solicitacao": "CONTENTOR", "tipo_equipamento": "CARRINHA"},
+    ],
+)
+def test_confirmacao_carrinha_legado_ou_ambiguo_permanece_no_backend(
+    db_session, contexto
+):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado-confirmacao")
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_confirmacao", contexto_json=contexto
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "legado-confirmacao"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_entrega_confirmacao.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "estado",
     [
-        "v24_entrega_confirmacao",
         "v24_entrega_pagou",
         "v24_entrega_forma",
         "v24_entrega_forma_outro",

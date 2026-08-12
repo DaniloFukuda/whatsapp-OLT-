@@ -3,11 +3,19 @@
 import re
 import unicodedata
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
 from app.models.conversa import ConversaWhatsApp
 from app.models.pedido import PedidoContentor, TipoEquipamentoPedido
+
+
+@dataclass(frozen=True)
+class ConfirmEntregaContentor:
+    """Comando específico para o boundary legado de confirmação."""
+
+    context: dict[str, Any]
 
 
 class ContentorOperationalAgent:
@@ -197,3 +205,17 @@ class ContentorOperationalAgent:
             ctx,
             prompt,
         )
+
+    def decide_entrega_confirmacao(self, conversa, message):
+        """Decide confirmar, cancelar ou rejeitar a entrada sem persistir."""
+        normalized = unicodedata.normalize("NFKD", message.texto or "")
+        choice = "".join(
+            char for char in normalized if not unicodedata.combining(char)
+        ).strip().lower()
+        if choice in {"1", "confirmar entrega", "✅ confirmar entrega"}:
+            return ConfirmEntregaContentor(dict(conversa.contexto_json or {}))
+        if choice in {"2", "cancelar", "❌ cancelar"}:
+            return IdleTransition(
+                "Entrega cancelada. Nenhum ativo foi marcado como entregue."
+            )
+        return "Escolha Confirmar entrega ou Cancelar."

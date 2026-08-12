@@ -1418,7 +1418,14 @@ class PedidoV24Agent:
             + "\n".join(f"{i}. 🟢 {item}" for i, item in enumerate(available, 1)),
         )
 
-    def _confirmar_entrega_preparada(self, conversa, ctx):
+    def confirm_entrega_contentor(self, conversa, ctx):
+        return self._confirmar_entrega_preparada(
+            conversa,
+            ctx,
+            expected_tipo=TipoEquipamentoPedido.CONTENTOR.value,
+        )
+
+    def _confirmar_entrega_preparada(self, conversa, ctx, expected_tipo=None):
         try:
             if (
                 not get_settings().feature_contentores_enabled
@@ -1445,6 +1452,8 @@ class PedidoV24Agent:
                 raise ValueError(
                     "Não é permitido misturar contentores e carrinhas na mesma operação."
                 )
+            if expected_tipo is not None and tipos != {expected_tipo}:
+                raise ValueError("Esta operação aceita apenas contentores.")
             is_carrinha = tipos == {TipoEquipamentoPedido.CARRINHA.value}
             confirmar = (
                 self.service.confirmar_chegada_carrinha_lote_transacional
