@@ -11,6 +11,7 @@ from app.agents.pedido_v24.contentor import (
     ConfirmarRecolhaContentor,
     ContentorOperationalAgent,
     PrepararConfirmacaoDespejoContentor,
+    PrepararFotoDespejoContentor,
     PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
 )
@@ -2133,6 +2134,206 @@ def test_despejo_foto_contentor_off_permanece_legado(monkeypatch):
 
     assert router.handle(conversa, mensagem("x")) == "bloqueada-legado"
     backend.resolve_despejo_context_modality.assert_not_called()
+
+
+def _contexto_despejo_moderno(**overrides):
+    contexto = {
+        "pedido_id": 9,
+        "contentor_id": 17,
+        "fotos_despejo": [],
+        "residuo_contratado": "Entulho Limpo",
+        "residuo_efetivo": None,
+        "residuo_assumido": None,
+        "carga_errada": None,
+        "relato_carga": None,
+        "residuos_disponiveis": ["Entulho Limpo", "Entulho Misto"],
+    }
+    contexto.update(overrides)
+    return contexto
+
+
+@pytest.mark.parametrize("entrada", ["1", "Entulho Limpo", "despejo_residuo:limpo"])
+def test_contentor_despejo_residuo_valido_preserva_aliases_e_contexto(entrada):
+    backend = Mock()
+    contexto = _contexto_despejo_moderno(
+        carga_errada=True, relato_carga="relato anterior"
+    )
+    decision = ContentorOperationalAgent(
+        lambda: [], backend
+    ).decide_despejo_residuo(
+        SimpleNamespace(contexto_json=contexto), mensagem(entrada)
+    )
+
+    assert isinstance(decision, PrepararFotoDespejoContentor)
+    assert decision.context["residuos_disponiveis"] == [
+        "Entulho Limpo", "Entulho Misto"
+    ]
+    assert decision.context["residuo_efetivo"] == "Entulho Limpo"
+    assert decision.context["carga_errada"] is False
+    assert decision.context["relato_carga"] is None
+    assert contexto["carga_errada"] is True
+    backend.assert_not_called()
+
+
+def test_contentor_despejo_residuo_invalido_preserva_estado_contexto_e_mensagem():
+    contexto = _contexto_despejo_moderno()
+    conversa = SimpleNamespace(
+        estado_atual="v24_despejo_residuo", contexto_json=contexto
+    )
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+
+    assert agent.decide_despejo_residuo(conversa, mensagem("Madeira")) == (
+        "Selecione um tipo de resíduo com cota em aberto."
+    )
+    assert conversa.estado_atual == "v24_despejo_residuo"
+    assert conversa.contexto_json == contexto
+
+
+@pytest.mark.parametrize(
+    "entrada",
+    ["1", "sim", "Sim, corresponde", "✅ Sim, corresponde", "Sim, tudo certo"],
+)
+def test_contentor_despejo_conformidade_conforme_preserva_aliases(entrada):
+    contexto = _contexto_despejo_moderno(residuo_assumido="Entulho Misto")
+    decision = ContentorOperationalAgent(
+        lambda: [], Mock()
+    ).decide_despejo_conformidade(
+        SimpleNamespace(contexto_json=contexto), mensagem(entrada)
+    )
+
+    assert isinstance(decision, PrepararFotoDespejoContentor)
+    assert decision.context["residuo_efetivo"] == "Entulho Misto"
+    assert decision.context["carga_errada"] is False
+    assert decision.context["relato_carga"] is None
+
+
+@pytest.mark.parametrize(
+    "entrada",
+    ["2", "nao", "Não, existe divergência", "❌ Não, existe divergência",
+     "Não, está misturado/errado", "🚨 Não, está misturado/errado"],
+)
+def test_contentor_despejo_conformidade_divergente_preserva_aliases(entrada):
+    contexto = _contexto_despejo_moderno()
+    decision = ContentorOperationalAgent(
+        lambda: [], Mock()
+    ).decide_despejo_conformidade(
+        SimpleNamespace(contexto_json=contexto), mensagem(entrada)
+    )
+
+    assert decision.next_state == "v24_despejo_relato"
+    assert decision.context["carga_errada"] is True
+    assert decision.response == "Descreva a divergencia com pelo menos 10 caracteres."
+
+
+def test_contentor_despejo_conformidade_invalida_preserva_mensagem():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    assert agent.decide_despejo_conformidade(
+        SimpleNamespace(contexto_json=_contexto_despejo_moderno()),
+        mensagem("talvez"),
+    ) == "Selecione se o material corresponde ao residuo contratado."
+
+
+def test_contentor_despejo_relato_preserva_strip_minimo_e_residuo():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    contexto = _contexto_despejo_moderno(residuo_assumido="Entulho Misto")
+    conversa = SimpleNamespace(
+        estado_atual="v24_despejo_relato", contexto_json=contexto
+    )
+
+    assert agent.decide_despejo_relato(conversa, mensagem("  curto  ")) == (
+        "O relato da carga precisa ter pelo menos 10 caracteres."
+    )
+    decision = agent.decide_despejo_relato(
+        conversa, mensagem("  material bastante misturado  ")
+    )
+    assert isinstance(decision, PrepararFotoDespejoContentor)
+    assert decision.context["relato_carga"] == "material bastante misturado"
+    assert decision.context["carga_errada"] is True
+    assert decision.context["residuo_efetivo"] == "Entulho Misto"
+
+
+@pytest.mark.parametrize(
+    "estado",
+    ["v24_despejo_residuo", "v24_despejo_conformidade", "v24_despejo_relato"],
+)
+def test_contexto_despejo_moderno_exige_campos_preparados(estado):
+    contexto = _contexto_despejo_moderno()
+    assert PedidoV24Agent.despejo_context_is_modern(contexto, estado) is True
+    contexto.pop("pedido_id")
+    assert PedidoV24Agent.despejo_context_is_modern(contexto, estado) is False
+
+
+@pytest.mark.parametrize(
+    "estado",
+    ["v24_despejo_residuo", "v24_despejo_conformidade", "v24_despejo_relato"],
+)
+def test_despejo_residuo_conformidade_relato_contentor_usam_modulo(
+    monkeypatch, estado
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.despejo_context_is_modern.return_value = True
+    backend.resolve_despejo_context_modality.return_value = TipoEquipamentoPedido.CONTENTOR
+    backend.despejo_foto_prompt.return_value = "prompt legado da foto"
+    backend.apply_operational_transition.return_value = "aplicada"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    decide = {
+        "v24_despejo_residuo": router._contentor.decide_despejo_residuo,
+        "v24_despejo_conformidade": router._contentor.decide_despejo_conformidade,
+        "v24_despejo_relato": router._contentor.decide_despejo_relato,
+    }[estado]
+    contexto = _contexto_despejo_moderno()
+    decide.return_value = PrepararFotoDespejoContentor(contexto)
+    conversa = SimpleNamespace(estado_atual=estado, contexto_json=contexto)
+
+    assert router.handle(conversa, mensagem("entrada")) == "aplicada"
+    backend.handle.assert_not_called()
+    backend.despejo_foto_prompt.assert_called_once_with(contexto)
+    assert backend.apply_operational_transition.call_args.args[1] == AdvanceTransition(
+        "v24_despejo_foto", contexto, "prompt legado da foto"
+    )
+
+
+@pytest.mark.parametrize("modern", [False, True])
+@pytest.mark.parametrize("modality", [TipoEquipamentoPedido.CARRINHA, None])
+def test_despejo_residuo_carrinha_indeterminado_ou_legado_faz_fallback(
+    monkeypatch, modern, modality
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.despejo_context_is_modern.return_value = modern
+    backend.resolve_despejo_context_modality.return_value = modality
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_despejo_residuo", contexto_json={"contentor_id": 17}
+    )
+
+    assert router.handle(conversa, mensagem("1")) == "legado"
+    router._contentor.decide_despejo_residuo.assert_not_called()
+
+
+def test_despejo_residuo_contentor_desabilitado_permanece_legado(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=False),
+    )
+    backend = Mock()
+    backend.handle.return_value = "bloqueada-legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual="v24_despejo_residuo", contexto_json={})
+
+    assert router.handle(conversa, mensagem("1")) == "bloqueada-legado"
+    backend.despejo_context_is_modern.assert_not_called()
 
 
 def test_contentor_recolha_foto_exige_imagem_e_preserva_estado():

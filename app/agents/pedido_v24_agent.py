@@ -1150,6 +1150,27 @@ class PedidoV24Agent:
             return TipoEquipamentoPedido.CARRINHA
         return None
 
+    @staticmethod
+    def despejo_context_is_modern(ctx, state):
+        """Distingue contexto preparado do contexto que exige hidratação legada."""
+        if not isinstance(ctx, Mapping):
+            return False
+        common = {
+            "pedido_id", "contentor_id", "fotos_despejo",
+            "residuo_contratado", "residuo_efetivo", "residuo_assumido",
+            "carga_errada", "relato_carga",
+        }
+        required = {
+            "v24_despejo_residuo": common | {"residuos_disponiveis"},
+            "v24_despejo_conformidade": common,
+            "v24_despejo_relato": common,
+        }.get(state)
+        return bool(required and required.issubset(ctx))
+
+    def despejo_foto_prompt(self, ctx):
+        """Expõe o prompt legado da foto sem persistir estado."""
+        return self._despejo_foto_prompt(ctx)
+
     def despejo_confirmacao_prompt(self, ctx):
         """Expõe o prompt legado da confirmação sem persistir estado."""
         return self._despejo_confirmacao_prompt(ctx)

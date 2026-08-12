@@ -8,6 +8,7 @@ from app.agents.pedido_v24.contentor import (
     ConfirmarRecolhaContentor,
     ContentorOperationalAgent,
     PrepararConfirmacaoDespejoContentor,
+    PrepararFotoDespejoContentor,
     PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
 )
@@ -127,6 +128,37 @@ class PedidoV24OperationalRouter:
                         self._backend.despejo_confirmacao_prompt(
                             decision.context
                         ),
+                    )
+                if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                    return self._backend.apply_operational_transition(
+                        conversa,
+                        decision,
+                    )
+                return decision
+        if getattr(conversa, "estado_atual", None) in {
+            "v24_despejo_residuo",
+            "v24_despejo_conformidade",
+            "v24_despejo_relato",
+        } and self._contentor is not None:
+            context = conversa.contexto_json or {}
+            state = conversa.estado_atual
+            if (
+                get_settings().feature_contentores_enabled
+                and self._backend.despejo_context_is_modern(context, state)
+                and self._backend.resolve_despejo_context_modality(context)
+                is TipoEquipamentoPedido.CONTENTOR
+            ):
+                decide = {
+                    "v24_despejo_residuo": self._contentor.decide_despejo_residuo,
+                    "v24_despejo_conformidade": self._contentor.decide_despejo_conformidade,
+                    "v24_despejo_relato": self._contentor.decide_despejo_relato,
+                }[state]
+                decision = decide(conversa, message)
+                if isinstance(decision, PrepararFotoDespejoContentor):
+                    decision = AdvanceTransition(
+                        "v24_despejo_foto",
+                        decision.context,
+                        self._backend.despejo_foto_prompt(decision.context),
                     )
                 if isinstance(decision, (AdvanceTransition, IdleTransition)):
                     return self._backend.apply_operational_transition(
