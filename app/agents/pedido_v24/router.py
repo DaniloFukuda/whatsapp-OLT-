@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.agents.pedido_v24.contentor import (
     ConfirmEntregaContentor,
     ContentorOperationalAgent,
+    RegistrarPagamentoEntregaContentor,
 )
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
@@ -218,6 +219,33 @@ class PedidoV24OperationalRouter:
                 is TipoEquipamentoPedido.CONTENTOR
             ):
                 decision = self._contentor.decide_entrega_pagou(conversa, message)
+                if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                    return self._backend.apply_operational_transition(
+                        conversa,
+                        decision,
+                    )
+                return decision
+        if getattr(conversa, "estado_atual", None) in {
+            "v24_entrega_forma",
+            "v24_entrega_forma_outro",
+        } and self._contentor is not None:
+            context = conversa.contexto_json or {}
+            if (
+                self._backend.resolve_entrega_pagamento_modality(context)
+                is TipoEquipamentoPedido.CONTENTOR
+            ):
+                decide = (
+                    self._contentor.decide_entrega_forma
+                    if conversa.estado_atual == "v24_entrega_forma"
+                    else self._contentor.decide_entrega_forma_outro
+                )
+                decision = decide(conversa, message)
+                if isinstance(decision, RegistrarPagamentoEntregaContentor):
+                    return self._backend.registrar_pagamento_entrega_contentor(
+                        conversa,
+                        decision.context,
+                        decision.forma,
+                    )
                 if isinstance(decision, (AdvanceTransition, IdleTransition)):
                     return self._backend.apply_operational_transition(
                         conversa,

@@ -18,6 +18,14 @@ class ConfirmEntregaContentor:
     context: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class RegistrarPagamentoEntregaContentor:
+    """Solicita ao boundary legado o registro financeiro da entrega."""
+
+    context: dict[str, Any]
+    forma: str
+
+
 class ContentorOperationalAgent:
     """Carrega Contentores pendentes e entrega a composição ao legado."""
 
@@ -238,3 +246,41 @@ class ContentorOperationalAgent:
                 "Selecione a forma recebida:\n\n1. MBWay\n2. Transferência\n3. Dinheiro\n4. Outro",
             )
         return "Selecione Sim ou Não."
+
+    def decide_entrega_forma(self, conversa, message):
+        """Valida a forma recebida sem executar persistencia financeira."""
+        normalized = unicodedata.normalize("NFKD", message.texto or "")
+        choice = "".join(
+            char for char in normalized if not unicodedata.combining(char)
+        ).strip().lower()
+        forms = {
+            "1": "MBWay",
+            "2": "Transferência",
+            "3": "Dinheiro",
+            "4": "Outro",
+            "mbway": "MBWay",
+            "transferencia": "Transferência",
+            "dinheiro": "Dinheiro",
+            "outro": "Outro",
+        }
+        form = forms.get(choice)
+        if not form:
+            return "Selecione uma forma de pagamento."
+        ctx = dict(conversa.contexto_json or {})
+        if form == "Outro":
+            return AdvanceTransition(
+                "v24_entrega_forma_outro",
+                ctx,
+                "Qual foi a forma recebida?",
+            )
+        return RegistrarPagamentoEntregaContentor(ctx, form)
+
+    def decide_entrega_forma_outro(self, conversa, message):
+        """Valida e limita a forma livre sem executar persistencia financeira."""
+        raw = (message.texto or "").strip()
+        if not raw:
+            return "Informe a forma recebida."
+        return RegistrarPagamentoEntregaContentor(
+            dict(conversa.contexto_json or {}),
+            raw[:80],
+        )

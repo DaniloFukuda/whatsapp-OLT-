@@ -1,13 +1,14 @@
 """Contrato do seam entre WhatsappRouterAgent e PedidoV24Agent."""
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
 from app.agents.pedido_v24.contentor import (
     ConfirmEntregaContentor,
     ContentorOperationalAgent,
+    RegistrarPagamentoEntregaContentor,
 )
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.router import PedidoV24OperationalRouter
@@ -1335,33 +1336,179 @@ def test_pagou_carrinha_ou_indeterminado_permanece_legado(modality):
 
 
 @pytest.mark.parametrize(
-    "estado",
+    "entrada,forma",
     [
-        "v24_entrega_forma",
-        "v24_entrega_forma_outro",
+        ("1", "MBWay"),
+        ("mbway", "MBWay"),
+        ("2", "Transferência"),
+        ("transferência", "Transferência"),
+        ("3", "Dinheiro"),
+        ("dinheiro", "Dinheiro"),
     ],
 )
-def test_estados_posteriores_a_referencia_opcao_continuam_no_legado(
-    db_session, estado
-):
-    backend = PedidoV24Agent(db_session)
-    backend.handle = Mock(return_value="legado-seguinte")
+def test_contentor_decide_formas_diretas_sem_acessar_backend(entrada, forma):
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    conversa = SimpleNamespace(contexto_json={"pedido_id": 17})
+
+    decision = agent.decide_entrega_forma(conversa, mensagem(entrada))
+
+    assert decision == RegistrarPagamentoEntregaContentor(
+        {"pedido_id": 17}, forma
+    )
+    backend.assert_not_called()
+    assert not hasattr(agent, "service")
+
+
+@pytest.mark.parametrize("entrada", ["4", "outro"])
+def test_contentor_forma_outro_avanca_para_texto_livre(entrada):
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    decision = agent.decide_entrega_forma(
+        SimpleNamespace(contexto_json={"pedido_id": 17}),
+        mensagem(entrada),
+    )
+
+    assert isinstance(decision, AdvanceTransition)
+    assert decision.next_state == "v24_entrega_forma_outro"
+    assert decision.response == "Qual foi a forma recebida?"
+
+
+def test_contentor_forma_invalida_preserva_resposta_e_estado():
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_forma", contexto_json={"pedido_id": 17}
+    )
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+
+    assert agent.decide_entrega_forma(conversa, mensagem("bitcoin")) == (
+        "Selecione uma forma de pagamento."
+    )
+    assert conversa.estado_atual == "v24_entrega_forma"
+
+
+def test_contentor_forma_outro_preserva_strip_e_limite_de_80():
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+    conversa = SimpleNamespace(contexto_json={"pedido_id": 17})
+    texto = "  " + "x" * 81 + "  "
+
+    decision = agent.decide_entrega_forma_outro(conversa, mensagem(texto))
+
+    assert decision == RegistrarPagamentoEntregaContentor(
+        {"pedido_id": 17}, "x" * 80
+    )
+
+
+def test_contentor_forma_outro_vazia_preserva_resposta_e_estado():
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_forma_outro",
+        contexto_json={"pedido_id": 17},
+    )
+    agent = ContentorOperationalAgent(lambda: [], Mock())
+
+    assert agent.decide_entrega_forma_outro(conversa, mensagem("   ")) == (
+        "Informe a forma recebida."
+    )
+    assert conversa.estado_atual == "v24_entrega_forma_outro"
+
+
+@pytest.mark.parametrize(
+    "estado,method_name",
+    [
+        ("v24_entrega_forma", "decide_entrega_forma"),
+        ("v24_entrega_forma_outro", "decide_entrega_forma_outro"),
+    ],
+)
+def test_forma_contentor_comprovado_usa_modulo_e_boundary(estado, method_name):
+    backend = Mock()
+    backend.resolve_entrega_pagamento_modality.return_value = TipoEquipamentoPedido.CONTENTOR
+    backend.registrar_pagamento_entrega_contentor.return_value = "registrado"
     router = PedidoV24OperationalRouter(backend=backend)
     router._contentor = Mock()
-    conversa = SimpleNamespace(
-        estado_atual=estado,
-        contexto_json={
-            "pedido_id": 17,
-            "operational_options": [
-                {"pedido_id": 17, "tipos_equipamento": ["CONTENTOR"]},
-            ],
-        },
+    decision = RegistrarPagamentoEntregaContentor({"pedido_id": 17}, "Dinheiro")
+    getattr(router._contentor, method_name).return_value = decision
+    conversa = SimpleNamespace(estado_atual=estado, contexto_json={"pedido_id": 17})
+    entrada = mensagem("3")
+
+    assert router.handle(conversa, entrada) == "registrado"
+    getattr(router._contentor, method_name).assert_called_once_with(conversa, entrada)
+    backend.registrar_pagamento_entrega_contentor.assert_called_once_with(
+        conversa, {"pedido_id": 17}, "Dinheiro"
     )
+    backend.handle.assert_not_called()
+
+
+@pytest.mark.parametrize("modality", [TipoEquipamentoPedido.CARRINHA, None])
+@pytest.mark.parametrize("estado", ["v24_entrega_forma", "v24_entrega_forma_outro"])
+def test_formas_carrinha_misto_ou_indeterminado_permanecem_legado(
+    modality, estado
+):
+    backend = Mock()
+    backend.resolve_entrega_pagamento_modality.return_value = modality
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(estado_atual=estado, contexto_json={"pedido_id": 17})
     entrada = mensagem("1")
 
-    assert router.handle(conversa, entrada) == "legado-seguinte"
+    assert router.handle(conversa, entrada) == "legado"
     backend.handle.assert_called_once_with(conversa, entrada)
-    router._contentor.assert_not_called()
+    router._contentor.decide_entrega_forma.assert_not_called()
+    router._contentor.decide_entrega_forma_outro.assert_not_called()
+
+
+def test_boundary_pagamento_contentor_preserva_registro_e_commit_do_idle():
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.service = Mock()
+    backend.db = Mock()
+    calls = Mock()
+    backend.db.commit = calls.commit
+    pedido = SimpleNamespace(status_pagamento="PENDENTE", forma_pagamento=None)
+
+    def registrar(pedido_id, forma):
+        pedido.status_pagamento = "PAGO"
+        pedido.forma_pagamento = forma
+        calls.commit()
+
+    backend.service.registrar_pagamento = calls.registrar_pagamento
+    calls.registrar_pagamento.side_effect = registrar
+    backend.resolve_entrega_pagamento_modality = Mock(
+        return_value=TipoEquipamentoPedido.CONTENTOR
+    )
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_forma", contexto_json={"pedido_id": 17}
+    )
+
+    response = backend.registrar_pagamento_entrega_contentor(
+        conversa, {"pedido_id": 17}, "MBWay"
+    )
+
+    backend.service.registrar_pagamento.assert_called_once_with(17, "MBWay")
+    assert calls.mock_calls == [
+        call.registrar_pagamento(17, "MBWay"),
+        call.commit(),
+        call.commit(),
+    ]
+    assert pedido.status_pagamento == "PAGO"
+    assert pedido.forma_pagamento == "MBWay"
+    assert conversa.estado_atual == "idle"
+    assert conversa.contexto_json == {}
+    assert response == (
+        "✅ Entrega confirmada com sucesso para todos os ativos processados. Pagamento registrado."
+    )
+
+
+def test_boundary_pagamento_contentor_recusa_modalidade_nao_comprovada():
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.service = Mock()
+    backend.db = Mock()
+    backend.resolve_entrega_pagamento_modality = Mock(return_value=None)
+
+    with pytest.raises(ValueError, match="aceita apenas contentores"):
+        backend.registrar_pagamento_entrega_contentor(
+            SimpleNamespace(), {"pedido_id": 17}, "MBWay"
+        )
+
+    backend.service.registrar_pagamento.assert_not_called()
+    backend.db.commit.assert_not_called()
 
 
 def test_excecao_do_backend_nao_e_convertida():

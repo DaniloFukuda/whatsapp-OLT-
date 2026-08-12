@@ -1443,6 +1443,19 @@ class PedidoV24Agent:
             return TipoEquipamentoPedido.CARRINHA
         return None
 
+    def registrar_pagamento_entrega_contentor(self, conversa, ctx, forma):
+        """Persiste o pagamento de Contentor mantendo os dois commits legados."""
+        if (
+            self.resolve_entrega_pagamento_modality(ctx)
+            is not TipoEquipamentoPedido.CONTENTOR
+        ):
+            raise ValueError("Esta operação aceita apenas contentores.")
+        self.service.registrar_pagamento(ctx["pedido_id"], forma)
+        return self._idle(
+            conversa,
+            "✅ Entrega confirmada com sucesso para todos os ativos processados. Pagamento registrado.",
+        )
+
     def _confirmar_entrega_preparada(self, conversa, ctx, expected_tipo=None):
         try:
             if (
