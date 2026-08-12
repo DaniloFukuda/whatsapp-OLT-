@@ -284,3 +284,20 @@ class ContentorOperationalAgent:
             dict(conversa.contexto_json or {}),
             raw[:80],
         )
+
+    def decide_recolha_ativo(self, conversa, selection):
+        """Prepara a recolha do Contentor selecionado sem acessar persistencia."""
+        ctx = dict(conversa.contexto_json or {})
+        ctx.update(
+            {
+                "contentor_id": selection["contentor_id"],
+                "fotos_recolha": [],
+                "avariado": None,
+                "relato_avaria": None,
+            }
+        )
+        return AdvanceTransition(
+            "v24_recolha_foto",
+            ctx,
+            selection["foto_prompt"],
+        )

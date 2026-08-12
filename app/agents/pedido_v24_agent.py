@@ -1295,6 +1295,34 @@ class PedidoV24Agent:
     def _selected_recolha_contentor_id(self, raw, ctx) -> int | None:
         return self._selected_id(raw, ctx.get("contentores") or [])
 
+    def resolve_recolha_ativo_selection(self, message, ctx):
+        """Resolve e comprova a selecao de recolha sem alterar estado ou banco."""
+        if not isinstance(ctx, Mapping):
+            return None
+        raw = (message.texto or "").strip()
+        choice = self._norm(raw)
+        if self._is_recolha_terminar(message, choice, ctx):
+            return None
+        contentor_id = self._selected_recolha_contentor_id(raw, ctx)
+        pedido_id = ctx.get("pedido_id")
+        if contentor_id is None or not isinstance(pedido_id, int):
+            return None
+        contentor = self.db.get(PedidoContentor, contentor_id)
+        if not self._is_recolha_pendente_do_pedido(contentor, pedido_id):
+            return None
+        tipos = {
+            TipoEquipamentoPedido.CONTENTOR.value: TipoEquipamentoPedido.CONTENTOR,
+            TipoEquipamentoPedido.CARRINHA.value: TipoEquipamentoPedido.CARRINHA,
+        }
+        modality = tipos.get(contentor.tipo_equipamento)
+        if modality is None:
+            return None
+        return {
+            "contentor_id": contentor.id,
+            "modality": modality,
+            "foto_prompt": self._recolha_foto_prompt_for(contentor),
+        }
+
     def _is_recolha_terminar(self, message, choice, ctx) -> bool:
         if choice in {"terminar", "terminar recolhas deste cliente", "🏁 terminar recolhas deste cliente"}:
             return True
@@ -1324,6 +1352,9 @@ class PedidoV24Agent:
 
     def _recolha_foto_prompt(self, ctx) -> str:
         contentor = self.db.get(PedidoContentor, ctx["contentor_id"])
+        return self._recolha_foto_prompt_for(contentor)
+
+    def _recolha_foto_prompt_for(self, contentor) -> str:
         label = self._equipamento_label(contentor) if contentor else "equipamento"
         return f"Envie a foto de recolha do {label} cheio antes do icamento."
 

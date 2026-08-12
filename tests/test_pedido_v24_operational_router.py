@@ -1511,6 +1511,204 @@ def test_boundary_pagamento_contentor_recusa_modalidade_nao_comprovada():
     backend.db.commit.assert_not_called()
 
 
+def test_contentor_decide_selecao_recolha_sem_banco_ou_service():
+    backend = Mock()
+    agent = ContentorOperationalAgent(lambda: [], backend)
+    contexto = {"pedido_id": 9, "contentores": [17], "recolhas": []}
+    conversa = SimpleNamespace(contexto_json=contexto)
+    selection = {
+        "contentor_id": 17,
+        "modality": TipoEquipamentoPedido.CONTENTOR,
+        "foto_prompt": "Envie a foto de recolha do 📦 Contentor 42 cheio antes do icamento.",
+    }
+
+    decision = agent.decide_recolha_ativo(conversa, selection)
+
+    assert decision == AdvanceTransition(
+        "v24_recolha_foto",
+        {
+            "pedido_id": 9,
+            "contentores": [17],
+            "recolhas": [],
+            "contentor_id": 17,
+            "fotos_recolha": [],
+            "avariado": None,
+            "relato_avaria": None,
+        },
+        selection["foto_prompt"],
+    )
+    assert contexto == {"pedido_id": 9, "contentores": [17], "recolhas": []}
+    backend.assert_not_called()
+    assert not hasattr(agent, "service")
+
+
+def test_adapter_recolha_comprova_contentor_vinculado_e_pendente_sem_escrita():
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    item = SimpleNamespace(
+        id=17,
+        pedido_id=9,
+        tipo_equipamento="CONTENTOR",
+        status_entrega="ENTREGUE",
+        status_recolha="PENDENTE",
+        numero_adesivo_contentor="42",
+        horario_agendado=None,
+        frota_carrinha=None,
+    )
+    backend.db = Mock()
+    backend.db.get.return_value = item
+    contexto = {
+        "pedido_id": 9,
+        "contentores": [17],
+        "terminar_indice": 2,
+    }
+
+    selection = backend.resolve_recolha_ativo_selection(mensagem("1"), contexto)
+
+    assert selection == {
+        "contentor_id": 17,
+        "modality": TipoEquipamentoPedido.CONTENTOR,
+        "foto_prompt": "Envie a foto de recolha do 📦 Contentor 42 cheio antes do icamento.",
+    }
+    assert contexto == {
+        "pedido_id": 9,
+        "contentores": [17],
+        "terminar_indice": 2,
+    }
+    backend.db.get.assert_called_once()
+    backend.db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        None,
+        SimpleNamespace(
+            id=17,
+            pedido_id=10,
+            tipo_equipamento="CONTENTOR",
+            status_entrega="ENTREGUE",
+            status_recolha="PENDENTE",
+        ),
+        SimpleNamespace(
+            id=17,
+            pedido_id=9,
+            tipo_equipamento="DESCONHECIDO",
+            status_entrega="ENTREGUE",
+            status_recolha="PENDENTE",
+        ),
+    ],
+)
+def test_adapter_recolha_recusa_desaparecido_desvinculado_ou_indeterminado(item):
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.db = Mock()
+    backend.db.get.return_value = item
+
+    assert backend.resolve_recolha_ativo_selection(
+        mensagem("1"),
+        {"pedido_id": 9, "contentores": [17], "terminar_indice": 2},
+    ) is None
+    backend.db.commit.assert_not_called()
+
+
+def test_recolha_ativo_contentor_comprovado_usa_modulo(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    selection = {
+        "contentor_id": 17,
+        "modality": TipoEquipamentoPedido.CONTENTOR,
+        "foto_prompt": "prompt",
+    }
+    backend.resolve_recolha_ativo_selection.return_value = selection
+    backend.apply_operational_transition.return_value = "aplicada"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    decision = AdvanceTransition("v24_recolha_foto", {"contentor_id": 17}, "prompt")
+    router._contentor.decide_recolha_ativo.return_value = decision
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_ativo",
+        contexto_json={"pedido_id": 9, "contentores": [17]},
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "aplicada"
+    router._contentor.decide_recolha_ativo.assert_called_once_with(
+        conversa, selection
+    )
+    backend.apply_operational_transition.assert_called_once_with(conversa, decision)
+    backend.handle.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        None,
+        {"contentor_id": 17, "modality": TipoEquipamentoPedido.CARRINHA, "foto_prompt": "prompt"},
+    ],
+)
+def test_recolha_ativo_invalido_ou_carrinha_permanece_legado(
+    monkeypatch, selection
+):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.resolve_recolha_ativo_selection.return_value = selection
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_ativo", contexto_json={"pedido_id": 9}
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "legado"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_recolha_ativo.assert_not_called()
+
+
+def test_recolha_ativo_terminar_permanece_legado(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.resolve_recolha_ativo_selection.return_value = None
+    backend.handle.return_value = "encerrada-legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_ativo", contexto_json={"pedido_id": 9}
+    )
+    entrada = mensagem("Terminar")
+
+    assert router.handle(conversa, entrada) == "encerrada-legado"
+    backend.handle.assert_called_once_with(conversa, entrada)
+    router._contentor.decide_recolha_ativo.assert_not_called()
+
+
+def test_recolha_ativo_contentor_off_nao_consulta_adapter(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=False),
+    )
+    backend = Mock()
+    backend.handle.return_value = "bloqueada-legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    router._contentor = Mock()
+    conversa = SimpleNamespace(
+        estado_atual="v24_recolha_ativo", contexto_json={"pedido_id": 9}
+    )
+    entrada = mensagem("1")
+
+    assert router.handle(conversa, entrada) == "bloqueada-legado"
+    backend.resolve_recolha_ativo_selection.assert_not_called()
+    router._contentor.decide_recolha_ativo.assert_not_called()
+
+
 def test_excecao_do_backend_nao_e_convertida():
     backend = Mock()
     backend.start_cadastro.side_effect = RuntimeError("erro original")
