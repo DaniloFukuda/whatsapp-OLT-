@@ -1098,16 +1098,20 @@ class PedidoV24Agent:
         contentor = self.db.get(PedidoContentor, contentor_id)
         if not self._is_despejo_pendente_do_pedido(contentor, pedido_id):
             return None
-        if contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:
-            if not get_settings().feature_carrinhas_enabled:
-                return None
-            return {
-                "contentor_id": contentor.id,
-                "modality": TipoEquipamentoPedido.CARRINHA,
-            }
-        if contentor.tipo_equipamento != TipoEquipamentoPedido.CONTENTOR.value:
+        tipos = {
+            TipoEquipamentoPedido.CONTENTOR.value: TipoEquipamentoPedido.CONTENTOR,
+            TipoEquipamentoPedido.CARRINHA.value: TipoEquipamentoPedido.CARRINHA,
+        }
+        modality = tipos.get(contentor.tipo_equipamento)
+        if modality is None:
             return None
-        if not get_settings().feature_contentores_enabled:
+        if (
+            modality is TipoEquipamentoPedido.CONTENTOR
+            and not get_settings().feature_contentores_enabled
+        ) or (
+            modality is TipoEquipamentoPedido.CARRINHA
+            and not get_settings().feature_carrinhas_enabled
+        ):
             return None
 
         prepared_context = dict(ctx)
@@ -1128,7 +1132,82 @@ class PedidoV24Agent:
             return None
         return {
             "contentor_id": contentor.id,
-            "modality": TipoEquipamentoPedido.CONTENTOR,
+            "modality": modality,
+            "context_updates": {
+                key: value
+                for key, value in transition.context.items()
+                if key not in ctx or ctx.get(key) != value
+            },
+            "next_state": transition.next_state,
+            "response": transition.response,
+        }
+
+    def resolve_despejo_carrinha_selection(self, message, ctx):
+        """Resolve pedido Carrinha elegível para Despejo sem alterar estado."""
+        if not isinstance(ctx, Mapping):
+            return None
+        raw = (message.texto or "").strip()
+        pedido_id = self._selected_id(raw, ctx.get("ids", []))
+        if pedido_id is None:
+            return None
+        pedido = self.db.get(Pedido, pedido_id)
+        if not pedido:
+            return {
+                "pedido_id": pedido_id,
+                "pedido_exists": False,
+                "carrinha_ids": (),
+                "selection_context": {},
+                "prompt": "",
+            }
+        pendentes = self._despejo_pendentes(pedido)
+        tipos = {item.tipo_equipamento for item in pendentes}
+        if tipos != {TipoEquipamentoPedido.CARRINHA.value}:
+            return None
+        context_snapshot = {}
+        prompt = self._despejo_selecao_prompt(context_snapshot, pendentes)
+        return {
+            "pedido_id": pedido.id,
+            "pedido_exists": True,
+            "carrinha_ids": tuple(item.id for item in pendentes),
+            "selection_context": context_snapshot,
+            "prompt": prompt,
+        }
+
+    def resolve_despejo_carrinha_ativo_selection(self, message, ctx):
+        """Prepara apenas o ativo Carrinha elegível, sem persistir alterações."""
+        if not isinstance(ctx, Mapping):
+            return None
+        raw = (message.texto or "").strip()
+        choice = self._norm(raw)
+        if self._is_despejo_terminar(message, choice, ctx):
+            return None
+        contentor_id = self._selected_despejo_contentor_id(raw, ctx)
+        pedido_id = ctx.get("pedido_id")
+        if contentor_id is None or not isinstance(pedido_id, int):
+            return None
+        contentor = self.db.get(PedidoContentor, contentor_id)
+        if (
+            not self._is_despejo_pendente_do_pedido(contentor, pedido_id)
+            or contentor.tipo_equipamento != TipoEquipamentoPedido.CARRINHA.value
+        ):
+            return None
+        prepared_context = dict(ctx)
+        prepared_context.update({
+            "contentor_id": contentor.id,
+            "fotos_despejo": [],
+            "residuo_contratado": contentor.residuo_contratado,
+            "residuo_efetivo": None,
+            "residuo_assumido": None,
+            "carga_errada": None,
+            "relato_carga": None,
+        })
+        try:
+            transition = self._prepare_despejo_decisao_residuo(prepared_context)
+        except ValueError:
+            return None
+        return {
+            "contentor_id": contentor.id,
+            "modality": TipoEquipamentoPedido.CARRINHA,
             "context_updates": {
                 key: value
                 for key, value in transition.context.items()
@@ -1188,6 +1267,14 @@ class PedidoV24Agent:
             is not TipoEquipamentoPedido.CONTENTOR
         ):
             raise ValueError("Esta operação aceita apenas contentores.")
+        return self._confirmar_despejo_atual(conversa, ctx)
+
+    def confirmar_despejo_carrinha(self, conversa, ctx):
+        """Recomprova o Despejo Carrinha e delega ao fluxo persistente existente."""
+        if conversa.estado_atual != "v24_despejo_confirmacao":
+            return None
+        if self.resolve_despejo_context_modality(ctx) is not TipoEquipamentoPedido.CARRINHA:
+            return None
         return self._confirmar_despejo_atual(conversa, ctx)
 
     def despejo_confirmacao_prompt(self, ctx):

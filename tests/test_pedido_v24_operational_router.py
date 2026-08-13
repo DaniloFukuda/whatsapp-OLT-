@@ -33,10 +33,13 @@ from app.agents.pedido_v24.carrinha_cadastro import (
     classify_carrinha_cadastro,
 )
 from app.agents.pedido_v24.carrinha import (
+    ConfirmarDespejoCarrinha,
     ConfirmarPartidaCarrinha,
     CarrinhaOperationalAgent,
     ConfirmarChegadaCarrinha,
+    PrepararConfirmacaoDespejoCarrinha,
     PrepararConfirmacaoPartidaCarrinha,
+    PrepararFotoDespejoCarrinha,
 )
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.router import PedidoV24OperationalRouter
@@ -4311,6 +4314,155 @@ def test_boundary_partida_carrinha_recomprova_e_delega_uma_vez(db_session):
     ctx = {"pedido_id": 17, "contentor_id": 5}
     assert backend.confirmar_partida_carrinha(conversa, ctx) == "partida"
     backend._confirmar_recolha_atual.assert_called_once_with(conversa, ctx)
+
+
+def test_adapter_despejo_carrinha_comprova_status_vinculo_e_prepara_cotas(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24_agent.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True, feature_carrinhas_enabled=True),
+    )
+    item = _item_despejo(
+        tipo_equipamento="CARRINHA",
+        status_recolha="PENDENTE",
+        status_ciclo="EM_ANDAMENTO",
+        status_operacional_carrinha="AGUARDANDO_DESPEJO",
+    )
+    cotas = {"Entulho Limpo": {"saldo": 1}, "Entulho Misto": {"saldo": 1}}
+    backend = _despejo_backend(item, cotas)
+    contexto = {"pedido_id": 9, "contentores": [17], "terminar_indice": 2, "despejos": []}
+
+    selection = backend.resolve_despejo_carrinha_ativo_selection(mensagem("1"), contexto)
+
+    assert selection["modality"] is TipoEquipamentoPedido.CARRINHA
+    assert selection["next_state"] == "v24_despejo_residuo"
+    assert selection["context_updates"]["saldo_cotas_visualizado"] == {"limpo": 1, "misto": 1}
+    assert selection["context_updates"]["fotos_despejo"] == []
+    assert contexto == {"pedido_id": 9, "contentores": [17], "terminar_indice": 2, "despejos": []}
+    backend.db.commit.assert_not_called()
+
+
+def test_despejo_pedido_carrinha_moderno_usa_adapter_e_agente(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_carrinhas_enabled=True, feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.resolve_despejo_carrinha_selection.return_value = {
+        "pedido_id": 9,
+        "pedido_exists": True,
+        "carrinha_ids": (17,),
+        "selection_context": {"contentores": [17], "terminar_indice": 2},
+        "prompt": "Selecione a carrinha.",
+    }
+    backend.apply_operational_transition.return_value = "aplicada"
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(estado_atual="v24_despejo_pedido", contexto_json={"ids": [9]})
+
+    assert router.handle(conversa, mensagem("1")) == "aplicada"
+    backend.resolve_despejo_carrinha_selection.assert_called_once_with(mensagem("1"), {"ids": [9]})
+    transition = backend.apply_operational_transition.call_args.args[1]
+    assert transition == AdvanceTransition(
+        "v24_despejo_ativo",
+        {"ids": [9], "pedido_id": 9, "despejos": [], "contentores": [17], "terminar_indice": 2},
+        "Selecione a carrinha.",
+    )
+    backend.handle.assert_not_called()
+
+
+def test_carrinha_despejo_decisoes_preservam_residuo_relato_foto_e_comando():
+    agent = CarrinhaOperationalAgent()
+    contexto = _contexto_despejo_moderno()
+    conversa = SimpleNamespace(contexto_json=contexto)
+
+    residuo = agent.decide_despejo_residuo(conversa, mensagem("1"))
+    assert isinstance(residuo, PrepararFotoDespejoCarrinha)
+    assert residuo.context["residuo_efetivo"] == "Entulho Limpo"
+    divergencia = agent.decide_despejo_conformidade(conversa, mensagem("2"))
+    assert divergencia.next_state == "v24_despejo_relato"
+    assert agent.decide_despejo_relato(conversa, mensagem(" curto ")) == "O relato da carga precisa ter pelo menos 10 caracteres."
+    relato = agent.decide_despejo_relato(conversa, mensagem("  material divergente  "))
+    assert relato.context["relato_carga"] == "material divergente"
+    foto = agent.decide_despejo_foto(conversa, _mensagem_imagem("foto-1"))
+    foto_duplicada = agent.decide_despejo_foto(SimpleNamespace(contexto_json=foto.context), _mensagem_imagem("foto-1"))
+    assert foto_duplicada.context["fotos_despejo"] == ["foto-1"]
+    preparar = agent.decide_despejo_foto_acao(SimpleNamespace(contexto_json=foto.context), mensagem("2"))
+    assert isinstance(preparar, PrepararConfirmacaoDespejoCarrinha)
+    comando = agent.decide_despejo_confirmacao(SimpleNamespace(contexto_json=foto.context), mensagem("confirmar"))
+    assert isinstance(comando, ConfirmarDespejoCarrinha)
+
+
+def test_despejo_carrinha_moderno_usa_agente_e_router(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_carrinhas_enabled=True, feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.resolve_despejo_carrinha_ativo_selection.return_value = {
+        "contentor_id": 17,
+        "modality": TipoEquipamentoPedido.CARRINHA,
+        "context_updates": {"contentor_id": 17, "fotos_despejo": []},
+        "next_state": "v24_despejo_residuo",
+        "response": "prompt",
+    }
+    backend.apply_operational_transition.return_value = "aplicada"
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(
+        estado_atual="v24_despejo_ativo",
+        contexto_json={"pedido_id": 9, "contentores": [17]},
+    )
+
+    assert router.handle(conversa, mensagem("1")) == "aplicada"
+    backend.handle.assert_not_called()
+    transition = backend.apply_operational_transition.call_args.args[1]
+    assert transition.next_state == "v24_despejo_residuo"
+
+
+def test_despejo_carrinha_confirmacao_usa_boundary_especifico(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_carrinhas_enabled=True, feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.despejo_context_is_modern.return_value = True
+    backend.resolve_despejo_context_modality.return_value = TipoEquipamentoPedido.CARRINHA
+    backend.confirmar_despejo_carrinha.return_value = "confirmada"
+    router = PedidoV24OperationalRouter(backend=backend)
+    contexto = _contexto_despejo_moderno(fotos_despejo=["foto"])
+    conversa = SimpleNamespace(estado_atual="v24_despejo_confirmacao", contexto_json=contexto)
+
+    assert router.handle(conversa, mensagem("1")) == "confirmada"
+    backend.confirmar_despejo_carrinha.assert_called_once_with(conversa, contexto)
+    backend.confirm_despejo_contentor.assert_not_called()
+    backend.handle.assert_not_called()
+
+
+def test_boundary_despejo_carrinha_recomprova_estado_modalidade_e_delega_uma_vez():
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.resolve_despejo_context_modality = Mock(return_value=TipoEquipamentoPedido.CARRINHA)
+    backend._confirmar_despejo_atual = Mock(return_value="confirmada")
+    conversa = SimpleNamespace(estado_atual="v24_despejo_confirmacao")
+    contexto = _contexto_despejo_moderno(fotos_despejo=["foto"])
+
+    assert backend.confirmar_despejo_carrinha(conversa, contexto) == "confirmada"
+    backend._confirmar_despejo_atual.assert_called_once_with(conversa, contexto)
+    conversa.estado_atual = "v24_despejo_foto"
+    assert backend.confirmar_despejo_carrinha(conversa, contexto) is None
+    assert backend._confirmar_despejo_atual.call_count == 1
+
+
+def test_despejo_carrinha_historico_incompleto_permanece_legado(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_carrinhas_enabled=True, feature_contentores_enabled=True),
+    )
+    backend = Mock()
+    backend.despejo_context_is_modern.return_value = False
+    backend.handle.return_value = "legado"
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(estado_atual="v24_despejo_confirmacao", contexto_json={"contentor_id": 17})
+
+    assert router.handle(conversa, mensagem("1")) == "legado"
+    backend.resolve_despejo_context_modality.assert_not_called()
 
 
 @pytest.fixture

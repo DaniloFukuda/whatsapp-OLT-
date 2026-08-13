@@ -32,8 +32,12 @@ from app.agents.pedido_v24.carrinha import (
     CancelarPartidaCarrinha,
     CarrinhaOperationalAgent,
     ConfirmarChegadaCarrinha,
+    ConfirmarDespejoCarrinha,
     ConfirmarPartidaCarrinha,
+    PrepararConfirmacaoDespejoCarrinha,
     PrepararConfirmacaoPartidaCarrinha,
+    PrepararConformidadeDespejoCarrinha,
+    PrepararFotoDespejoCarrinha,
 )
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
@@ -114,6 +118,9 @@ class PedidoV24OperationalRouter:
         if carrinha_response is not None:
             return carrinha_response
         carrinha_response = self._handle_carrinha_partida(conversa, message)
+        if carrinha_response is not None:
+            return carrinha_response
+        carrinha_response = self._handle_carrinha_despejo(conversa, message)
         if carrinha_response is not None:
             return carrinha_response
         cadastro_decisions = {
@@ -1037,6 +1044,72 @@ class PedidoV24OperationalRouter:
                 "v24_recolha_confirmacao", decision.context,
                 decision.response_prefix + self._backend.recolha_confirmacao_prompt(decision.context),
             )
+        if isinstance(decision, (AdvanceTransition, IdleTransition)):
+            return self._backend.apply_operational_transition(conversa, decision)
+        return decision
+
+    def _handle_carrinha_despejo(self, conversa, message):
+        state = getattr(conversa, "estado_atual", None)
+        states = {
+            "v24_despejo_pedido", "v24_despejo_ativo", "v24_despejo_residuo",
+            "v24_despejo_conformidade", "v24_despejo_relato", "v24_despejo_foto",
+            "v24_despejo_foto_acao", "v24_despejo_confirmacao",
+        }
+        if state not in states or not getattr(get_settings(), "feature_carrinhas_enabled", False):
+            return None
+        ctx = getattr(conversa, "contexto_json", None) or {}
+        if state == "v24_despejo_pedido":
+            if not isinstance(ctx.get("ids"), list):
+                return None
+            selection = self._backend.resolve_despejo_carrinha_selection(message, ctx)
+            if selection is None:
+                return None
+            decision = self._carrinha.select_despejo_pedido(conversa, selection)
+        elif state == "v24_despejo_ativo":
+            if not isinstance(ctx.get("pedido_id"), int) or not ctx.get("contentores"):
+                return None
+            selection = self._backend.resolve_despejo_carrinha_ativo_selection(message, ctx)
+            if selection is None or selection["modality"] is not TipoEquipamentoPedido.CARRINHA:
+                return None
+            decision = self._carrinha.select_despejo_ativo(conversa, selection)
+        else:
+            if state in {"v24_despejo_residuo", "v24_despejo_conformidade", "v24_despejo_relato", "v24_despejo_confirmacao"}:
+                if not self._backend.despejo_context_is_modern(ctx, state):
+                    return None
+            elif not (
+                isinstance(ctx.get("pedido_id"), int)
+                and isinstance(ctx.get("contentor_id"), int)
+                and isinstance(ctx.get("fotos_despejo"), list)
+            ):
+                return None
+            if self._backend.resolve_despejo_context_modality(ctx) is not TipoEquipamentoPedido.CARRINHA:
+                return None
+            decide = {
+                "v24_despejo_residuo": self._carrinha.decide_despejo_residuo,
+                "v24_despejo_conformidade": self._carrinha.decide_despejo_conformidade,
+                "v24_despejo_relato": self._carrinha.decide_despejo_relato,
+                "v24_despejo_foto": self._carrinha.decide_despejo_foto,
+                "v24_despejo_foto_acao": self._carrinha.decide_despejo_foto_acao,
+                "v24_despejo_confirmacao": self._carrinha.decide_despejo_confirmacao,
+            }[state]
+            decision = decide(conversa, message)
+            if isinstance(decision, ConfirmarDespejoCarrinha):
+                return self._backend.confirmar_despejo_carrinha(conversa, decision.context)
+            if isinstance(decision, PrepararFotoDespejoCarrinha):
+                decision = AdvanceTransition(
+                    "v24_despejo_foto", decision.context,
+                    self._backend.despejo_foto_prompt(decision.context),
+                )
+            elif isinstance(decision, PrepararConfirmacaoDespejoCarrinha):
+                decision = AdvanceTransition(
+                    "v24_despejo_confirmacao", decision.context,
+                    self._backend.despejo_confirmacao_prompt(decision.context),
+                )
+            elif isinstance(decision, PrepararConformidadeDespejoCarrinha):
+                decision = AdvanceTransition(
+                    "v24_despejo_conformidade", decision.context,
+                    self._backend.despejo_conformidade_prompt(decision.context),
+                )
         if isinstance(decision, (AdvanceTransition, IdleTransition)):
             return self._backend.apply_operational_transition(conversa, decision)
         return decision

@@ -29,6 +29,26 @@ class PrepararConfirmacaoPartidaCarrinha:
     response_prefix: str = ""
 
 
+@dataclass(frozen=True)
+class ConfirmarDespejoCarrinha:
+    context: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PrepararFotoDespejoCarrinha:
+    context: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PrepararConfirmacaoDespejoCarrinha:
+    context: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PrepararConformidadeDespejoCarrinha:
+    context: dict[str, Any]
+
+
 class CarrinhaOperationalAgent:
     """Decide a Chegada de Carrinha sem acessar infraestrutura persistente."""
 
@@ -233,6 +253,105 @@ class CarrinhaOperationalAgent:
             ctx,
             "A funcionalidade de avarias não está disponível nesta empresa. O subfluxo foi cancelado com segurança.\n\n",
         )
+
+    def select_despejo_pedido(self, conversa, selection):
+        if selection is None or not selection["pedido_exists"]:
+            return "Selecione um pedido da lista."
+        if not selection["carrinha_ids"]:
+            return IdleTransition("Esse pedido ja nao possui ativos pendentes de despejo.")
+        ctx = dict(conversa.contexto_json or {})
+        ctx.update({"pedido_id": selection["pedido_id"], "despejos": []})
+        ctx.update(selection["selection_context"])
+        return AdvanceTransition("v24_despejo_ativo", ctx, selection["prompt"])
+
+    def select_despejo_ativo(self, conversa, selection):
+        if selection is None:
+            return None
+        ctx = dict(conversa.contexto_json or {})
+        ctx.update(selection["context_updates"])
+        return AdvanceTransition(selection["next_state"], ctx, selection["response"])
+
+    def decide_despejo_residuo(self, conversa, message):
+        ctx = dict(conversa.contexto_json or {})
+        choice = self._normalize((message.texto or "").strip())
+        available = ctx.get("residuos_disponiveis") or []
+        residue = None
+        if choice == "despejo_residuo:limpo":
+            residue = "Entulho Limpo"
+        elif choice == "despejo_residuo:misto":
+            residue = "Entulho Misto"
+        if choice.isdigit() and 1 <= int(choice) <= len(available):
+            residue = available[int(choice) - 1]
+        if not residue:
+            residue = next((item for item in available if self._normalize(item) == choice), None)
+        if not residue:
+            return "Selecione um tipo de resíduo com cota em aberto."
+        ctx.update({"residuo_efetivo": residue, "carga_errada": False, "relato_carga": None})
+        return PrepararFotoDespejoCarrinha(ctx)
+
+    def decide_despejo_conformidade(self, conversa, message):
+        ctx = dict(conversa.contexto_json or {})
+        choice = self._normalize(message.texto)
+        if choice == "despejo_conformidade:sim":
+            choice = "1"
+        elif choice == "despejo_conformidade:nao":
+            choice = "2"
+        if choice in {"1", "sim", "sim, corresponde", "✅ sim, corresponde", "sim, tudo certo", "✅ sim, tudo certo"}:
+            ctx.update({
+                "residuo_efetivo": ctx.get("residuo_assumido") or ctx["residuo_contratado"],
+                "carga_errada": False,
+                "relato_carga": None,
+            })
+            return PrepararFotoDespejoCarrinha(ctx)
+        if choice in {"2", "nao", "nao, existe divergencia", "❌ nao, existe divergencia", "nao, esta misturado/errado", "🚨 nao, esta misturado/errado"}:
+            ctx["carga_errada"] = True
+            return AdvanceTransition("v24_despejo_relato", ctx, "Descreva a divergencia com pelo menos 10 caracteres.")
+        return "Selecione se o material corresponde ao residuo contratado."
+
+    def decide_despejo_relato(self, conversa, message):
+        ctx = dict(conversa.contexto_json or {})
+        relato = (message.texto or "").strip()
+        if len(relato) < 10:
+            return "O relato da carga precisa ter pelo menos 10 caracteres."
+        ctx.update({
+            "relato_carga": relato,
+            "carga_errada": True,
+            "residuo_efetivo": ctx.get("residuo_efetivo") or ctx.get("residuo_assumido") or ctx.get("residuo_contratado"),
+        })
+        return PrepararFotoDespejoCarrinha(ctx)
+
+    def decide_despejo_foto(self, conversa, message):
+        photo = message.media_id or message.filename or message.message_id if message.tipo == "image" else None
+        if not photo:
+            return "Envie uma imagem para continuar."
+        ctx = dict(conversa.contexto_json or {})
+        fotos = list(ctx.get("fotos_despejo") or [])
+        if photo not in fotos:
+            fotos.append(photo)
+        ctx["fotos_despejo"] = fotos
+        return AdvanceTransition("v24_despejo_foto_acao", ctx, "Foto guardada.\n\n1. ➕ Outra Foto\n2. ➡️ Próximo Passo")
+
+    def decide_despejo_foto_acao(self, conversa, message):
+        choice = self._normalize(message.texto)
+        ctx = dict(conversa.contexto_json or {})
+        if choice in {"1", "outra foto", "➕ outra foto"}:
+            return AdvanceTransition("v24_despejo_foto", ctx, "Envie a próxima foto do despejo.")
+        if choice not in {"2", "proximo passo", "➡️ proximo passo"}:
+            return "Selecione Outra Foto ou Próximo Passo."
+        if not ctx.get("fotos_despejo"):
+            return "Envie pelo menos uma imagem para continuar."
+        return PrepararConfirmacaoDespejoCarrinha(ctx)
+
+    def decide_despejo_confirmacao(self, conversa, message):
+        ctx = dict(conversa.contexto_json or {})
+        choice = self._normalize(message.texto)
+        if choice in {"1", "confirmar despejo", "confirmar", "✅ confirmar despejo"}:
+            return ConfirmarDespejoCarrinha(ctx)
+        if choice in {"2", "voltar", "↩️ voltar"}:
+            return PrepararConformidadeDespejoCarrinha(ctx)
+        if choice in {"3", "cancelar", "❌ cancelar"}:
+            return IdleTransition("Despejo cancelado. Nenhuma foto foi salva e o ativo permanece em andamento.")
+        return "Escolha Confirmar despejo, Voltar ou Cancelar."
 
     @staticmethod
     def _normalize(value):
