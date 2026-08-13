@@ -14,7 +14,11 @@ from app.agents.pedido_v24.contentor import (
     PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
 )
-from app.agents.pedido_v24.contentor_cadastro import ContentorCadastroAgent
+from app.agents.pedido_v24.contentor_cadastro import (
+    CadastroModality,
+    ContentorCadastroAgent,
+    classify_cadastro_modality,
+)
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
 from app.agents.pedido_v24_agent import PedidoV24Agent
@@ -85,6 +89,23 @@ class PedidoV24OperationalRouter:
         conversa: ConversaWhatsApp,
         message: NormalizedWhatsAppMessage,
     ) -> str:
+        cadastro_decisions = {
+            "v24_cadastro_nome": self._contentor_cadastro.decide_nome,
+            "v24_cadastro_telefone": self._contentor_cadastro.decide_telefone,
+            "v24_cadastro_quantidade": self._contentor_cadastro.decide_quantidade,
+        }
+        cadastro_decision = cadastro_decisions.get(
+            getattr(conversa, "estado_atual", None)
+        )
+        if (
+            cadastro_decision is not None
+            and classify_cadastro_modality(conversa.contexto_json or {})
+            is CadastroModality.CONTENTOR_INTENT
+        ):
+            decision = cadastro_decision(conversa.contexto_json or {}, message)
+            if isinstance(decision, AdvanceTransition):
+                return self._backend.apply_operational_transition(conversa, decision)
+            return decision
         if (
             getattr(conversa, "estado_atual", None)
             == "v24_cadastro_tipo_solicitacao"

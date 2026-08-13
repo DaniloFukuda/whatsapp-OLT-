@@ -1,10 +1,12 @@
 """Decisoes puras do cadastro de novos pedidos de Contentor."""
 
+import re
 import unicodedata
 from enum import Enum
 from typing import Any
 
 from app.agents.pedido_v24.transitions import AdvanceTransition
+from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.pedido import TipoEquipamentoPedido
 
 
@@ -93,4 +95,76 @@ class ContentorCadastroAgent:
             "v24_cadastro_nome",
             ctx,
             "Qual é o nome do cliente?",
+        )
+
+    def decide_nome(self, context, message: NormalizedWhatsAppMessage):
+        ctx = dict(context or {})
+        raw = (message.texto or "").strip()
+        if message.contact_name:
+            name = message.contact_name.strip()
+            if len(name) < 2:
+                return "Informe o nome completo do cliente."
+            ctx["nome"] = name
+            phone = self._phone_from_message(message, "")
+            if phone:
+                ctx["telefone"] = phone
+                return self._advance_to_quantidade(ctx)
+        else:
+            if len(raw) < 2:
+                return "Informe o nome completo do cliente."
+            ctx["nome"] = raw
+        return AdvanceTransition(
+            "v24_cadastro_telefone",
+            ctx,
+            "Qual é o telefone do cliente?",
+        )
+
+    def decide_telefone(self, context, message: NormalizedWhatsAppMessage):
+        ctx = dict(context or {})
+        raw = (message.texto or "").strip()
+        if message.contact_phone:
+            phone = self._phone_from_message(message, raw)
+            if not phone:
+                return "O telefone informado não é válido."
+        else:
+            phone = re.sub(r"\D", "", raw)
+            if len(phone) < 9:
+                return "O telefone informado não é válido."
+        ctx["telefone"] = phone
+        return self._advance_to_quantidade(ctx)
+
+    def decide_quantidade(self, context, message: NormalizedWhatsAppMessage):
+        raw = (message.texto or "").strip()
+        if not raw.isdigit() or not 1 <= int(raw) <= 50:
+            return "Informe uma quantidade entre 1 e 50."
+        ctx = dict(context or {})
+        ctx["quantidade"] = int(raw)
+        ctx["itens"] = []
+        ctx["residuos"] = []
+        return AdvanceTransition(
+            "v24_cadastro_tipo_equipamento",
+            ctx,
+            self._tipo_equipamento_prompt(ctx),
+        )
+
+    @staticmethod
+    def _phone_from_message(message, raw):
+        value = message.contact_phone or raw
+        phone = re.sub(r"\D", "", value or "")
+        return phone if len(phone) >= 9 else None
+
+    @staticmethod
+    def _advance_to_quantidade(context):
+        return AdvanceTransition(
+            "v24_cadastro_quantidade",
+            context,
+            "🔢 Quantos contentores são necessários para este pedido?",
+        )
+
+    @staticmethod
+    def _tipo_equipamento_prompt(context):
+        index = len(context.get("itens") or []) + 1
+        return (
+            f"Tipo de equipamento do item {index}/{context['quantidade']}:\n\n"
+            "1. 📦 Contentor\n2. 🚛 Carrinha"
         )

@@ -177,6 +177,174 @@ def test_router_mantem_contentor_desabilitado_no_legado(db_session, monkeypatch)
     backend.handle.assert_called_once_with(conversa, message)
 
 
+def _cadastro_message(texto="", **kwargs):
+    return NormalizedWhatsAppMessage(
+        telefone="351900000000",
+        tipo=kwargs.pop("tipo", "text"),
+        texto=texto,
+        **kwargs,
+    )
+
+
+def test_cadastro_contentor_nome_texto_preserva_transicao_e_contexto():
+    decision = ContentorCadastroAgent().decide_nome(
+        {"tipo_solicitacao": "CONTENTOR", "existente": True},
+        _cadastro_message("  Cliente Teste  "),
+    )
+
+    assert decision == AdvanceTransition(
+        "v24_cadastro_telefone",
+        {
+            "tipo_solicitacao": "CONTENTOR",
+            "existente": True,
+            "nome": "Cliente Teste",
+        },
+        "Qual é o telefone do cliente?",
+    )
+
+
+def test_cadastro_contentor_contato_com_telefone_avanca_para_quantidade():
+    decision = ContentorCadastroAgent().decide_nome(
+        {"tipo_solicitacao": "CONTENTOR"},
+        _cadastro_message(
+            contact_name=" Cliente Contato ",
+            contact_phone="+351 912 345 678",
+        ),
+    )
+
+    assert decision.next_state == "v24_cadastro_quantidade"
+    assert decision.context == {
+        "tipo_solicitacao": "CONTENTOR",
+        "nome": "Cliente Contato",
+        "telefone": "351912345678",
+    }
+
+
+@pytest.mark.parametrize("name", ["", "A"])
+def test_cadastro_contentor_nome_invalido_preserva_mensagem(name):
+    assert ContentorCadastroAgent().decide_nome(
+        {"tipo_solicitacao": "CONTENTOR"},
+        _cadastro_message(name),
+    ) == "Informe o nome completo do cliente."
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        (_cadastro_message("912 345 678"), "912345678"),
+        (_cadastro_message(contact_phone="+351 912 345 678"), "351912345678"),
+    ],
+)
+def test_cadastro_contentor_telefone_valido_avanca_para_quantidade(
+    message,
+    expected,
+):
+    decision = ContentorCadastroAgent().decide_telefone(
+        {"tipo_solicitacao": "CONTENTOR", "nome": "Cliente"},
+        message,
+    )
+
+    assert decision.next_state == "v24_cadastro_quantidade"
+    assert decision.context["telefone"] == expected
+
+
+@pytest.mark.parametrize("phone", ["", "12345678", "telefone"])
+def test_cadastro_contentor_telefone_invalido_preserva_mensagem(phone):
+    assert ContentorCadastroAgent().decide_telefone(
+        {"tipo_solicitacao": "CONTENTOR"},
+        _cadastro_message(phone),
+    ) == "O telefone informado não é válido."
+
+
+@pytest.mark.parametrize("quantidade", ["1", "50"])
+def test_cadastro_contentor_quantidade_limites_e_resets(quantidade):
+    decision = ContentorCadastroAgent().decide_quantidade(
+        {
+            "tipo_solicitacao": "CONTENTOR",
+            "itens": [{"antigo": True}],
+            "residuos": ["antigo"],
+            "outro": "preservado",
+        },
+        _cadastro_message(quantidade),
+    )
+
+    assert decision.next_state == "v24_cadastro_tipo_equipamento"
+    assert decision.context == {
+        "tipo_solicitacao": "CONTENTOR",
+        "quantidade": int(quantidade),
+        "itens": [],
+        "residuos": [],
+        "outro": "preservado",
+    }
+
+
+@pytest.mark.parametrize("quantidade", ["0", "51", "1.5", "abc"])
+def test_cadastro_contentor_quantidade_invalida_preserva_mensagem(quantidade):
+    assert ContentorCadastroAgent().decide_quantidade(
+        {"tipo_solicitacao": "CONTENTOR"},
+        _cadastro_message(quantidade),
+    ) == "Informe uma quantidade entre 1 e 50."
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "v24_cadastro_nome",
+        "v24_cadastro_telefone",
+        "v24_cadastro_quantidade",
+    ],
+)
+def test_router_usa_modulo_nos_estados_iniciais_de_contentor(
+    db_session,
+    state,
+):
+    backend = PedidoV24Agent(db_session)
+    backend.apply_operational_transition = Mock(return_value="modular")
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(
+        estado_atual=state,
+        contexto_json={"tipo_solicitacao": "CONTENTOR"},
+    )
+    messages = {
+        "v24_cadastro_nome": _cadastro_message("Cliente"),
+        "v24_cadastro_telefone": _cadastro_message("912345678"),
+        "v24_cadastro_quantidade": _cadastro_message("2"),
+    }
+
+    assert router.handle(conversa, messages[state]) == "modular"
+    backend.apply_operational_transition.assert_called_once()
+    backend.handle.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"tipo_solicitacao": "CARRINHA"},
+        {},
+        {
+            "tipo_solicitacao": "CONTENTOR",
+            "item_atual": {"tipo_equipamento": "CARRINHA"},
+        },
+    ],
+)
+def test_router_mantem_contextos_nao_contentor_intent_no_legado(
+    db_session,
+    context,
+):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(
+        estado_atual="v24_cadastro_nome",
+        contexto_json=context,
+    )
+    message = _cadastro_message("Cliente")
+
+    assert router.handle(conversa, message) == "legado"
+    backend.handle.assert_called_once_with(conversa, message)
+
+
 @pytest.mark.parametrize(
     "context,expected",
     [
