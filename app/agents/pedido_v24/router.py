@@ -616,7 +616,15 @@ class PedidoV24OperationalRouter:
                 and self.resolve_modality(context, pedido_id)
                 is TipoEquipamentoPedido.CONTENTOR
             ):
-                decision = self._contentor.decide_entrega_adesivo(conversa, message)
+                snapshot = self._backend.resolve_entrega_contentor_adesivo(
+                    message,
+                    context,
+                )
+                decision = self._contentor.decide_entrega_adesivo(
+                    conversa,
+                    message,
+                    snapshot,
+                )
                 if isinstance(decision, (AdvanceTransition, IdleTransition)):
                     return self._backend.apply_operational_transition(
                         conversa,

@@ -8,7 +8,6 @@ from typing import Any
 
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
 from app.models.conversa import ConversaWhatsApp
-from app.models.pedido import PedidoContentor, TipoEquipamentoPedido
 
 
 @dataclass(frozen=True)
@@ -119,20 +118,16 @@ class ContentorOperationalAgent:
             selection["prompt"],
         )
 
-    def decide_entrega_adesivo(self, conversa, message):
+    def decide_entrega_adesivo(self, conversa, message, snapshot):
         """Produz a decisão da identificação do Contentor sem persistir estado."""
         ctx = dict(conversa.contexto_json or {})
         if message.tipo == "interactive":
             return "Digite o número físico do equipamento para continuar."
 
         number = (message.texto or "").strip()
-        contentor = self._legacy_backend.db.get(
-            PedidoContentor,
-            ctx["contentores"][ctx["indice"]],
-        )
-        if contentor and contentor.tipo_equipamento != TipoEquipamentoPedido.CONTENTOR.value:
+        if snapshot["ativo_exists"] and not snapshot["is_contentor"]:
             return None
-        if not contentor or contentor.status_entrega != "PENDENTE":
+        if not snapshot["ativo_exists"] or snapshot["status_entrega"] != "PENDENTE":
             return IdleTransition("Esse ativo já não está pendente. Reinicie a entrega.")
         if not re.fullmatch(r"\d{1,6}", number) or number == "0":
             return "Informe somente o número visível no contentor."
@@ -142,11 +137,7 @@ class ContentorOperationalAgent:
         ]:
             return "Esse adesivo ja foi informado neste lote."
 
-        duplicate = self._legacy_backend.db.query(PedidoContentor).filter(
-            PedidoContentor.numero_adesivo_contentor == number,
-            PedidoContentor.status_ciclo == "EM_ANDAMENTO",
-        ).first()
-        if duplicate:
+        if snapshot["adesivo_em_ciclo_ativo"]:
             return "Esse adesivo já está em um ciclo ativo."
 
         entregas = list(ctx.get("entregas") or [])

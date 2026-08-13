@@ -1652,6 +1652,28 @@ class PedidoV24Agent:
             "prompt": prompt,
         }
 
+    def resolve_entrega_contentor_adesivo(self, message, context):
+        """Fornece ao agente um snapshot simples das leituras do adesivo."""
+        if message.tipo == "interactive":
+            return None
+        item_id = context["contentores"][context["indice"]]
+        contentor = self.db.get(PedidoContentor, item_id)
+        number = (message.texto or "").strip()
+        duplicate = self.db.query(PedidoContentor).filter(
+            PedidoContentor.numero_adesivo_contentor == number,
+            PedidoContentor.status_ciclo == "EM_ANDAMENTO",
+        ).first()
+        return {
+            "ativo_exists": contentor is not None,
+            "is_contentor": (
+                contentor is not None
+                and contentor.tipo_equipamento
+                == TipoEquipamentoPedido.CONTENTOR.value
+            ),
+            "status_entrega": contentor.status_entrega if contentor else None,
+            "adesivo_em_ciclo_ativo": duplicate is not None,
+        }
+
     def resolve_entrega_pagamento_modality(self, ctx):
         """Resolve a modalidade pelos itens persistidos, sem alterar o pedido."""
         if not isinstance(ctx, Mapping):
