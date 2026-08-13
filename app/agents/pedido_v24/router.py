@@ -18,6 +18,7 @@ from app.agents.pedido_v24.contentor import (
 )
 from app.agents.pedido_v24.contentor_cadastro import (
     CadastroModality,
+    ConfirmarCadastroContentor,
     ContentorCadastroAgent,
     classify_cadastro_modality,
 )
@@ -173,27 +174,33 @@ class PedidoV24OperationalRouter:
             cadastro_state == "v24_cadastro_confirmacao"
             and cadastro_modality is CadastroModality.CONTENTOR_PROVEN
         ):
-            choice = self._backend._norm(message.texto or "")
-            if choice not in {"1", "sim", "confirmar", "confirmar e salvar"}:
-                decision = self._contentor_cadastro.decide_confirmacao(
-                    cadastro_context,
-                    message,
+            decision = self._contentor_cadastro.decide_confirmacao(
+                cadastro_context,
+                message,
+            )
+            if isinstance(decision, ConfirmarCadastroContentor):
+                response = self._backend.confirmar_cadastro_contentor(
+                    conversa,
+                    decision.context,
                 )
-                if (
-                    isinstance(decision, AdvanceTransition)
-                    and decision.next_state == "v24_cadastro_corrigir"
-                ):
-                    decision = AdvanceTransition(
-                        decision.next_state,
-                        decision.context,
-                        self._backend._corrigir_prompt(decision.context),
-                    )
-                if isinstance(decision, (AdvanceTransition, IdleTransition)):
-                    return self._backend.apply_operational_transition(
-                        conversa,
-                        decision,
-                    )
-                return decision
+                if response is not None:
+                    return response
+                return self._backend.handle(conversa, message)
+            if (
+                isinstance(decision, AdvanceTransition)
+                and decision.next_state == "v24_cadastro_corrigir"
+            ):
+                decision = AdvanceTransition(
+                    decision.next_state,
+                    decision.context,
+                    self._backend._corrigir_prompt(decision.context),
+                )
+            if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                return self._backend.apply_operational_transition(
+                    conversa,
+                    decision,
+                )
+            return decision
         if (
             cadastro_state == "v24_cadastro_corrigir"
             and cadastro_modality is CadastroModality.CONTENTOR_PROVEN

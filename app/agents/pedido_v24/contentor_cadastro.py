@@ -3,6 +3,7 @@
 import re
 import unicodedata
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -19,6 +20,13 @@ class CadastroModality(Enum):
     CARRINHA = "CARRINHA"
     LEGACY_INDETERMINATE = "LEGACY_INDETERMINATE"
     DIVERGENT = "DIVERGENT"
+
+
+@dataclass(frozen=True)
+class ConfirmarCadastroContentor:
+    """Solicita confirmação final do cadastro moderno de Contentor."""
+
+    context: dict[str, Any]
 
 
 def classify_cadastro_modality(context: dict[str, Any] | None) -> CadastroModality:
@@ -398,6 +406,8 @@ class ContentorCadastroAgent:
 
     def decide_confirmacao(self, context, message):
         choice = self._normalize(message.texto)
+        if choice in {"1", "sim", "confirmar", "confirmar e salvar"}:
+            return ConfirmarCadastroContentor(dict(context or {}))
         if choice in {"2", "corrigir"}:
             return AdvanceTransition("v24_cadastro_corrigir", dict(context or {}), "")
         if choice in {"3", "cancelar"}:

@@ -8,6 +8,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy.orm import Session
 
 from app.agents.pedido_v24.transitions import AdvanceTransition
+from app.agents.pedido_v24.contentor_cadastro import (
+    CadastroModality,
+    classify_cadastro_modality,
+)
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.core.config import get_settings
 from app.models.conversa import ConversaWhatsApp
@@ -1793,6 +1797,19 @@ class PedidoV24Agent:
             raise
         tipo_label = self._tipo_label(ctx.get("tipo_solicitacao"))
         return f"✅ Pedido #{pedido.id} criado com {len(pedido.contentores)} {tipo_label.lower()}(es)."
+
+    def confirmar_cadastro_contentor(self, conversa, context):
+        """Recomprova Contentor e delega ao boundary persistente legado."""
+        if conversa.estado_atual != self._CONFIRMATION_STATE:
+            return None
+        if (
+            classify_cadastro_modality(context)
+            is not CadastroModality.CONTENTOR_PROVEN
+        ):
+            return None
+        ctx = dict(context)
+        ctx["_confirmado"] = True
+        return self._finish_cadastro(conversa, ctx)
 
     def _reservar_confirmacao(self, conversa) -> bool:
         atualizados = (

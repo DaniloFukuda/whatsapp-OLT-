@@ -20,6 +20,7 @@ from app.agents.pedido_v24.contentor import (
 )
 from app.agents.pedido_v24.contentor_cadastro import (
     CadastroModality,
+    ConfirmarCadastroContentor,
     ContentorCadastroAgent,
     classify_cadastro_modality,
 )
@@ -730,9 +731,10 @@ def test_cadastro_contentor_confirmacao_decide_sem_persistir(
 
 
 @pytest.mark.parametrize("choice", ["1", "sim", "confirmar", "confirmar e salvar"])
-def test_router_confirmar_contentor_chega_intacto_ao_legado(db_session, choice):
+def test_router_confirmar_contentor_usa_boundary_especifico(db_session, choice):
     backend = PedidoV24Agent(db_session)
-    backend.handle = Mock(return_value="confirmacao-legada")
+    backend.confirmar_cadastro_contentor = Mock(return_value="confirmacao-contentor")
+    backend.handle = Mock(return_value="legado")
     router = PedidoV24OperationalRouter(backend=backend)
     conversa = SimpleNamespace(
         estado_atual="v24_cadastro_confirmacao",
@@ -740,8 +742,12 @@ def test_router_confirmar_contentor_chega_intacto_ao_legado(db_session, choice):
     )
     message = _cadastro_message(choice)
 
-    assert router.handle(conversa, message) == "confirmacao-legada"
-    backend.handle.assert_called_once_with(conversa, message)
+    assert router.handle(conversa, message) == "confirmacao-contentor"
+    backend.confirmar_cadastro_contentor.assert_called_once_with(
+        conversa,
+        conversa.contexto_json,
+    )
+    backend.handle.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -795,6 +801,74 @@ def test_cadastro_contentor_edicao_status_pago_encadeia_forma():
     assert decision.next_state == "v24_cadastro_edicao_opcao"
     assert decision.context["pago"] is True
     assert decision.context["editing_field"] == "forma_pagamento"
+
+
+@pytest.mark.parametrize("choice", ["1", "sim", "confirmar", "confirmar e salvar"])
+def test_cadastro_contentor_confirmar_produz_comando_especifico(choice):
+    context = _contentor_proven_context()
+    decision = ContentorCadastroAgent().decide_confirmacao(
+        context,
+        _cadastro_message(choice),
+    )
+
+    assert decision == ConfirmarCadastroContentor(context)
+
+
+def test_router_encaminha_confirmacao_contentor_ao_boundary_especifico(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.confirmar_cadastro_contentor = Mock(return_value="confirmado")
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    context = _contentor_proven_context()
+    conversa = SimpleNamespace(
+        estado_atual="v24_cadastro_confirmacao",
+        contexto_json=context,
+    )
+
+    assert router.handle(conversa, _cadastro_message("confirmar")) == "confirmado"
+    backend.confirmar_cadastro_contentor.assert_called_once_with(conversa, context)
+    backend.handle.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "state,context",
+    [
+        ("idle", _contentor_proven_context()),
+        ("v24_cadastro_confirmacao", {"tipo_solicitacao": "CARRINHA"}),
+        ("v24_cadastro_confirmacao", {"tipo_solicitacao": "CONTENTOR"}),
+        (
+            "v24_cadastro_confirmacao",
+            {
+                "tipo_solicitacao": "CONTENTOR",
+                "quantidade": 1,
+                "itens": [{"tipo_equipamento": "CARRINHA"}],
+            },
+        ),
+    ],
+)
+def test_boundary_cadastro_contentor_recusa_estado_ou_modalidade_nao_comprovada(
+    db_session,
+    state,
+    context,
+):
+    backend = PedidoV24Agent(db_session)
+    backend._finish_cadastro = Mock(return_value="nao-deveria")
+    conversa = SimpleNamespace(estado_atual=state)
+
+    assert backend.confirmar_cadastro_contentor(conversa, context) is None
+    backend._finish_cadastro.assert_not_called()
+
+
+def test_boundary_cadastro_contentor_delega_uma_vez_sem_duplicar_finish(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend._finish_cadastro = Mock(return_value="confirmado")
+    context = _contentor_proven_context()
+    conversa = SimpleNamespace(estado_atual="v24_cadastro_confirmacao")
+
+    assert backend.confirmar_cadastro_contentor(conversa, context) == "confirmado"
+    expected = {**context, "_confirmado": True}
+    backend._finish_cadastro.assert_called_once_with(conversa, expected)
+    assert "_confirmado" not in context
 
 
 @pytest.mark.parametrize(
