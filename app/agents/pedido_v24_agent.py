@@ -2297,6 +2297,13 @@ class PedidoV24Agent:
         """Reutiliza o resumo legado sem persistir ou alterar o contexto."""
         return self._format_confirmacao_cadastro(context)
 
+    def cadastro_corrigir_decision(self, choice, context):
+        """Expõe somente a leitura legada do menu de correções."""
+        field = self._parse_corrigir_field(choice, context)
+        if not field:
+            return None, None, self._corrigir_prompt(context)
+        return field, self._edit_state_for(field), self._edit_prompt(field, context)
+
     def _tipo_label(self, tipo):
         return "Carrinha" if tipo == TipoEquipamentoPedido.CARRINHA.value else "Contentor"
 

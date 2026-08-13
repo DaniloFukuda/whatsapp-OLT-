@@ -707,6 +707,97 @@ def test_cadastro_contentor_referencia_valida_prepara_confirmacao():
 
 
 @pytest.mark.parametrize(
+    "choice,expected_type,expected_state",
+    [
+        ("2", AdvanceTransition, "v24_cadastro_corrigir"),
+        ("corrigir", AdvanceTransition, "v24_cadastro_corrigir"),
+        ("3", IdleTransition, None),
+        ("cancelar", IdleTransition, None),
+    ],
+)
+def test_cadastro_contentor_confirmacao_decide_sem_persistir(
+    choice,
+    expected_type,
+    expected_state,
+):
+    decision = ContentorCadastroAgent().decide_confirmacao(
+        _contentor_proven_context(),
+        _cadastro_message(choice),
+    )
+    assert isinstance(decision, expected_type)
+    if expected_state:
+        assert decision.next_state == expected_state
+
+
+@pytest.mark.parametrize("choice", ["1", "sim", "confirmar", "confirmar e salvar"])
+def test_router_confirmar_contentor_chega_intacto_ao_legado(db_session, choice):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="confirmacao-legada")
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(
+        estado_atual="v24_cadastro_confirmacao",
+        contexto_json=_contentor_proven_context(),
+    )
+    message = _cadastro_message(choice)
+
+    assert router.handle(conversa, message) == "confirmacao-legada"
+    backend.handle.assert_called_once_with(conversa, message)
+
+
+@pytest.mark.parametrize(
+    "field,value,context_key,expected",
+    [
+        ("quantidade", "2", "quantidade", 2),
+        ("nome_cliente", " Novo Nome ", "nome", "Novo Nome"),
+        ("telefone", "912 345 678", "telefone", "912345678"),
+        ("valor_total", "12,50", "valor", "12.5"),
+        ("mao_de_obra", "1", "precisa_mao_de_obra", True),
+        ("tipo_residuo", "2", "residuos", ["Entulho Misto"]),
+    ],
+)
+def test_cadastro_contentor_edicao_atomica_preserva_regras(
+    field,
+    value,
+    context_key,
+    expected,
+):
+    context = {**_contentor_proven_context(), "editing_field": field}
+    decision = ContentorCadastroAgent().decide_edicao(
+        context,
+        _cadastro_message(value),
+        now=datetime(2026, 8, 13, tzinfo=timezone.utc),
+    )
+    assert decision.next_state == "v24_cadastro_confirmacao"
+    assert decision.context[context_key] == expected
+    assert "editing_field" not in decision.context
+
+
+def test_cadastro_contentor_edicao_quantidade_copia_item_sem_reconstruir_modalidade():
+    context = {
+        **_contentor_proven_context(),
+        "editing_field": "quantidade",
+    }
+    decision = ContentorCadastroAgent().decide_edicao(
+        context,
+        _cadastro_message("2"),
+        now=datetime(2026, 8, 13, tzinfo=timezone.utc),
+    )
+    assert len(decision.context["itens"]) == 2
+    assert classify_cadastro_modality(decision.context) is CadastroModality.CONTENTOR_PROVEN
+
+
+def test_cadastro_contentor_edicao_status_pago_encadeia_forma():
+    decision = ContentorCadastroAgent().decide_edicao(
+        {**_contentor_proven_context(), "editing_field": "status_pagamento"},
+        _cadastro_message("sim"),
+        now=datetime(2026, 8, 13, tzinfo=timezone.utc),
+    )
+    assert decision.next_state == "v24_cadastro_edicao_opcao"
+    assert decision.context["pago"] is True
+    assert decision.context["editing_field"] == "forma_pagamento"
+
+
+@pytest.mark.parametrize(
     "context,expected",
     [
         ({"tipo_solicitacao": "CONTENTOR"}, TipoEquipamentoPedido.CONTENTOR),

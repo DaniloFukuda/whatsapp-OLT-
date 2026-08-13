@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
-from app.agents.pedido_v24.transitions import AdvanceTransition
+from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.pedido import TipoEquipamentoPedido
 
@@ -395,6 +395,173 @@ class ContentorCadastroAgent:
         ctx = dict(context or {})
         ctx["referencia"] = raw
         return AdvanceTransition("v24_cadastro_confirmacao", ctx, "")
+
+    def decide_confirmacao(self, context, message):
+        choice = self._normalize(message.texto)
+        if choice in {"2", "corrigir"}:
+            return AdvanceTransition("v24_cadastro_corrigir", dict(context or {}), "")
+        if choice in {"3", "cancelar"}:
+            return IdleTransition("Pedido cancelado. Nenhum pedido foi criado.")
+        return "Escolha 1 para confirmar, 2 para corrigir ou 3 para cancelar."
+
+    def decide_corrigir(self, context, field, next_state, prompt):
+        if not field:
+            return prompt
+        ctx = dict(context or {})
+        if field == "forma_pagamento" and not ctx.get("pago"):
+            return AdvanceTransition("v24_cadastro_confirmacao", ctx, "")
+        ctx["editing_field"] = field
+        return AdvanceTransition(next_state, ctx, prompt)
+
+    def decide_edicao(self, context, message, *, coordinates=None, now=None):
+        ctx = dict(context or {})
+        field = ctx.get("editing_field")
+        raw = (message.texto or "").strip()
+        choice = self._normalize(raw)
+        if field == "quantidade":
+            if not raw.isdigit() or not 1 <= int(raw) <= 50:
+                return "Informe uma quantidade entre 1 e 50."
+            ctx["quantidade"] = int(raw)
+            self._ajustar_itens_quantidade(ctx)
+        elif field == "nome_cliente":
+            if message.contact_name:
+                ctx["nome"] = message.contact_name.strip()
+                phone = self._phone_from_message(message, "")
+                if phone:
+                    ctx["telefone"] = phone
+            elif len(raw) >= 2:
+                ctx["nome"] = raw
+            else:
+                return "Informe o nome completo do cliente."
+        elif field == "telefone":
+            phone = self._phone_from_message(message, raw)
+            if not phone:
+                return "O telefone informado não é válido."
+            ctx["telefone"] = phone
+        elif field == "data_entrega":
+            if choice in {"1", "hoje"}:
+                value = now.isoformat()
+            elif choice in {"2", "amanha"}:
+                value = (now + timedelta(days=1)).isoformat()
+            else:
+                try:
+                    value = datetime.strptime(raw, "%d/%m/%Y").replace(
+                        tzinfo=now.tzinfo
+                    ).isoformat()
+                except ValueError:
+                    return "Data inválida. Use Hoje, Amanhã ou DD/MM/AAAA."
+            ctx["data"] = value
+        elif field == "tipo_residuo":
+            residue = self._parse_residue(choice)
+            if not residue:
+                return self._residuo_prompt(
+                    {"residuos": [], "quantidade": 1}
+                )
+            ctx["residuos"] = [residue for _ in range(ctx.get("quantidade") or 1)]
+            for item in ctx.get("itens") or []:
+                item["residuo_contratado"] = residue
+        elif field == "mao_de_obra":
+            mao_obra = self._parse_mao_obra(choice)
+            if mao_obra is None:
+                return self._mao_obra_prompt()
+            ctx["precisa_mao_de_obra"] = mao_obra
+        elif field == "valor_total":
+            try:
+                ctx["valor"] = str(float(raw.replace(",", ".")))
+            except ValueError:
+                return "Valor inválido."
+        elif field == "status_pagamento":
+            if choice in {"1", "sim", "sim, ja esta pago"}:
+                ctx["pago"] = True
+                ctx["editing_field"] = "forma_pagamento"
+                return AdvanceTransition("v24_cadastro_edicao_opcao", ctx, "")
+            if choice in {"2", "nao", "nao, pendente"}:
+                ctx["pago"] = False
+                ctx["forma"] = None
+            else:
+                return "Selecione uma das opções de pagamento."
+        elif field == "forma_pagamento":
+            forma = self._parse_forma(choice)
+            if not forma:
+                return "Selecione uma forma de pagamento."
+            ctx["forma"] = forma
+        elif field == "endereco":
+            if message.tipo == "location" and not coordinates:
+                return (
+                    "Não foi possível ler a localização. Reenvie a localização "
+                    "nativa ou digite o endereço."
+                )
+            if not raw or len(raw) > 300:
+                return "O endereço precisa ter entre 1 e 300 caracteres."
+            ctx["endereco"] = raw
+            if coordinates:
+                ctx["endereco_latitude"], ctx["endereco_longitude"] = coordinates
+        elif field == "ponto_referencia":
+            ctx["referencia"] = None
+        elif field == "ponto_referencia_texto":
+            if not 1 <= len(raw) <= 50:
+                return "O ponto de referência deve ter no máximo 50 caracteres."
+            ctx["referencia"] = raw
+        else:
+            return None
+        ctx.pop("editing_field", None)
+        ctx.pop("_confirmado", None)
+        return AdvanceTransition("v24_cadastro_confirmacao", ctx, "")
+
+    def decide_edicao_referencia_opcao(self, context, message):
+        choice = self._normalize(message.texto)
+        ctx = dict(context or {})
+        if choice in {"1", "sim"}:
+            ctx["editing_field"] = "ponto_referencia_texto"
+            return AdvanceTransition(
+                "v24_cadastro_edicao_texto",
+                ctx,
+                "Qual é o novo ponto de referência?",
+            )
+        if choice in {"2", "nao"}:
+            ctx["referencia"] = None
+            ctx.pop("editing_field", None)
+            ctx.pop("_confirmado", None)
+            return AdvanceTransition("v24_cadastro_confirmacao", ctx, "")
+        return "Selecione Sim ou Não."
+
+    @staticmethod
+    def _ajustar_itens_quantidade(context):
+        itens = list(context.get("itens") or [])
+        quantidade = context.get("quantidade") or len(itens)
+        if not itens:
+            return
+        if len(itens) > quantidade:
+            context["itens"] = itens[:quantidade]
+        else:
+            while len(itens) < quantidade:
+                itens.append(dict(itens[-1]))
+            context["itens"] = itens
+        context["residuos"] = [
+            item.get("residuo_contratado") for item in context["itens"]
+        ]
+
+    @staticmethod
+    def _parse_residue(choice):
+        return {
+            "1": "Entulho Limpo", "option_1": "Entulho Limpo",
+            "pedido_residuo_limpo": "Entulho Limpo", "entulho limpo": "Entulho Limpo",
+            "limpo": "Entulho Limpo", "2": "Entulho Misto",
+            "option_2": "Entulho Misto", "pedido_residuo_misto": "Entulho Misto",
+            "entulho misto": "Entulho Misto", "misto": "Entulho Misto",
+        }.get(choice)
+
+    @staticmethod
+    def _parse_mao_obra(choice):
+        if choice in {"1", "option_1", "pedido_mao_obra_sim", "sim", "✅ sim", "sim, com pessoal", "com pessoal"}:
+            return True
+        if choice in {"2", "option_2", "pedido_mao_obra_nao", "nao", "❌ nao", "nao, apenas equipamento", "apenas equipamento"}:
+            return False
+        return None
+
+    @staticmethod
+    def _parse_forma(choice):
+        return {"1": "MBWay", "mbway": "MBWay", "2": "Transferência", "transferencia": "Transferência", "3": "Dinheiro", "dinheiro": "Dinheiro", "4": "Outro", "outro": "Outro"}.get(choice)
 
     @staticmethod
     def _phone_from_message(message, raw):

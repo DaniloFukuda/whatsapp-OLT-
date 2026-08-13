@@ -170,6 +170,101 @@ class PedidoV24OperationalRouter:
                 return self._backend.apply_operational_transition(conversa, decision)
             return decision
         if (
+            cadastro_state == "v24_cadastro_confirmacao"
+            and cadastro_modality is CadastroModality.CONTENTOR_PROVEN
+        ):
+            choice = self._backend._norm(message.texto or "")
+            if choice not in {"1", "sim", "confirmar", "confirmar e salvar"}:
+                decision = self._contentor_cadastro.decide_confirmacao(
+                    cadastro_context,
+                    message,
+                )
+                if (
+                    isinstance(decision, AdvanceTransition)
+                    and decision.next_state == "v24_cadastro_corrigir"
+                ):
+                    decision = AdvanceTransition(
+                        decision.next_state,
+                        decision.context,
+                        self._backend._corrigir_prompt(decision.context),
+                    )
+                if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                    return self._backend.apply_operational_transition(
+                        conversa,
+                        decision,
+                    )
+                return decision
+        if (
+            cadastro_state == "v24_cadastro_corrigir"
+            and cadastro_modality is CadastroModality.CONTENTOR_PROVEN
+        ):
+            choice = self._backend._norm(message.texto or "")
+            field, next_state, prompt = self._backend.cadastro_corrigir_decision(
+                choice,
+                cadastro_context,
+            )
+            decision = self._contentor_cadastro.decide_corrigir(
+                cadastro_context,
+                field,
+                next_state,
+                prompt,
+            )
+            if (
+                isinstance(decision, AdvanceTransition)
+                and decision.next_state == "v24_cadastro_confirmacao"
+            ):
+                decision = AdvanceTransition(
+                    decision.next_state,
+                    decision.context,
+                    "A forma de pagamento só pode ser corrigida quando o pedido estiver pago.\n\n"
+                    + self._backend.cadastro_confirmacao_prompt(decision.context),
+                )
+            if isinstance(decision, AdvanceTransition):
+                return self._backend.apply_operational_transition(conversa, decision)
+            return decision
+        if (
+            cadastro_state in {
+                "v24_cadastro_edicao_texto",
+                "v24_cadastro_edicao_opcao",
+                "v24_cadastro_edicao_data",
+                "v24_cadastro_edicao_referencia_opcao",
+            }
+            and cadastro_modality is CadastroModality.CONTENTOR_PROVEN
+            and cadastro_context.get("editing_field") != "hora_entrega"
+        ):
+            if cadastro_state == "v24_cadastro_edicao_referencia_opcao":
+                decision = self._contentor_cadastro.decide_edicao_referencia_opcao(
+                    cadastro_context,
+                    message,
+                )
+            else:
+                timezone = self._backend._lisbon_timezone()
+                decision = self._contentor_cadastro.decide_edicao(
+                    cadastro_context,
+                    message,
+                    coordinates=self._backend._coordinates(
+                        message,
+                        (message.texto or "").strip(),
+                    ),
+                    now=datetime.now(timezone),
+                )
+            if decision is None:
+                return self._backend.handle(conversa, message)
+            if isinstance(decision, AdvanceTransition) and not decision.response:
+                response = (
+                    self._backend._edit_prompt("forma_pagamento", decision.context)
+                    if decision.next_state == "v24_cadastro_edicao_opcao"
+                    else self._backend.cadastro_confirmacao_prompt(decision.context)
+                )
+                decision = AdvanceTransition(
+                    decision.next_state,
+                    decision.context,
+                    response,
+                )
+            if isinstance(decision, AdvanceTransition):
+                return self._backend.apply_operational_transition(conversa, decision)
+            return decision
+        if (
             cadastro_state in {
                 "v24_cadastro_pago",
                 "v24_cadastro_forma",
