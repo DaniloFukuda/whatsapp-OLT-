@@ -1866,6 +1866,21 @@ class PedidoV24Agent:
         ctx["_confirmado"] = True
         return self._finish_cadastro(conversa, ctx)
 
+    def confirmar_cadastro_carrinha(self, conversa, context):
+        """Recomprova Carrinha e delega ao boundary persistente existente."""
+        from app.agents.pedido_v24.carrinha_cadastro import (
+            CarrinhaCadastroModality,
+            classify_carrinha_cadastro,
+        )
+
+        if conversa.estado_atual != self._CONFIRMATION_STATE:
+            return None
+        if classify_carrinha_cadastro(context) is not CarrinhaCadastroModality.CARRINHA_PROVEN:
+            return None
+        ctx = dict(context)
+        ctx["_confirmado"] = True
+        return self._finish_cadastro(conversa, ctx)
+
     def _reservar_confirmacao(self, conversa) -> bool:
         atualizados = (
             self.db.query(ConversaWhatsApp)

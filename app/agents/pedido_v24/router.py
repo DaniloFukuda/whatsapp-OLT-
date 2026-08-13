@@ -22,6 +22,12 @@ from app.agents.pedido_v24.contentor_cadastro import (
     ContentorCadastroAgent,
     classify_cadastro_modality,
 )
+from app.agents.pedido_v24.carrinha_cadastro import (
+    CarrinhaCadastroAgent,
+    CarrinhaCadastroModality,
+    ConfirmarCadastroCarrinha,
+    classify_carrinha_cadastro,
+)
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
 from app.agents.pedido_v24_agent import PedidoV24Agent
@@ -49,6 +55,7 @@ class PedidoV24OperationalRouter:
             backend = PedidoV24Agent(db)
         self._backend = backend
         self._contentor_cadastro = ContentorCadastroAgent()
+        self._carrinha_cadastro = CarrinhaCadastroAgent()
         self._contentor = None
         if isinstance(backend, PedidoV24Agent):
             self._contentor = ContentorOperationalAgent(
@@ -92,6 +99,9 @@ class PedidoV24OperationalRouter:
         conversa: ConversaWhatsApp,
         message: NormalizedWhatsAppMessage,
     ) -> str:
+        carrinha_response = self._handle_carrinha_cadastro(conversa, message)
+        if carrinha_response is not None:
+            return carrinha_response
         cadastro_decisions = {
             "v24_cadastro_nome": self._contentor_cadastro.decide_nome,
             "v24_cadastro_telefone": self._contentor_cadastro.decide_telefone,
@@ -780,3 +790,104 @@ class PedidoV24OperationalRouter:
                     )
                 return decision
         return self._backend.handle(conversa, message)
+
+    def _handle_carrinha_cadastro(self, conversa, message):
+        state = getattr(conversa, "estado_atual", None)
+        ctx = getattr(conversa, "contexto_json", None) or {}
+        if (
+            state == "v24_cadastro_tipo_solicitacao"
+            and self._carrinha_cadastro.is_carrinha_selection(message.texto)
+            and get_settings().feature_carrinhas_enabled
+        ):
+            decision = self._carrinha_cadastro.decide_tipo_solicitacao(ctx)
+            return self._backend.apply_operational_transition(conversa, decision)
+
+        modality = classify_carrinha_cadastro(ctx)
+        if modality not in {
+            CarrinhaCadastroModality.CARRINHA_INTENT,
+            CarrinhaCadastroModality.CARRINHA_PROVEN,
+        }:
+            return None
+        intent_states = {
+            "v24_cadastro_quantidade": "decide_quantidade",
+            "v24_cadastro_nome": "decide_nome",
+            "v24_cadastro_telefone": "decide_telefone",
+            "v24_cadastro_horario_carrinha": "decide_horario",
+            "v24_cadastro_residuo": "decide_residuo",
+        }
+        intent_ready = {
+            "v24_cadastro_quantidade": True,
+            "v24_cadastro_nome": isinstance(ctx.get("quantidade"), int),
+            "v24_cadastro_telefone": isinstance(ctx.get("quantidade"), int) and bool(ctx.get("nome")),
+            "v24_cadastro_horario_carrinha": bool(ctx.get("data")),
+            "v24_cadastro_residuo": bool(ctx.get("horario_agendado")) and isinstance(ctx.get("quantidade"), int),
+        }
+        proven_states = {
+            "v24_cadastro_mao_obra": "decide_mao_obra",
+            "v24_cadastro_valor": "decide_valor",
+            "v24_cadastro_pago": "decide_pago",
+            "v24_cadastro_forma": "decide_forma",
+            "v24_cadastro_forma_outro": "decide_forma_outro",
+            "v24_cadastro_referencia_opcao": "decide_referencia_opcao",
+            "v24_cadastro_referencia": "decide_referencia",
+        }
+        decision = None
+        if (
+            state in intent_states
+            and modality is CarrinhaCadastroModality.CARRINHA_INTENT
+            and intent_ready[state]
+        ):
+            decision = getattr(self._carrinha_cadastro, intent_states[state])(ctx, message)
+        elif (
+            state in {"v24_cadastro_data", "v24_cadastro_data_manual"}
+            and isinstance(ctx.get("quantidade"), int)
+            and bool(ctx.get("nome"))
+            and bool(ctx.get("telefone"))
+        ):
+            timezone = self._backend._lisbon_timezone()
+            decision = (
+                self._carrinha_cadastro.decide_data(ctx, message, datetime.now(timezone))
+                if state == "v24_cadastro_data"
+                else self._carrinha_cadastro.decide_data_manual(ctx, message, timezone)
+            )
+        elif state in proven_states and modality is CarrinhaCadastroModality.CARRINHA_PROVEN:
+            decision = getattr(self._carrinha_cadastro, proven_states[state])(ctx, message)
+        elif state == "v24_cadastro_endereco" and modality is CarrinhaCadastroModality.CARRINHA_PROVEN:
+            decision = self._carrinha_cadastro.decide_endereco(
+                ctx, message, self._backend._coordinates(message, message.texto or "")
+            )
+        elif state == "v24_cadastro_confirmacao" and modality is CarrinhaCadastroModality.CARRINHA_PROVEN:
+            decision = self._carrinha_cadastro.decide_confirmacao(ctx, message)
+            if isinstance(decision, ConfirmarCadastroCarrinha):
+                response = self._backend.confirmar_cadastro_carrinha(conversa, decision.context)
+                return response if response is not None else self._backend.handle(conversa, message)
+            if isinstance(decision, AdvanceTransition) and decision.next_state == "v24_cadastro_corrigir":
+                decision = AdvanceTransition(decision.next_state, decision.context, self._backend._corrigir_prompt(decision.context))
+        elif state == "v24_cadastro_corrigir" and modality is CarrinhaCadastroModality.CARRINHA_PROVEN:
+            choice = self._backend._norm(message.texto or "")
+            field, next_state, prompt = self._backend.cadastro_corrigir_decision(choice, ctx)
+            decision = self._carrinha_cadastro.decide_corrigir(ctx, field, next_state, prompt)
+        elif state in {"v24_cadastro_edicao_texto", "v24_cadastro_edicao_opcao", "v24_cadastro_edicao_data", "v24_cadastro_horario_carrinha"} and modality is CarrinhaCadastroModality.CARRINHA_PROVEN:
+            timezone = self._backend._lisbon_timezone()
+            decision = self._carrinha_cadastro.decide_edicao(
+                ctx,
+                message,
+                coordinates=self._backend._coordinates(message, message.texto or ""),
+                now=datetime.now(timezone),
+            )
+        elif state == "v24_cadastro_edicao_referencia_opcao" and modality is CarrinhaCadastroModality.CARRINHA_PROVEN:
+            decision = self._carrinha_cadastro.decide_edicao_referencia_opcao(ctx, message)
+        if decision is None:
+            return None
+        if isinstance(decision, AdvanceTransition) and decision.next_state == "v24_cadastro_confirmacao":
+            prefix = ""
+            if ctx.get("editing_field") == "forma_pagamento" and not ctx.get("pago"):
+                prefix = "A forma de pagamento só pode ser corrigida quando o pedido estiver pago.\n\n"
+            decision = AdvanceTransition(
+                decision.next_state,
+                decision.context,
+                prefix + self._backend.cadastro_confirmacao_prompt(decision.context),
+            )
+        if isinstance(decision, (AdvanceTransition, IdleTransition)):
+            return self._backend.apply_operational_transition(conversa, decision)
+        return decision

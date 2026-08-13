@@ -1,6 +1,8 @@
 """Contrato do seam entre WhatsappRouterAgent e PedidoV24Agent."""
 
+import inspect
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
@@ -23,6 +25,12 @@ from app.agents.pedido_v24.contentor_cadastro import (
     ConfirmarCadastroContentor,
     ContentorCadastroAgent,
     classify_cadastro_modality,
+)
+from app.agents.pedido_v24.carrinha_cadastro import (
+    CarrinhaCadastroAgent,
+    CarrinhaCadastroModality,
+    ConfirmarCadastroCarrinha,
+    classify_carrinha_cadastro,
 )
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.router import PedidoV24OperationalRouter
@@ -130,7 +138,7 @@ def test_router_usa_cadastro_modular_somente_na_escolha_contentor(
     backend.handle.assert_not_called()
 
 
-@pytest.mark.parametrize("choice", ["2", "carrinha", "carrinhas", "invalido"])
+@pytest.mark.parametrize("choice", ["invalido"])
 def test_router_mantem_carrinha_e_entrada_invalida_no_legado(
     db_session,
     monkeypatch,
@@ -4075,6 +4083,103 @@ def mensagem(texto, telefone="351900077700"):
         texto=texto,
         message_id=f"seam-{texto}",
     )
+
+
+def test_carrinha_cadastro_fluxo_preserva_ordem_itens_e_mao_obra_global():
+    agent = CarrinhaCadastroAgent()
+    ctx = agent.decide_tipo_solicitacao({}).context
+    quantidade = agent.decide_quantidade(ctx, mensagem("2"))
+    assert quantidade.next_state == "v24_cadastro_nome"
+    nome = agent.decide_nome(quantidade.context, mensagem("Cliente Carrinha"))
+    telefone = agent.decide_telefone(nome.context, mensagem("351912345678"))
+    assert telefone.next_state == "v24_cadastro_data"
+    now = datetime(2026, 8, 13, tzinfo=timezone.utc)
+    data = agent.decide_data(telefone.context, mensagem("1"), now)
+    assert data.next_state == "v24_cadastro_horario_carrinha"
+    horario = agent.decide_horario(data.context, mensagem("14:00"))
+    assert horario.next_state == "v24_cadastro_residuo"
+    primeiro = agent.decide_residuo(horario.context, mensagem("1"))
+    assert primeiro.next_state == "v24_cadastro_residuo"
+    segundo = agent.decide_residuo(primeiro.context, mensagem("2"))
+    assert segundo.next_state == "v24_cadastro_mao_obra"
+    assert [item["tipo_equipamento"] for item in segundo.context["itens"]] == [
+        "CARRINHA", "CARRINHA"
+    ]
+    mao_obra = agent.decide_mao_obra(segundo.context, mensagem("1"))
+    assert mao_obra.next_state == "v24_cadastro_valor"
+    assert mao_obra.context["precisa_mao_de_obra"] is True
+    assert all(item["precisa_mao_de_obra"] is False for item in mao_obra.context["itens"])
+
+
+@pytest.mark.parametrize("choice", ["2", "carrinha", "carrinhas"])
+def test_router_selecao_moderna_carrinha_entra_no_novo_agente(db_session, choice):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(estado_atual="v24_cadastro_tipo_solicitacao", contexto_json={})
+
+    resposta = router.handle(conversa, mensagem(choice))
+
+    assert resposta == "🔢 Quantas carrinhas são necessárias para este pedido?"
+    assert conversa.contexto_json == {"tipo_solicitacao": "CARRINHA"}
+    backend.handle.assert_not_called()
+
+
+def test_carrinha_cadastro_validacoes_especificas_e_confirmacao():
+    agent = CarrinhaCadastroAgent()
+    assert agent.decide_quantidade({"tipo_solicitacao": "CARRINHA"}, mensagem("0")) == "Informe uma quantidade entre 1 e 50."
+    assert "Horário inválido" in agent.decide_horario({}, mensagem("25:00"))
+    proven = {
+        "tipo_solicitacao": "CARRINHA", "quantidade": 1,
+        "itens": [{"tipo_equipamento": "CARRINHA"}], "residuos": ["Entulho Limpo"],
+        "nome": "Cliente", "telefone": "351912345678",
+        "data": "2026-08-13T00:00:00+00:00", "horario_agendado": "14:00",
+    }
+    assert classify_carrinha_cadastro(proven) is CarrinhaCadastroModality.CARRINHA_PROVEN
+    assert isinstance(agent.decide_confirmacao(proven, mensagem("confirmar")), ConfirmarCadastroCarrinha)
+    assert agent.decide_confirmacao(proven, mensagem("cancelar")) == IdleTransition(
+        "Pedido cancelado. Nenhum pedido foi criado."
+    )
+
+
+def test_carrinha_cadastro_edicao_hora_atualiza_itens_e_retorna_resumo():
+    agent = CarrinhaCadastroAgent()
+    context = {
+        "tipo_solicitacao": "CARRINHA", "quantidade": 1,
+        "itens": [{"tipo_equipamento": "CARRINHA", "horario_agendado": "10:00"}],
+        "residuos": ["Entulho Limpo"], "editing_field": "hora_entrega",
+        "nome": "Cliente", "telefone": "351912345678",
+        "data": "2026-08-13T00:00:00+00:00", "horario_agendado": "10:00",
+    }
+    decision = agent.decide_edicao(context, mensagem("11:30"), now=datetime.now(timezone.utc))
+    assert decision.next_state == "v24_cadastro_confirmacao"
+    assert decision.context["horario_agendado"] == "11:30"
+    assert decision.context["itens"][0]["horario_agendado"] == "11:30"
+
+
+def test_boundary_cadastro_carrinha_recomprova_modalidade_e_delega_finish(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend._finish_cadastro = Mock(return_value="criado")
+    conversa = SimpleNamespace(estado_atual="v24_cadastro_confirmacao")
+    carrinha = {
+        "tipo_solicitacao": "CARRINHA", "quantidade": 1,
+        "itens": [{"tipo_equipamento": "CARRINHA"}],
+        "nome": "Cliente", "telefone": "351912345678",
+        "data": "2026-08-13T00:00:00+00:00", "horario_agendado": "14:00",
+    }
+    assert backend.confirmar_cadastro_carrinha(conversa, carrinha) == "criado"
+    backend._finish_cadastro.assert_called_once()
+    contentor = {**carrinha, "tipo_solicitacao": "CONTENTOR", "itens": [{"tipo_equipamento": "CONTENTOR"}]}
+    assert backend.confirmar_cadastro_carrinha(conversa, contentor) is None
+
+
+def test_carrinha_cadastro_agent_nao_declara_infraestrutura_persistente():
+    source = Path(inspect.getsourcefile(CarrinhaCadastroAgent)).read_text(encoding="utf-8")
+    assert "PedidoService" not in source
+    assert ".db" not in source
+    assert ".query(" not in source
+    assert ".commit(" not in source
+    assert ".rollback(" not in source
 
 
 @pytest.fixture
