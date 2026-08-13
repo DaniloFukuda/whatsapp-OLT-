@@ -1,5 +1,6 @@
 """Contrato do seam entre WhatsappRouterAgent e PedidoV24Agent."""
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
@@ -478,6 +479,142 @@ def test_router_nao_consume_escolhas_nao_contentor_em_tipo_equipamento(
         },
     )
     message = _cadastro_message(choice)
+
+    assert router.handle(conversa, message) == "legado"
+    backend.handle.assert_called_once_with(conversa, message)
+
+
+def _contentor_proven_context():
+    return {
+        "tipo_solicitacao": "CONTENTOR",
+        "quantidade": 1,
+        "itens": [
+            {
+                "tipo_equipamento": "CONTENTOR",
+                "horario_agendado": None,
+                "precisa_mao_de_obra": False,
+                "residuo_contratado": "Entulho Limpo",
+            }
+        ],
+        "residuos": ["Entulho Limpo"],
+    }
+
+
+@pytest.mark.parametrize("choice,days", [("1", 0), ("hoje", 0), ("2", 1), ("amanhã", 1)])
+def test_cadastro_contentor_data_preserva_atalhos_e_timezone(choice, days):
+    now = datetime(2026, 8, 12, 14, 30, tzinfo=timezone.utc)
+    decision = ContentorCadastroAgent().decide_data(
+        _contentor_proven_context(),
+        _cadastro_message(choice),
+        now,
+    )
+
+    assert decision.next_state == "v24_cadastro_valor"
+    assert decision.context["data"] == (now + timedelta(days=days)).isoformat()
+
+
+def test_cadastro_contentor_data_manual_preserva_formato_e_timezone():
+    decision = ContentorCadastroAgent().decide_data_manual(
+        _contentor_proven_context(),
+        _cadastro_message("31/12/2026"),
+        timezone.utc,
+    )
+
+    assert decision.next_state == "v24_cadastro_valor"
+    assert decision.context["data"] == "2026-12-31T00:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    "choice,expected",
+    [
+        ("3", "v24_cadastro_data_manual"),
+        ("outra data", "v24_cadastro_data_manual"),
+    ],
+)
+def test_cadastro_contentor_data_preserva_caminho_manual(choice, expected):
+    decision = ContentorCadastroAgent().decide_data(
+        _contentor_proven_context(),
+        _cadastro_message(choice),
+        datetime(2026, 8, 12, tzinfo=timezone.utc),
+    )
+    assert decision.next_state == expected
+
+
+@pytest.mark.parametrize("value", ["", "31-12-2026", "31/02/2026"])
+def test_cadastro_contentor_data_manual_invalida_preserva_mensagem(value):
+    assert ContentorCadastroAgent().decide_data_manual(
+        _contentor_proven_context(),
+        _cadastro_message(value),
+        timezone.utc,
+    ) == "Data inválida. Use o formato DD/MM/AAAA."
+
+
+@pytest.mark.parametrize("value,expected", [("12,50", "12.5"), ("0", "0.0"), ("-1", "-1.0")])
+def test_cadastro_contentor_valor_preserva_float_do_contexto(value, expected):
+    decision = ContentorCadastroAgent().decide_valor(
+        _contentor_proven_context(),
+        _cadastro_message(value),
+    )
+
+    assert decision.next_state == "v24_cadastro_pago"
+    assert decision.context["valor"] == expected
+
+
+def test_cadastro_contentor_valor_invalido_preserva_mensagem():
+    assert ContentorCadastroAgent().decide_valor(
+        _contentor_proven_context(),
+        _cadastro_message("invalido"),
+    ) == "Valor inválido."
+
+
+@pytest.mark.parametrize(
+    "state,message",
+    [
+        ("v24_cadastro_data", "1"),
+        ("v24_cadastro_data_manual", "31/12/2026"),
+        ("v24_cadastro_valor", "10,50"),
+    ],
+)
+def test_router_usa_planejamento_modular_somente_para_contentor_proven(
+    db_session,
+    state,
+    message,
+):
+    backend = PedidoV24Agent(db_session)
+    backend.apply_operational_transition = Mock(return_value="modular")
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(
+        estado_atual=state,
+        contexto_json=_contentor_proven_context(),
+    )
+
+    assert router.handle(conversa, _cadastro_message(message)) == "modular"
+    backend.handle.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"tipo_solicitacao": "CONTENTOR"},
+        {"tipo_solicitacao": "CARRINHA"},
+        {},
+        {
+            "tipo_solicitacao": "CONTENTOR",
+            "quantidade": 1,
+            "itens": [{"tipo_equipamento": "CARRINHA"}],
+        },
+    ],
+)
+def test_router_mantem_planejamento_nao_comprovado_no_legado(db_session, context):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(
+        estado_atual="v24_cadastro_data",
+        contexto_json=context,
+    )
+    message = _cadastro_message("1")
 
     assert router.handle(conversa, message) == "legado"
     backend.handle.assert_called_once_with(conversa, message)

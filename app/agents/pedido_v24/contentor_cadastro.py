@@ -2,6 +2,7 @@
 
 import re
 import unicodedata
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -231,6 +232,66 @@ class ContentorCadastroAgent:
             "v24_cadastro_data",
             ctx,
             self._data_prompt(),
+        )
+
+    def decide_data(
+        self,
+        context,
+        message: NormalizedWhatsAppMessage,
+        now: datetime,
+    ):
+        choice = self._normalize(message.texto)
+        if choice in {"1", "hoje"}:
+            planned = now
+        elif choice in {"2", "amanha"}:
+            planned = now + timedelta(days=1)
+        elif choice in {"3", "outra data"}:
+            return AdvanceTransition(
+                "v24_cadastro_data_manual",
+                dict(context or {}),
+                "Informe a data no formato DD/MM/AAAA.",
+            )
+        else:
+            return "Selecione Hoje, Amanhã ou Outra data."
+        ctx = dict(context or {})
+        ctx["data"] = planned.isoformat()
+        return AdvanceTransition(
+            "v24_cadastro_valor",
+            ctx,
+            "Qual é o valor global do pedido?",
+        )
+
+    def decide_data_manual(
+        self,
+        context,
+        message: NormalizedWhatsAppMessage,
+        timezone,
+    ):
+        raw = (message.texto or "").strip()
+        try:
+            planned = datetime.strptime(raw, "%d/%m/%Y").replace(tzinfo=timezone)
+        except ValueError:
+            return "Data inválida. Use o formato DD/MM/AAAA."
+        ctx = dict(context or {})
+        ctx["data"] = planned.isoformat()
+        return AdvanceTransition(
+            "v24_cadastro_valor",
+            ctx,
+            "Qual é o valor global do pedido?",
+        )
+
+    def decide_valor(self, context, message: NormalizedWhatsAppMessage):
+        raw = (message.texto or "").strip()
+        try:
+            valor = str(float(raw.replace(",", ".")))
+        except ValueError:
+            return "Valor inválido."
+        ctx = dict(context or {})
+        ctx["valor"] = valor
+        return AdvanceTransition(
+            "v24_cadastro_pago",
+            ctx,
+            "O pedido já está pago?\n\n1. Sim, já está pago\n2. Não, pendente",
         )
 
     @staticmethod

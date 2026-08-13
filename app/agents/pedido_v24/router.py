@@ -1,5 +1,7 @@
 """Seam de delegação para o backend legado do Pedido V24."""
 
+from datetime import datetime
+
 from sqlalchemy.orm import Session
 
 from app.agents.pedido_v24.contentor import (
@@ -135,6 +137,35 @@ class PedidoV24OperationalRouter:
                 else self._contentor_cadastro.decide_residuo
             )
             decision = decide(cadastro_context, message)
+            if isinstance(decision, AdvanceTransition):
+                return self._backend.apply_operational_transition(conversa, decision)
+            return decision
+        if (
+            cadastro_state in {
+                "v24_cadastro_data",
+                "v24_cadastro_data_manual",
+                "v24_cadastro_valor",
+            }
+            and cadastro_modality is CadastroModality.CONTENTOR_PROVEN
+        ):
+            timezone = self._backend._lisbon_timezone()
+            if cadastro_state == "v24_cadastro_data":
+                decision = self._contentor_cadastro.decide_data(
+                    cadastro_context,
+                    message,
+                    datetime.now(timezone),
+                )
+            elif cadastro_state == "v24_cadastro_data_manual":
+                decision = self._contentor_cadastro.decide_data_manual(
+                    cadastro_context,
+                    message,
+                    timezone,
+                )
+            else:
+                decision = self._contentor_cadastro.decide_valor(
+                    cadastro_context,
+                    message,
+                )
             if isinstance(decision, AdvanceTransition):
                 return self._backend.apply_operational_transition(conversa, decision)
             return decision
