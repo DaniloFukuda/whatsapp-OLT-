@@ -32,6 +32,10 @@ from app.agents.pedido_v24.carrinha_cadastro import (
     ConfirmarCadastroCarrinha,
     classify_carrinha_cadastro,
 )
+from app.agents.pedido_v24.carrinha import (
+    CarrinhaOperationalAgent,
+    ConfirmarChegadaCarrinha,
+)
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.router import PedidoV24OperationalRouter
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
@@ -1175,7 +1179,6 @@ def test_agente_selecao_entrega_sem_pendentes_retorna_idle():
 @pytest.mark.parametrize(
     "contexto",
     [
-        {"ids": [17], "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CARRINHA"]}]},
         {"ids": [17]},
         {"ids": [17], "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CONTENTOR", "CARRINHA"]}]},
     ],
@@ -4180,6 +4183,79 @@ def test_carrinha_cadastro_agent_nao_declara_infraestrutura_persistente():
     assert ".query(" not in source
     assert ".commit(" not in source
     assert ".rollback(" not in source
+
+
+def test_chegada_carrinha_selecao_moderna_usa_agente_e_snapshot(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado")
+    backend.resolve_chegada_carrinha_selection = Mock(return_value={
+        "pedido_id": 17, "pedido_exists": True, "carrinha_ids": (5,),
+        "prompt": "Confirme o número da frota da carrinha alocada (ou digite 0 se não houver):",
+    })
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(
+        estado_atual="v24_entrega_pedido",
+        contexto_json={"ids": [17], "operational_options": [{"pedido_id": 17, "tipos_equipamento": ["CARRINHA"]}]},
+    )
+
+    resposta = router.handle(conversa, mensagem("1"))
+
+    assert "frota da carrinha" in resposta
+    assert conversa.estado_atual == "v24_entrega_adesivo"
+    assert conversa.contexto_json["contentores"] == [5]
+    backend.handle.assert_not_called()
+
+
+def test_chegada_carrinha_frota_zero_e_foto_permanecem_conversacionais():
+    agent = CarrinhaOperationalAgent()
+    conversa = SimpleNamespace(contexto_json={
+        "pedido_id": 17, "contentores": [5], "indice": 0, "entregas": [],
+    })
+    decision = agent.decide_frota(conversa, mensagem("0"), {
+        "ativo_exists": True, "is_carrinha": True,
+        "status_operacional": "AGUARDANDO_CHEGADA",
+    })
+    assert decision.next_state == "v24_entrega_foto"
+    assert decision.context["entregas"][0]["numero_adesivo"] == "0"
+    foto = SimpleNamespace(tipo="image", media_id="foto-1", filename=None, message_id="m1")
+    foto_decision = agent.decide_foto(SimpleNamespace(contexto_json=decision.context), foto)
+    assert foto_decision.context["entregas"][0]["fotos"] == ["foto-1"]
+
+
+def test_chegada_carrinha_gps_referencia_e_confirmacao_produzem_comando():
+    agent = CarrinhaOperationalAgent()
+    ctx = {"pedido_id": 17, "contentores": [5], "indice": 1, "entregas": [{"contentor_id": 5, "numero_adesivo": "0", "fotos": ["f"]}]}
+    gps_message = NormalizedWhatsAppMessage(
+        telefone="351900077700", tipo="location", texto="Obra", message_id="gps",
+        latitude=38.7, longitude=-9.1,
+    )
+    gps = agent.decide_gps(SimpleNamespace(contexto_json=ctx), gps_message)
+    referencia = agent.decide_referencia_opcao(
+        SimpleNamespace(contexto_json=gps.context), mensagem("2"), "resumo"
+    )
+    assert referencia.next_state == "v24_entrega_confirmacao"
+    comando = agent.decide_confirmacao(
+        SimpleNamespace(contexto_json=referencia.context), mensagem("1")
+    )
+    assert isinstance(comando, ConfirmarChegadaCarrinha)
+
+
+def test_boundary_chegada_carrinha_delega_para_confirmacao_existente(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend._confirmar_entrega_preparada = Mock(return_value="confirmada")
+    conversa = SimpleNamespace(estado_atual="v24_entrega_confirmacao")
+    ctx = {"pedido_id": 17, "entregas": []}
+
+    assert backend.confirmar_chegada_carrinha(conversa, ctx) == "confirmada"
+    backend._confirmar_entrega_preparada.assert_called_once_with(
+        conversa, ctx, expected_tipo="CARRINHA"
+    )
+
+
+def test_carrinha_operational_agent_nao_declara_infraestrutura_persistente():
+    source = Path(inspect.getsourcefile(CarrinhaOperationalAgent)).read_text(encoding="utf-8")
+    for forbidden in ("PedidoService", ".db", ".query(", ".commit(", ".rollback(", "PedidoContentor"):
+        assert forbidden not in source
 
 
 @pytest.fixture

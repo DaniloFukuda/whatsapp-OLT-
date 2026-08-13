@@ -28,6 +28,10 @@ from app.agents.pedido_v24.carrinha_cadastro import (
     ConfirmarCadastroCarrinha,
     classify_carrinha_cadastro,
 )
+from app.agents.pedido_v24.carrinha import (
+    CarrinhaOperationalAgent,
+    ConfirmarChegadaCarrinha,
+)
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
 from app.agents.pedido_v24_agent import PedidoV24Agent
@@ -56,6 +60,7 @@ class PedidoV24OperationalRouter:
         self._backend = backend
         self._contentor_cadastro = ContentorCadastroAgent()
         self._carrinha_cadastro = CarrinhaCadastroAgent()
+        self._carrinha = CarrinhaOperationalAgent()
         self._contentor = None
         if isinstance(backend, PedidoV24Agent):
             self._contentor = ContentorOperationalAgent(
@@ -100,6 +105,9 @@ class PedidoV24OperationalRouter:
         message: NormalizedWhatsAppMessage,
     ) -> str:
         carrinha_response = self._handle_carrinha_cadastro(conversa, message)
+        if carrinha_response is not None:
+            return carrinha_response
+        carrinha_response = self._handle_carrinha_chegada(conversa, message)
         if carrinha_response is not None:
             return carrinha_response
         cadastro_decisions = {
@@ -887,6 +895,81 @@ class PedidoV24OperationalRouter:
                 decision.next_state,
                 decision.context,
                 prefix + self._backend.cadastro_confirmacao_prompt(decision.context),
+            )
+        if isinstance(decision, (AdvanceTransition, IdleTransition)):
+            return self._backend.apply_operational_transition(conversa, decision)
+        return decision
+
+    def _handle_carrinha_chegada(self, conversa, message):
+        state = getattr(conversa, "estado_atual", None)
+        ctx = getattr(conversa, "contexto_json", None) or {}
+        states = {
+            "v24_entrega_pedido", "v24_entrega_adesivo", "v24_entrega_foto",
+            "v24_entrega_foto_acao", "v24_entrega_gps",
+            "v24_entrega_referencia_opcao", "v24_entrega_referencia",
+            "v24_entrega_confirmacao",
+        }
+        if state not in states:
+            return None
+        if not getattr(get_settings(), "feature_carrinhas_enabled", True):
+            return None
+        pedido_id = ctx.get("pedido_id")
+        selected_id = None
+        if state == "v24_entrega_pedido":
+            selected_id = self._backend._selected_entrega_pedido_id(
+                (message.texto or "").strip(), ctx.get("ids", [])
+            )
+            pedido_id = selected_id
+        ready = {
+            "v24_entrega_pedido": bool(ctx.get("ids")) and bool(ctx.get("operational_options")),
+            "v24_entrega_adesivo": bool(ctx.get("contentores")) and isinstance(ctx.get("indice"), int) and isinstance(ctx.get("entregas"), list),
+            "v24_entrega_foto": bool(ctx.get("contentores")) and isinstance(ctx.get("entregas"), list) and bool(ctx.get("entregas")),
+            "v24_entrega_foto_acao": bool(ctx.get("contentores")) and isinstance(ctx.get("indice"), int) and bool(ctx.get("entregas")),
+            "v24_entrega_gps": bool(ctx.get("contentores")) and bool(ctx.get("entregas")),
+            "v24_entrega_referencia_opcao": "latitude" in ctx and "longitude" in ctx and bool(ctx.get("entregas")),
+            "v24_entrega_referencia": "latitude" in ctx and "longitude" in ctx and bool(ctx.get("entregas")),
+            "v24_entrega_confirmacao": {"pedido_id", "latitude", "longitude", "referencia_entrega", "entregas"}.issubset(ctx),
+        }
+        if not ready.get(state, False):
+            return None
+        if (
+            pedido_id is None
+            or self.resolve_modality(ctx, pedido_id) is not TipoEquipamentoPedido.CARRINHA
+        ):
+            return None
+        decision = None
+        if state == "v24_entrega_pedido":
+            snapshot = self._backend.resolve_chegada_carrinha_selection(message, ctx)
+            decision = self._carrinha.select_entrega_pedido(conversa, snapshot)
+        elif state == "v24_entrega_adesivo":
+            snapshot = self._backend.resolve_chegada_carrinha_frota(message, ctx)
+            decision = self._carrinha.decide_frota(conversa, message, snapshot)
+        elif state == "v24_entrega_foto":
+            decision = self._carrinha.decide_foto(conversa, message)
+        elif state == "v24_entrega_foto_acao":
+            decision = self._carrinha.decide_foto_acao(conversa, message)
+        elif state == "v24_entrega_gps":
+            decision = self._carrinha.decide_gps(conversa, message)
+        elif state == "v24_entrega_referencia_opcao":
+            decision = self._carrinha.decide_referencia_opcao(conversa, message, "")
+        elif state == "v24_entrega_referencia":
+            decision = self._carrinha.decide_referencia(conversa, message, "")
+        elif state == "v24_entrega_confirmacao":
+            decision = self._carrinha.decide_confirmacao(conversa, message)
+            if isinstance(decision, ConfirmarChegadaCarrinha):
+                return self._backend.confirmar_chegada_carrinha(
+                    conversa, decision.context
+                )
+        if decision is None:
+            return None
+        if (
+            isinstance(decision, AdvanceTransition)
+            and decision.next_state == "v24_entrega_confirmacao"
+        ):
+            decision = AdvanceTransition(
+                decision.next_state,
+                decision.context,
+                self._backend.entrega_confirmacao_prompt(decision.context),
             )
         if isinstance(decision, (AdvanceTransition, IdleTransition)):
             return self._backend.apply_operational_transition(conversa, decision)

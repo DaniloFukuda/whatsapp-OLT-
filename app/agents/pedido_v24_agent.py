@@ -1674,6 +1674,56 @@ class PedidoV24Agent:
             "adesivo_em_ciclo_ativo": duplicate is not None,
         }
 
+    def resolve_chegada_carrinha_selection(self, message, context):
+        """Resolve a seleção moderna de Carrinha em snapshot read-only."""
+        raw = (message.texto or "").strip()
+        pedido_id = self._selected_entrega_pedido_id(raw, context.get("ids", []))
+        if pedido_id is None:
+            return None
+        pedido = self.db.get(Pedido, pedido_id)
+        if not pedido:
+            return {"pedido_id": pedido_id, "pedido_exists": False, "carrinha_ids": (), "prompt": ""}
+        pendentes = tuple(
+            item.id for item in pedido.contentores
+            if item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+            and item.status_operacional_carrinha
+            == StatusOperacionalCarrinha.AGUARDANDO_CHEGADA.value
+        )
+        return {
+            "pedido_id": pedido.id,
+            "pedido_exists": True,
+            "carrinha_ids": pendentes,
+            "prompt": (
+                "Confirme o número da frota da carrinha alocada (ou digite 0 se não houver):"
+                if pendentes else ""
+            ),
+        }
+
+    def resolve_chegada_carrinha_frota(self, message, context):
+        """Expõe somente existência, modalidade e status do ativo atual."""
+        if message.tipo == "interactive":
+            return None
+        item_id = context["contentores"][context["indice"]]
+        item = self.db.get(PedidoContentor, item_id)
+        return {
+            "ativo_exists": item is not None,
+            "is_carrinha": (
+                item is not None
+                and item.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value
+            ),
+            "status_operacional": (
+                item.status_operacional_carrinha if item else None
+            ),
+        }
+
+    def confirmar_chegada_carrinha(self, conversa, ctx):
+        """Boundary específico que delega à confirmação transacional existente."""
+        return self._confirmar_entrega_preparada(
+            conversa,
+            ctx,
+            expected_tipo=TipoEquipamentoPedido.CARRINHA.value,
+        )
+
     def resolve_entrega_pagamento_modality(self, ctx):
         """Resolve a modalidade pelos itens persistidos, sem alterar o pedido."""
         if not isinstance(ctx, Mapping):
