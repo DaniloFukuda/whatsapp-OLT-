@@ -17,6 +17,11 @@ from app.agents.pedido_v24.contentor import (
     PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
 )
+from app.agents.pedido_v24.contentor_cadastro import (
+    CadastroModality,
+    ContentorCadastroAgent,
+    classify_cadastro_modality,
+)
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.router import PedidoV24OperationalRouter
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
@@ -25,6 +30,151 @@ from app.agents.whatsapp_router_agent import WhatsappRouterAgent
 from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.models.operador import PerfilOperador
 from app.models.pedido import TipoEquipamentoPedido
+
+
+@pytest.mark.parametrize(
+    "context,expected",
+    [
+        ({"tipo_solicitacao": "CONTENTOR"}, CadastroModality.CONTENTOR_INTENT),
+        ({"tipo_solicitacao": "CARRINHA"}, CadastroModality.CARRINHA),
+        ({}, CadastroModality.LEGACY_INDETERMINATE),
+        (
+            {
+                "tipo_solicitacao": "CONTENTOR",
+                "item_atual": {"tipo_equipamento": "CARRINHA"},
+            },
+            CadastroModality.DIVERGENT,
+        ),
+        (
+            {
+                "tipo_solicitacao": "CONTENTOR",
+                "itens": [{"tipo_equipamento": "CARRINHA"}],
+            },
+            CadastroModality.DIVERGENT,
+        ),
+        (
+            {
+                "tipo_solicitacao": "CONTENTOR",
+                "itens": [
+                    {"tipo_equipamento": "CONTENTOR"},
+                    {"tipo_equipamento": "CARRINHA"},
+                ],
+            },
+            CadastroModality.DIVERGENT,
+        ),
+        (
+            {
+                "tipo_solicitacao": "CONTENTOR",
+                "quantidade": 2,
+                "itens": [
+                    {"tipo_equipamento": "CONTENTOR"},
+                    {"tipo_equipamento": "CONTENTOR"},
+                ],
+            },
+            CadastroModality.CONTENTOR_PROVEN,
+        ),
+    ],
+)
+def test_classifica_modalidade_do_cadastro_sem_inferencia(context, expected):
+    snapshot = repr(context)
+
+    assert classify_cadastro_modality(context) is expected
+    assert repr(context) == snapshot
+
+
+def test_agente_de_cadastro_contentor_e_separado_e_sem_dependencias_persistentes():
+    agent = ContentorCadastroAgent()
+
+    assert not isinstance(agent, ContentorOperationalAgent)
+    assert not hasattr(agent, "db")
+    assert not hasattr(agent, "service")
+
+
+@pytest.mark.parametrize("choice", ["1", "contentor", "contentores"])
+def test_router_usa_cadastro_modular_somente_na_escolha_contentor(
+    db_session,
+    monkeypatch,
+    choice,
+):
+    backend = PedidoV24Agent(db_session)
+    backend.apply_operational_transition = Mock(return_value="cadastro-contentor")
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(
+        estado_atual="v24_cadastro_tipo_solicitacao",
+        contexto_json={},
+    )
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+
+    resposta = router.handle(
+        conversa,
+        NormalizedWhatsAppMessage(
+            telefone="351900000000",
+            texto=choice,
+            tipo="text",
+        ),
+    )
+
+    assert resposta == "cadastro-contentor"
+    transition = backend.apply_operational_transition.call_args.args[1]
+    assert transition == AdvanceTransition(
+        "v24_cadastro_nome",
+        {"tipo_solicitacao": "CONTENTOR"},
+        "Qual é o nome do cliente?",
+    )
+    backend.handle.assert_not_called()
+
+
+@pytest.mark.parametrize("choice", ["2", "carrinha", "carrinhas", "invalido"])
+def test_router_mantem_carrinha_e_entrada_invalida_no_legado(
+    db_session,
+    monkeypatch,
+    choice,
+):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(
+        estado_atual="v24_cadastro_tipo_solicitacao",
+        contexto_json={},
+    )
+    message = NormalizedWhatsAppMessage(
+        telefone="351900000000",
+        texto=choice,
+        tipo="text",
+    )
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True),
+    )
+
+    assert router.handle(conversa, message) == "legado"
+    backend.handle.assert_called_once_with(conversa, message)
+
+
+def test_router_mantem_contentor_desabilitado_no_legado(db_session, monkeypatch):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="recusa-legada")
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(
+        estado_atual="v24_cadastro_tipo_solicitacao",
+        contexto_json={},
+    )
+    message = NormalizedWhatsAppMessage(
+        telefone="351900000000",
+        texto="1",
+        tipo="text",
+    )
+    monkeypatch.setattr(
+        "app.agents.pedido_v24.router.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=False),
+    )
+
+    assert router.handle(conversa, message) == "recusa-legada"
+    backend.handle.assert_called_once_with(conversa, message)
 
 
 @pytest.mark.parametrize(

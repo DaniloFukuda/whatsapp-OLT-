@@ -14,6 +14,7 @@ from app.agents.pedido_v24.contentor import (
     PrepararConfirmacaoRecolhaContentor,
     RegistrarPagamentoEntregaContentor,
 )
+from app.agents.pedido_v24.contentor_cadastro import ContentorCadastroAgent
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
 from app.agents.pedido_v24_agent import PedidoV24Agent
@@ -40,6 +41,7 @@ class PedidoV24OperationalRouter:
                 raise TypeError("db é obrigatório quando backend não é fornecido")
             backend = PedidoV24Agent(db)
         self._backend = backend
+        self._contentor_cadastro = ContentorCadastroAgent()
         self._contentor = None
         if isinstance(backend, PedidoV24Agent):
             self._contentor = ContentorOperationalAgent(
@@ -83,6 +85,16 @@ class PedidoV24OperationalRouter:
         conversa: ConversaWhatsApp,
         message: NormalizedWhatsAppMessage,
     ) -> str:
+        if (
+            getattr(conversa, "estado_atual", None)
+            == "v24_cadastro_tipo_solicitacao"
+            and self._contentor_cadastro.is_contentor_selection(message.texto)
+            and get_settings().feature_contentores_enabled
+        ):
+            decision = self._contentor_cadastro.decide_tipo_solicitacao(
+                conversa.contexto_json or {}
+            )
+            return self._backend.apply_operational_transition(conversa, decision)
         if (
             getattr(conversa, "estado_atual", None) == "v24_despejo_ativo"
             and self._contentor is not None
