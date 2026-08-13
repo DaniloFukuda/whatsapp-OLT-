@@ -80,13 +80,13 @@ class ContentorCadastroAgent:
 
     @staticmethod
     def is_contentor_selection(value: str | None) -> bool:
-        normalized = unicodedata.normalize("NFKD", value or "")
-        choice = "".join(
-            character
-            for character in normalized
-            if not unicodedata.combining(character)
-        ).strip().lower()
-        return choice in ContentorCadastroAgent._CONTENTOR_ALIASES
+        return ContentorCadastroAgent._normalize(value) in (
+            ContentorCadastroAgent._CONTENTOR_ALIASES
+        )
+
+    @staticmethod
+    def is_contentor_item_selection(value: str | None) -> bool:
+        return ContentorCadastroAgent._normalize(value) in {"1", "contentor"}
 
     def decide_tipo_solicitacao(self, context: dict[str, Any] | None) -> AdvanceTransition:
         ctx = dict(context or {})
@@ -147,6 +147,92 @@ class ContentorCadastroAgent:
             self._tipo_equipamento_prompt(ctx),
         )
 
+    def decide_tipo_equipamento(self, context):
+        ctx = dict(context or {})
+        ctx["item_atual"] = {
+            "tipo_equipamento": TipoEquipamentoPedido.CONTENTOR.value,
+            "horario_agendado": None,
+        }
+        return AdvanceTransition(
+            "v24_cadastro_mao_obra",
+            ctx,
+            self._mao_obra_prompt(),
+        )
+
+    def decide_mao_obra(self, context, message: NormalizedWhatsAppMessage):
+        choice = self._normalize(message.texto)
+        mao_obra = {
+            "1": True,
+            "option_1": True,
+            "pedido_mao_obra_sim": True,
+            "sim": True,
+            "✅ sim": True,
+            "sim, com pessoal": True,
+            "com pessoal": True,
+            "2": False,
+            "option_2": False,
+            "pedido_mao_obra_nao": False,
+            "nao": False,
+            "❌ nao": False,
+            "nao, apenas equipamento": False,
+            "apenas equipamento": False,
+        }.get(choice)
+        if mao_obra is None:
+            return self._mao_obra_prompt()
+        ctx = dict(context or {})
+        item_atual = dict(ctx.get("item_atual") or {})
+        item_atual["tipo_equipamento"] = TipoEquipamentoPedido.CONTENTOR.value
+        item_atual["precisa_mao_de_obra"] = mao_obra
+        ctx["item_atual"] = item_atual
+        ctx["precisa_mao_de_obra"] = mao_obra
+        return AdvanceTransition(
+            "v24_cadastro_residuo",
+            ctx,
+            self._residuo_prompt(ctx),
+        )
+
+    def decide_residuo(self, context, message: NormalizedWhatsAppMessage):
+        residue = {
+            "1": "Entulho Limpo",
+            "option_1": "Entulho Limpo",
+            "pedido_residuo_limpo": "Entulho Limpo",
+            "entulho limpo": "Entulho Limpo",
+            "limpo": "Entulho Limpo",
+            "2": "Entulho Misto",
+            "option_2": "Entulho Misto",
+            "pedido_residuo_misto": "Entulho Misto",
+            "entulho misto": "Entulho Misto",
+            "misto": "Entulho Misto",
+        }.get(self._normalize(message.texto))
+        ctx = dict(context or {})
+        if not residue:
+            return self._residuo_prompt(ctx)
+        item_atual = dict(ctx.get("item_atual") or {})
+        item = {
+            "tipo_equipamento": TipoEquipamentoPedido.CONTENTOR.value,
+            "horario_agendado": None,
+            "precisa_mao_de_obra": False,
+        }
+        if item_atual.get("tipo_equipamento"):
+            item["tipo_equipamento"] = item_atual["tipo_equipamento"]
+        if item_atual.get("horario_agendado"):
+            item["horario_agendado"] = item_atual["horario_agendado"]
+        item["residuo_contratado"] = residue
+        ctx["itens"] = [*(ctx.get("itens") or []), item]
+        ctx["residuos"] = [*(ctx.get("residuos") or []), residue]
+        ctx.pop("item_atual", None)
+        if len(ctx["itens"]) < ctx["quantidade"]:
+            return AdvanceTransition(
+                "v24_cadastro_tipo_equipamento",
+                ctx,
+                self._tipo_equipamento_prompt(ctx),
+            )
+        return AdvanceTransition(
+            "v24_cadastro_data",
+            ctx,
+            self._data_prompt(),
+        )
+
     @staticmethod
     def _phone_from_message(message, raw):
         value = message.contact_phone or raw
@@ -168,3 +254,32 @@ class ContentorCadastroAgent:
             f"Tipo de equipamento do item {index}/{context['quantidade']}:\n\n"
             "1. 📦 Contentor\n2. 🚛 Carrinha"
         )
+
+    @staticmethod
+    def _mao_obra_prompt():
+        return (
+            "O cliente solicitou pessoal para carregamento do resíduo?\n\n"
+            "1. Sim, com pessoal\n"
+            "2. Não, apenas equipamento"
+        )
+
+    @staticmethod
+    def _residuo_prompt(context):
+        index = len(context["residuos"]) + 1
+        return (
+            f"Resíduo do contentor {index}/{context['quantidade']}:\n\n"
+            "1. 🟢 Entulho Limpo\n2. 🟠 Entulho Misto"
+        )
+
+    @staticmethod
+    def _data_prompt():
+        return "Quando está planejada a entrega?\n\n1. Hoje\n2. Amanhã\n3. Outra data"
+
+    @staticmethod
+    def _normalize(value):
+        normalized = unicodedata.normalize("NFKD", value or "")
+        return "".join(
+            character
+            for character in normalized
+            if not unicodedata.combining(character)
+        ).strip().lower()

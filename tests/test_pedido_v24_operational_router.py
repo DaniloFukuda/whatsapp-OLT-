@@ -345,6 +345,144 @@ def test_router_mantem_contextos_nao_contentor_intent_no_legado(
     backend.handle.assert_called_once_with(conversa, message)
 
 
+@pytest.mark.parametrize("choice", ["1", "contentor"])
+def test_cadastro_contentor_seleciona_tipo_do_item(choice):
+    agent = ContentorCadastroAgent()
+    assert agent.is_contentor_selection(choice)
+
+    decision = agent.decide_tipo_equipamento(
+        {
+            "tipo_solicitacao": "CONTENTOR",
+            "quantidade": 2,
+            "itens": [],
+            "residuos": [],
+        }
+    )
+
+    assert decision.next_state == "v24_cadastro_mao_obra"
+    assert decision.context["item_atual"] == {
+        "tipo_equipamento": "CONTENTOR",
+        "horario_agendado": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "choice,expected",
+    [("1", True), ("sim", True), ("2", False), ("não", False)],
+)
+def test_cadastro_contentor_mao_obra_preserva_mutacao_antiga(choice, expected):
+    decision = ContentorCadastroAgent().decide_mao_obra(
+        {
+            "tipo_solicitacao": "CONTENTOR",
+            "quantidade": 1,
+            "itens": [],
+            "residuos": [],
+            "item_atual": {
+                "tipo_equipamento": "CONTENTOR",
+                "horario_agendado": None,
+            },
+        },
+        _cadastro_message(choice),
+    )
+
+    assert decision.next_state == "v24_cadastro_residuo"
+    assert decision.context["precisa_mao_de_obra"] is expected
+    assert decision.context["item_atual"]["precisa_mao_de_obra"] is expected
+
+
+@pytest.mark.parametrize(
+    "choice,residue",
+    [
+        ("1", "Entulho Limpo"),
+        ("limpo", "Entulho Limpo"),
+        ("2", "Entulho Misto"),
+        ("misto", "Entulho Misto"),
+    ],
+)
+def test_cadastro_contentor_residuo_registra_item_e_conclui(choice, residue):
+    decision = ContentorCadastroAgent().decide_residuo(
+        {
+            "tipo_solicitacao": "CONTENTOR",
+            "quantidade": 1,
+            "itens": [],
+            "residuos": [],
+            "item_atual": {
+                "tipo_equipamento": "CONTENTOR",
+                "horario_agendado": None,
+                "precisa_mao_de_obra": True,
+            },
+        },
+        _cadastro_message(choice),
+    )
+
+    assert decision.next_state == "v24_cadastro_data"
+    assert decision.context["residuos"] == [residue]
+    assert decision.context["itens"] == [
+        {
+            "tipo_equipamento": "CONTENTOR",
+            "horario_agendado": None,
+            "precisa_mao_de_obra": False,
+            "residuo_contratado": residue,
+        }
+    ]
+    assert "item_atual" not in decision.context
+    assert (
+        classify_cadastro_modality(decision.context)
+        is CadastroModality.CONTENTOR_PROVEN
+    )
+
+
+def test_cadastro_contentor_residuo_repete_quando_faltam_itens():
+    decision = ContentorCadastroAgent().decide_residuo(
+        {
+            "tipo_solicitacao": "CONTENTOR",
+            "quantidade": 2,
+            "itens": [],
+            "residuos": [],
+            "item_atual": {
+                "tipo_equipamento": "CONTENTOR",
+                "horario_agendado": None,
+                "precisa_mao_de_obra": False,
+            },
+        },
+        _cadastro_message("1"),
+    )
+
+    assert decision.next_state == "v24_cadastro_tipo_equipamento"
+    assert len(decision.context["itens"]) == 1
+    assert "item_atual" not in decision.context
+    assert (
+        classify_cadastro_modality(decision.context)
+        is CadastroModality.CONTENTOR_INTENT
+    )
+
+
+@pytest.mark.parametrize(
+    "choice",
+    ["2", "carrinha", "contentores", "misto", "invalido"],
+)
+def test_router_nao_consume_escolhas_nao_contentor_em_tipo_equipamento(
+    db_session,
+    choice,
+):
+    backend = PedidoV24Agent(db_session)
+    backend.handle = Mock(return_value="legado")
+    router = PedidoV24OperationalRouter(backend=backend)
+    conversa = SimpleNamespace(
+        estado_atual="v24_cadastro_tipo_equipamento",
+        contexto_json={
+            "tipo_solicitacao": "CONTENTOR",
+            "quantidade": 1,
+            "itens": [],
+            "residuos": [],
+        },
+    )
+    message = _cadastro_message(choice)
+
+    assert router.handle(conversa, message) == "legado"
+    backend.handle.assert_called_once_with(conversa, message)
+
+
 @pytest.mark.parametrize(
     "context,expected",
     [

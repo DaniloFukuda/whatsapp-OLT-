@@ -106,6 +106,38 @@ class PedidoV24OperationalRouter:
             if isinstance(decision, AdvanceTransition):
                 return self._backend.apply_operational_transition(conversa, decision)
             return decision
+        cadastro_state = getattr(conversa, "estado_atual", None)
+        cadastro_context = getattr(conversa, "contexto_json", None) or {}
+        cadastro_modality = classify_cadastro_modality(cadastro_context)
+        if (
+            cadastro_state == "v24_cadastro_tipo_equipamento"
+            and cadastro_modality is CadastroModality.CONTENTOR_INTENT
+            and self._contentor_cadastro.is_contentor_item_selection(message.texto)
+        ):
+            decision = self._contentor_cadastro.decide_tipo_equipamento(
+                cadastro_context
+            )
+            return self._backend.apply_operational_transition(conversa, decision)
+        item_atual = cadastro_context.get("item_atual")
+        item_atual_contentor = (
+            isinstance(item_atual, dict)
+            and item_atual.get("tipo_equipamento")
+            == TipoEquipamentoPedido.CONTENTOR.value
+        )
+        if (
+            cadastro_state in {"v24_cadastro_mao_obra", "v24_cadastro_residuo"}
+            and cadastro_modality is CadastroModality.CONTENTOR_INTENT
+            and item_atual_contentor
+        ):
+            decide = (
+                self._contentor_cadastro.decide_mao_obra
+                if cadastro_state == "v24_cadastro_mao_obra"
+                else self._contentor_cadastro.decide_residuo
+            )
+            decision = decide(cadastro_context, message)
+            if isinstance(decision, AdvanceTransition):
+                return self._backend.apply_operational_transition(conversa, decision)
+            return decision
         if (
             getattr(conversa, "estado_atual", None)
             == "v24_cadastro_tipo_solicitacao"
