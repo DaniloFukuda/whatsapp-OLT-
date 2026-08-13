@@ -29,8 +29,11 @@ from app.agents.pedido_v24.carrinha_cadastro import (
     classify_carrinha_cadastro,
 )
 from app.agents.pedido_v24.carrinha import (
+    CancelarPartidaCarrinha,
     CarrinhaOperationalAgent,
     ConfirmarChegadaCarrinha,
+    ConfirmarPartidaCarrinha,
+    PrepararConfirmacaoPartidaCarrinha,
 )
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.transitions import AdvanceTransition, IdleTransition
@@ -108,6 +111,9 @@ class PedidoV24OperationalRouter:
         if carrinha_response is not None:
             return carrinha_response
         carrinha_response = self._handle_carrinha_chegada(conversa, message)
+        if carrinha_response is not None:
+            return carrinha_response
+        carrinha_response = self._handle_carrinha_partida(conversa, message)
         if carrinha_response is not None:
             return carrinha_response
         cadastro_decisions = {
@@ -970,6 +976,66 @@ class PedidoV24OperationalRouter:
                 decision.next_state,
                 decision.context,
                 self._backend.entrega_confirmacao_prompt(decision.context),
+            )
+        if isinstance(decision, (AdvanceTransition, IdleTransition)):
+            return self._backend.apply_operational_transition(conversa, decision)
+        return decision
+
+    def _handle_carrinha_partida(self, conversa, message):
+        state = getattr(conversa, "estado_atual", None)
+        ctx = getattr(conversa, "contexto_json", None) or {}
+        states = {
+            "v24_recolha_pedido", "v24_recolha_ativo", "v24_recolha_foto",
+            "v24_recolha_foto_acao", "v24_recolha_avaria",
+            "v24_recolha_relato", "v24_recolha_confirmacao",
+        }
+        if state not in states or not getattr(get_settings(), "feature_carrinhas_enabled", False):
+            return None
+        settings = get_settings()
+        ready = {
+            "v24_recolha_pedido": bool(ctx.get("ids")),
+            "v24_recolha_ativo": isinstance(ctx.get("pedido_id"), int) and bool(ctx.get("contentores")),
+            "v24_recolha_foto": isinstance(ctx.get("pedido_id"), int) and isinstance(ctx.get("contentor_id"), int) and isinstance(ctx.get("fotos_recolha"), list),
+            "v24_recolha_foto_acao": isinstance(ctx.get("contentor_id"), int) and bool(ctx.get("fotos_recolha")),
+            "v24_recolha_avaria": isinstance(ctx.get("contentor_id"), int) and bool(ctx.get("fotos_recolha")),
+            "v24_recolha_relato": isinstance(ctx.get("contentor_id"), int) and ctx.get("avariado") is True,
+            "v24_recolha_confirmacao": isinstance(ctx.get("pedido_id"), int) and isinstance(ctx.get("contentor_id"), int) and bool(ctx.get("fotos_recolha")),
+        }
+        if not ready[state]:
+            return None
+        decision = None
+        if state == "v24_recolha_pedido":
+            selection = self._backend.resolve_partida_carrinha_selection(message, ctx)
+            if selection is None:
+                return None
+            decision = self._carrinha.select_partida_pedido(conversa, selection)
+        elif state == "v24_recolha_ativo":
+            selection = self._backend.resolve_recolha_ativo_selection(message, ctx)
+            if selection is None or selection["modality"] is not TipoEquipamentoPedido.CARRINHA:
+                return None
+            decision = self._carrinha.select_partida_ativo(conversa, selection)
+        else:
+            if self._backend.resolve_recolha_context_modality(ctx) is not TipoEquipamentoPedido.CARRINHA:
+                return None
+            avarias_enabled = getattr(settings, "feature_avarias_enabled", False)
+            if state == "v24_recolha_foto":
+                decision = self._carrinha.decide_partida_foto(conversa, message)
+            elif state == "v24_recolha_foto_acao":
+                decision = self._carrinha.decide_partida_foto_acao(conversa, message, avarias_enabled=avarias_enabled)
+            elif state == "v24_recolha_avaria":
+                decision = self._carrinha.decide_partida_avaria(conversa, message, avarias_enabled=avarias_enabled)
+            elif state == "v24_recolha_relato":
+                decision = self._carrinha.decide_partida_relato(conversa, message, avarias_enabled=avarias_enabled)
+            elif state == "v24_recolha_confirmacao":
+                decision = self._carrinha.decide_partida_confirmacao(conversa, message, avarias_enabled=avarias_enabled)
+                if isinstance(decision, ConfirmarPartidaCarrinha):
+                    return self._backend.confirmar_partida_carrinha(conversa, decision.context)
+                if isinstance(decision, CancelarPartidaCarrinha):
+                    return self._backend.cancelar_partida_carrinha(conversa, decision.context)
+        if isinstance(decision, PrepararConfirmacaoPartidaCarrinha):
+            decision = AdvanceTransition(
+                "v24_recolha_confirmacao", decision.context,
+                decision.response_prefix + self._backend.recolha_confirmacao_prompt(decision.context),
             )
         if isinstance(decision, (AdvanceTransition, IdleTransition)):
             return self._backend.apply_operational_transition(conversa, decision)

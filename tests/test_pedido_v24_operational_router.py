@@ -33,8 +33,10 @@ from app.agents.pedido_v24.carrinha_cadastro import (
     classify_carrinha_cadastro,
 )
 from app.agents.pedido_v24.carrinha import (
+    ConfirmarPartidaCarrinha,
     CarrinhaOperationalAgent,
     ConfirmarChegadaCarrinha,
+    PrepararConfirmacaoPartidaCarrinha,
 )
 from app.agents.pedido_v24.modality import resolve_operational_modality
 from app.agents.pedido_v24.router import PedidoV24OperationalRouter
@@ -4256,6 +4258,59 @@ def test_carrinha_operational_agent_nao_declara_infraestrutura_persistente():
     source = Path(inspect.getsourcefile(CarrinhaOperationalAgent)).read_text(encoding="utf-8")
     for forbidden in ("PedidoService", ".db", ".query(", ".commit(", ".rollback(", "PedidoContentor"):
         assert forbidden not in source
+
+
+def test_partida_carrinha_agente_preserva_foto_avaria_e_relato():
+    agent = CarrinhaOperationalAgent()
+    ctx = {"pedido_id": 17, "contentor_id": 5, "fotos_recolha": [], "avariado": None, "relato_avaria": None}
+    foto = SimpleNamespace(tipo="image", media_id="partida-1", filename=None, message_id="m")
+    foto_decision = agent.decide_partida_foto(SimpleNamespace(contexto_json=ctx), foto)
+    assert foto_decision.context["fotos_recolha"] == ["partida-1"]
+    acao = agent.decide_partida_foto_acao(
+        SimpleNamespace(contexto_json=foto_decision.context), mensagem("2"), avarias_enabled=True
+    )
+    assert acao.next_state == "v24_recolha_avaria"
+    avaria = agent.decide_partida_avaria(
+        SimpleNamespace(contexto_json=acao.context), mensagem("2"), avarias_enabled=True
+    )
+    assert avaria.next_state == "v24_recolha_relato"
+    assert "pelo menos 10" in agent.decide_partida_relato(
+        SimpleNamespace(contexto_json=avaria.context), mensagem("curto"), avarias_enabled=True
+    )
+    relato = agent.decide_partida_relato(
+        SimpleNamespace(contexto_json=avaria.context), mensagem("Avaria detalhada"), avarias_enabled=True
+    )
+    assert isinstance(relato, PrepararConfirmacaoPartidaCarrinha)
+
+
+def test_partida_carrinha_avarias_off_saneia_e_preserva_foto_obrigatoria():
+    agent = CarrinhaOperationalAgent()
+    ctx = {"pedido_id": 17, "contentor_id": 5, "fotos_recolha": ["foto"], "avariado": True, "relato_avaria": "antigo"}
+    decision = agent.decide_partida_foto_acao(
+        SimpleNamespace(contexto_json=ctx), mensagem("2"), avarias_enabled=False
+    )
+    assert isinstance(decision, PrepararConfirmacaoPartidaCarrinha)
+    assert "avariado" not in decision.context and "relato_avaria" not in decision.context
+    assert agent.decide_partida_foto(SimpleNamespace(contexto_json=ctx), mensagem("texto")) == "Envie uma imagem para continuar."
+
+
+def test_partida_carrinha_confirmacao_emite_comando_especifico():
+    agent = CarrinhaOperationalAgent()
+    ctx = {"pedido_id": 17, "contentor_id": 5, "fotos_recolha": ["foto"], "avariado": False}
+    decision = agent.decide_partida_confirmacao(
+        SimpleNamespace(contexto_json=ctx), mensagem("confirmar"), avarias_enabled=True
+    )
+    assert isinstance(decision, ConfirmarPartidaCarrinha)
+
+
+def test_boundary_partida_carrinha_recomprova_e_delega_uma_vez(db_session):
+    backend = PedidoV24Agent(db_session)
+    backend.resolve_recolha_context_modality = Mock(return_value=TipoEquipamentoPedido.CARRINHA)
+    backend._confirmar_recolha_atual = Mock(return_value="partida")
+    conversa = SimpleNamespace(estado_atual="v24_recolha_confirmacao")
+    ctx = {"pedido_id": 17, "contentor_id": 5}
+    assert backend.confirmar_partida_carrinha(conversa, ctx) == "partida"
+    backend._confirmar_recolha_atual.assert_called_once_with(conversa, ctx)
 
 
 @pytest.fixture

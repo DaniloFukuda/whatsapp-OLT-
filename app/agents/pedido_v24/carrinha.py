@@ -13,6 +13,22 @@ class ConfirmarChegadaCarrinha:
     context: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ConfirmarPartidaCarrinha:
+    context: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CancelarPartidaCarrinha:
+    context: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PrepararConfirmacaoPartidaCarrinha:
+    context: dict[str, Any]
+    response_prefix: str = ""
+
+
 class CarrinhaOperationalAgent:
     """Decide a Chegada de Carrinha sem acessar infraestrutura persistente."""
 
@@ -132,6 +148,91 @@ class CarrinhaOperationalAgent:
         if choice in {"2", "cancelar", "❌ cancelar"}:
             return IdleTransition("Entrega cancelada. Nenhum ativo foi marcado como entregue.")
         return "Escolha Confirmar entrega ou Cancelar."
+
+    def select_partida_pedido(self, conversa, selection):
+        if selection is None or not selection["pedido_exists"]:
+            return "Selecione um pedido da lista."
+        if not selection["carrinha_ids"]:
+            return IdleTransition("Esse pedido ja nao possui ativos pendentes de recolha.")
+        ctx = dict(conversa.contexto_json or {})
+        ctx.update({"pedido_id": selection["pedido_id"], "recolhas": []})
+        ctx.update(selection["selection_context"])
+        return AdvanceTransition("v24_recolha_ativo", ctx, selection["prompt"])
+
+    def select_partida_ativo(self, conversa, selection):
+        if selection is None:
+            return None
+        ctx = dict(conversa.contexto_json or {})
+        ctx.update({
+            "contentor_id": selection["contentor_id"],
+            "fotos_recolha": [], "avariado": None, "relato_avaria": None,
+        })
+        return AdvanceTransition("v24_recolha_foto", ctx, selection["foto_prompt"])
+
+    def decide_partida_foto(self, conversa, message):
+        photo = message.media_id or message.filename or message.message_id if message.tipo == "image" else None
+        if not photo:
+            return "Envie uma imagem para continuar."
+        ctx = dict(conversa.contexto_json or {})
+        fotos = list(ctx.get("fotos_recolha") or [])
+        if photo not in fotos:
+            fotos.append(photo)
+        ctx["fotos_recolha"] = fotos
+        return AdvanceTransition("v24_recolha_foto_acao", ctx, "Foto guardada.\n\n1. ➕ Outra Foto\n2. ➡️ Próximo Passo")
+
+    def decide_partida_foto_acao(self, conversa, message, *, avarias_enabled):
+        choice = self._normalize(message.texto)
+        ctx = dict(conversa.contexto_json or {})
+        if choice in {"1", "outra foto", "➕ outra foto"}:
+            return AdvanceTransition("v24_recolha_foto", ctx, "Envie a próxima foto.")
+        if choice in {"2", "proximo passo", "➡️ proximo passo"}:
+            if not avarias_enabled:
+                ctx.pop("avariado", None); ctx.pop("relato_avaria", None)
+                return PrepararConfirmacaoPartidaCarrinha(ctx)
+            return AdvanceTransition("v24_recolha_avaria", ctx, "O equipamento sofreu algum estrago ou avaria na obra?\n\n1. ✅ Não, está perfeito\n2. 💥 Sim, está estragado")
+        return "Selecione Outra Foto ou Próximo Passo."
+
+    def decide_partida_avaria(self, conversa, message, *, avarias_enabled):
+        ctx = dict(conversa.contexto_json or {})
+        if not avarias_enabled:
+            return self._recover_disabled_partida_avaria(ctx)
+        choice = self._normalize(message.texto)
+        if choice in {"1", "nao, esta perfeito", "✅ nao, esta perfeito"}:
+            ctx.update({"avariado": False, "relato_avaria": None})
+            return PrepararConfirmacaoPartidaCarrinha(ctx)
+        if choice in {"2", "sim, esta estragado", "💥 sim, esta estragado"}:
+            ctx["avariado"] = True
+            return AdvanceTransition("v24_recolha_relato", ctx, "Descreva a avaria com pelo menos 10 caracteres.")
+        return "Selecione uma das opções de avaria."
+
+    def decide_partida_relato(self, conversa, message, *, avarias_enabled):
+        ctx = dict(conversa.contexto_json or {})
+        if not avarias_enabled:
+            return self._recover_disabled_partida_avaria(ctx)
+        relato = (message.texto or "").strip()
+        if len(relato) < 10:
+            return "O relato da avaria precisa ter pelo menos 10 caracteres."
+        ctx.update({"avariado": True, "relato_avaria": relato})
+        return PrepararConfirmacaoPartidaCarrinha(ctx)
+
+    def decide_partida_confirmacao(self, conversa, message, *, avarias_enabled):
+        ctx = dict(conversa.contexto_json or {})
+        if not avarias_enabled and (ctx.get("avariado") or ctx.get("relato_avaria")):
+            return self._recover_disabled_partida_avaria(ctx)
+        choice = self._normalize(message.texto)
+        if choice in {"1", "confirmar recolha", "confirmar"}:
+            return ConfirmarPartidaCarrinha(ctx)
+        if choice in {"2", "cancelar ativo", "cancelar"}:
+            return CancelarPartidaCarrinha(ctx)
+        return "Escolha Confirmar recolha ou Cancelar ativo."
+
+    @staticmethod
+    def _recover_disabled_partida_avaria(ctx):
+        ctx.pop("avariado", None); ctx.pop("relato_avaria", None)
+        return PrepararConfirmacaoPartidaCarrinha(
+            ctx,
+            "A funcionalidade de avarias não está disponível nesta empresa. O subfluxo foi cancelado com segurança.\n\n",
+        )
 
     @staticmethod
     def _normalize(value):

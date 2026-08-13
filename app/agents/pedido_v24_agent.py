@@ -1447,6 +1447,29 @@ class PedidoV24Agent:
             "foto_prompt": self._recolha_foto_prompt_for(contentor),
         }
 
+    def resolve_partida_carrinha_selection(self, message, ctx):
+        """Resolve pedido Carrinha elegível para Partida sem alterar estado."""
+        raw = (message.texto or "").strip()
+        pedido_id = self._selected_id(raw, ctx.get("ids", []))
+        if pedido_id is None:
+            return None
+        pedido = self.db.get(Pedido, pedido_id)
+        if not pedido:
+            return {"pedido_id": pedido_id, "pedido_exists": False, "carrinha_ids": (), "selection_context": {}, "prompt": ""}
+        pendentes = self._recolha_pendentes(pedido)
+        tipos = {item.tipo_equipamento for item in pendentes}
+        if tipos != {TipoEquipamentoPedido.CARRINHA.value}:
+            return None
+        context_snapshot = {}
+        prompt = self._recolha_selecao_prompt(context_snapshot, pendentes)
+        return {
+            "pedido_id": pedido.id,
+            "pedido_exists": True,
+            "carrinha_ids": tuple(item.id for item in pendentes),
+            "selection_context": context_snapshot,
+            "prompt": prompt,
+        }
+
     def resolve_recolha_context_modality(self, ctx):
         """Comprova a modalidade do ativo atual sem alterar estado ou banco."""
         if not isinstance(ctx, Mapping):
@@ -1476,6 +1499,20 @@ class PedidoV24Agent:
         ):
             raise ValueError("Esta operação aceita apenas contentores.")
         return self._confirmar_recolha_atual(conversa, ctx)
+
+    def confirmar_partida_carrinha(self, conversa, ctx):
+        """Boundary específico da Partida que reutiliza a confirmação existente."""
+        if conversa.estado_atual != "v24_recolha_confirmacao":
+            return None
+        if self.resolve_recolha_context_modality(ctx) is not TipoEquipamentoPedido.CARRINHA:
+            return None
+        return self._confirmar_recolha_atual(conversa, ctx)
+
+    def cancelar_partida_carrinha(self, conversa, ctx):
+        """Recomprova Carrinha antes de reutilizar o cancelamento existente."""
+        if self.resolve_recolha_context_modality(ctx) is not TipoEquipamentoPedido.CARRINHA:
+            return None
+        return self._cancelar_recolha_atual(conversa, ctx)
 
     def cancel_recolha_contentor(self, conversa, ctx):
         """Recomprova Contentor e delega o cancelamento ao fluxo legado."""
