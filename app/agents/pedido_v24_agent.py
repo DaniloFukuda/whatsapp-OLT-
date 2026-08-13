@@ -16,6 +16,7 @@ from app.integrations.whatsapp.parser import NormalizedWhatsAppMessage
 from app.core.config import get_settings
 from app.models.conversa import ConversaWhatsApp
 from app.models.pedido import (
+    Pedido,
     PedidoContentor,
     StatusOperacionalCarrinha,
     StatusPagamento,
@@ -1618,6 +1619,38 @@ class PedidoV24Agent:
             ctx,
             expected_tipo=TipoEquipamentoPedido.CONTENTOR.value,
         )
+
+    def resolve_entrega_contentor_selection(self, message, context):
+        """Resolve a seleção em snapshot simples, sem persistir conversa ou operação."""
+        raw = (message.texto or "").strip()
+        pedido_id = self._selected_entrega_pedido_id(raw, context.get("ids", []))
+        if pedido_id is None:
+            return None
+        pedido = self.db.get(Pedido, pedido_id)
+        if not pedido:
+            return {
+                "pedido_id": pedido_id,
+                "pedido_exists": False,
+                "contentor_ids": (),
+                "prompt": "",
+            }
+        pendentes = tuple(
+            item.id
+            for item in pedido.contentores
+            if item.tipo_equipamento == TipoEquipamentoPedido.CONTENTOR.value
+            and item.status_entrega == "PENDENTE"
+        )
+        prompt = (
+            "Digite o número do contentor que está a descarregar agora:"
+            if pendentes
+            else ""
+        )
+        return {
+            "pedido_id": pedido.id,
+            "pedido_exists": True,
+            "contentor_ids": pendentes,
+            "prompt": prompt,
+        }
 
     def resolve_entrega_pagamento_modality(self, ctx):
         """Resolve a modalidade pelos itens persistidos, sem alterar o pedido."""

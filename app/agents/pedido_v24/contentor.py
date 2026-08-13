@@ -94,9 +94,30 @@ class ContentorOperationalAgent:
             pedidos_contentor,
         )
 
-    def select_entrega_pedido(self, conversa, message) -> str:
-        """Executa somente a selecao de Contentor; os estados seguintes seguem legados."""
-        return self._legacy_backend.handle(conversa, message)
+    def select_entrega_pedido(self, conversa, selection):
+        """Decide a seleção moderna de Contentor usando snapshot read-only."""
+        if selection is None:
+            return "Selecione um pedido da lista."
+        if not selection["pedido_exists"]:
+            return "Selecione um pedido da lista."
+        if not selection["contentor_ids"]:
+            return IdleTransition(
+                "Esse pedido já não possui ativos pendentes de entrega."
+            )
+        ctx = dict(conversa.contexto_json or {})
+        ctx.update(
+            {
+                "pedido_id": selection["pedido_id"],
+                "contentores": list(selection["contentor_ids"]),
+                "indice": 0,
+                "entregas": [],
+            }
+        )
+        return AdvanceTransition(
+            "v24_entrega_adesivo",
+            ctx,
+            selection["prompt"],
+        )
 
     def decide_entrega_adesivo(self, conversa, message):
         """Produz a decisão da identificação do Contentor sem persistir estado."""

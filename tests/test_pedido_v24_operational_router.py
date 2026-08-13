@@ -1094,7 +1094,74 @@ def test_selecao_contentor_inequivoca_usa_modulo_novo(db_session):
     entrada = mensagem("1")
 
     assert router.handle(conversa, entrada) == "selecao-contentor"
-    router._contentor.select_entrega_pedido.assert_called_once_with(conversa, entrada)
+    router._contentor.select_entrega_pedido.assert_called_once_with(
+        conversa,
+        {
+            "pedido_id": 17,
+            "pedido_exists": False,
+            "contentor_ids": (),
+            "prompt": "",
+        },
+    )
+
+
+def test_agente_decide_selecao_entrega_contentor_por_snapshot_sem_backend():
+    backend = Mock()
+    agent = ContentorOperationalAgent(Mock(), backend)
+    conversa = SimpleNamespace(
+        contexto_json={"ids": [17], "preservado": True},
+    )
+
+    decision = agent.select_entrega_pedido(
+        conversa,
+        {
+            "pedido_id": 17,
+            "pedido_exists": True,
+            "contentor_ids": (31, 32),
+            "prompt": "Digite o número do contentor que está a descarregar agora:",
+        },
+    )
+
+    assert decision == AdvanceTransition(
+        "v24_entrega_adesivo",
+        {
+            "ids": [17],
+            "preservado": True,
+            "pedido_id": 17,
+            "contentores": [31, 32],
+            "indice": 0,
+            "entregas": [],
+        },
+        "Digite o número do contentor que está a descarregar agora:",
+    )
+    backend.handle.assert_not_called()
+
+
+def test_agente_selecao_entrega_invalida_preserva_mensagem_sem_backend():
+    backend = Mock()
+    agent = ContentorOperationalAgent(Mock(), backend)
+
+    assert agent.select_entrega_pedido(SimpleNamespace(contexto_json={}), None) == (
+        "Selecione um pedido da lista."
+    )
+    backend.handle.assert_not_called()
+
+
+def test_agente_selecao_entrega_sem_pendentes_retorna_idle():
+    agent = ContentorOperationalAgent(Mock(), Mock())
+    decision = agent.select_entrega_pedido(
+        SimpleNamespace(contexto_json={}),
+        {
+            "pedido_id": 17,
+            "pedido_exists": True,
+            "contentor_ids": (),
+            "prompt": "",
+        },
+    )
+
+    assert decision == IdleTransition(
+        "Esse pedido já não possui ativos pendentes de entrega."
+    )
 
 
 @pytest.mark.parametrize(

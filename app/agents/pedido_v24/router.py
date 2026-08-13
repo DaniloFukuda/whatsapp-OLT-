@@ -592,8 +592,22 @@ class PedidoV24OperationalRouter:
                 pedido_id is not None
                 and self.resolve_modality(context, pedido_id)
                 is TipoEquipamentoPedido.CONTENTOR
+                and get_settings().feature_contentores_enabled
             ):
-                return self._contentor.select_entrega_pedido(conversa, message)
+                selection = self._backend.resolve_entrega_contentor_selection(
+                    message,
+                    context,
+                )
+                decision = self._contentor.select_entrega_pedido(
+                    conversa,
+                    selection,
+                )
+                if isinstance(decision, (AdvanceTransition, IdleTransition)):
+                    return self._backend.apply_operational_transition(
+                        conversa,
+                        decision,
+                    )
+                return decision
         if getattr(conversa, "estado_atual", None) == "v24_entrega_adesivo" and self._contentor is not None:
             context = conversa.contexto_json or {}
             pedido_id = context.get("pedido_id")
