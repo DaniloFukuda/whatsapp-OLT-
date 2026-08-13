@@ -294,6 +294,108 @@ class ContentorCadastroAgent:
             "O pedido já está pago?\n\n1. Sim, já está pago\n2. Não, pendente",
         )
 
+    def decide_pago(self, context, message: NormalizedWhatsAppMessage):
+        choice = self._normalize(message.texto)
+        ctx = dict(context or {})
+        if choice in {"1", "sim", "sim, ja esta pago"}:
+            ctx["pago"] = True
+            return AdvanceTransition(
+                "v24_cadastro_forma",
+                ctx,
+                "Selecione a forma de pagamento:\n\n"
+                "1. MBWay\n2. Transferência\n3. Dinheiro\n4. Outro",
+            )
+        if choice in {"2", "nao", "nao, pendente"}:
+            ctx["pago"] = False
+            ctx["forma"] = None
+            return AdvanceTransition(
+                "v24_cadastro_endereco",
+                ctx,
+                self._endereco_prompt(),
+            )
+        return "Selecione uma das opções de pagamento."
+
+    def decide_forma(self, context, message: NormalizedWhatsAppMessage):
+        choice = self._normalize(message.texto)
+        forma = {
+            "1": "MBWay",
+            "mbway": "MBWay",
+            "2": "Transferência",
+            "transferencia": "Transferência",
+            "3": "Dinheiro",
+            "dinheiro": "Dinheiro",
+            "4": "Outro",
+            "outro": "Outro",
+        }.get(choice)
+        if not forma:
+            return "Selecione uma forma de pagamento."
+        ctx = dict(context or {})
+        if forma == "Outro":
+            return AdvanceTransition(
+                "v24_cadastro_forma_outro",
+                ctx,
+                "Qual foi a forma de pagamento?",
+            )
+        ctx["forma"] = forma
+        return AdvanceTransition(
+            "v24_cadastro_endereco",
+            ctx,
+            self._endereco_prompt(),
+        )
+
+    def decide_forma_outro(self, context, message: NormalizedWhatsAppMessage):
+        raw = (message.texto or "").strip()
+        if not raw:
+            return "Informe a forma de pagamento."
+        ctx = dict(context or {})
+        ctx["forma"] = raw[:80]
+        return AdvanceTransition(
+            "v24_cadastro_endereco",
+            ctx,
+            self._endereco_prompt(),
+        )
+
+    def decide_endereco(self, context, message, coordinates):
+        raw = (message.texto or "").strip()
+        if message.tipo == "location" and not coordinates:
+            return (
+                "Não foi possível ler a localização. Reenvie a localização "
+                "nativa ou digite o endereço."
+            )
+        if not raw or len(raw) > 300:
+            return "O endereço precisa ter entre 1 e 300 caracteres."
+        ctx = dict(context or {})
+        ctx["endereco"] = raw
+        if coordinates:
+            ctx["endereco_latitude"], ctx["endereco_longitude"] = coordinates
+        return AdvanceTransition(
+            "v24_cadastro_referencia_opcao",
+            ctx,
+            "Deseja informar um ponto de referência?\n\n1. Sim\n2. Não",
+        )
+
+    def decide_referencia_opcao(self, context, message):
+        choice = self._normalize(message.texto)
+        ctx = dict(context or {})
+        if choice in {"1", "sim"}:
+            return AdvanceTransition(
+                "v24_cadastro_referencia",
+                ctx,
+                "Qual é o ponto de referência?",
+            )
+        if choice in {"2", "nao"}:
+            ctx["referencia"] = None
+            return AdvanceTransition("v24_cadastro_confirmacao", ctx, "")
+        return "Selecione Sim ou Não."
+
+    def decide_referencia(self, context, message):
+        raw = (message.texto or "").strip()
+        if not 1 <= len(raw) <= 50:
+            return "O ponto de referência deve ter no máximo 50 caracteres."
+        ctx = dict(context or {})
+        ctx["referencia"] = raw
+        return AdvanceTransition("v24_cadastro_confirmacao", ctx, "")
+
     @staticmethod
     def _phone_from_message(message, raw):
         value = message.contact_phone or raw
@@ -335,6 +437,13 @@ class ContentorCadastroAgent:
     @staticmethod
     def _data_prompt():
         return "Quando está planejada a entrega?\n\n1. Hoje\n2. Amanhã\n3. Outra data"
+
+    @staticmethod
+    def _endereco_prompt():
+        return (
+            "Informe o endereço aproximado (até 300 caracteres) ou envie um "
+            "link do Google Maps."
+        )
 
     @staticmethod
     def _normalize(value):

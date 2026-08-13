@@ -621,6 +621,92 @@ def test_router_mantem_planejamento_nao_comprovado_no_legado(db_session, context
 
 
 @pytest.mark.parametrize(
+    "choice,next_state,pago,forma",
+    [
+        ("1", "v24_cadastro_forma", True, "ausente"),
+        ("sim", "v24_cadastro_forma", True, "ausente"),
+        ("2", "v24_cadastro_endereco", False, None),
+        ("não", "v24_cadastro_endereco", False, None),
+    ],
+)
+def test_cadastro_contentor_pago_preserva_decisao(choice, next_state, pago, forma):
+    context = {**_contentor_proven_context(), "forma": "anterior"}
+    decision = ContentorCadastroAgent().decide_pago(
+        context,
+        _cadastro_message(choice),
+    )
+
+    assert decision.next_state == next_state
+    assert decision.context["pago"] is pago
+    if forma == "ausente":
+        assert decision.context["forma"] == "anterior"
+    else:
+        assert decision.context["forma"] is None
+
+
+@pytest.mark.parametrize(
+    "choice,forma,next_state",
+    [
+        ("1", "MBWay", "v24_cadastro_endereco"),
+        ("mbway", "MBWay", "v24_cadastro_endereco"),
+        ("2", "Transferência", "v24_cadastro_endereco"),
+        ("transferência", "Transferência", "v24_cadastro_endereco"),
+        ("3", "Dinheiro", "v24_cadastro_endereco"),
+        ("dinheiro", "Dinheiro", "v24_cadastro_endereco"),
+        ("4", None, "v24_cadastro_forma_outro"),
+        ("outro", None, "v24_cadastro_forma_outro"),
+    ],
+)
+def test_cadastro_contentor_formas_preservadas(choice, forma, next_state):
+    decision = ContentorCadastroAgent().decide_forma(
+        _contentor_proven_context(),
+        _cadastro_message(choice),
+    )
+    assert decision.next_state == next_state
+    if forma:
+        assert decision.context["forma"] == forma
+
+
+def test_cadastro_contentor_forma_outro_strip_e_trunca_80():
+    decision = ContentorCadastroAgent().decide_forma_outro(
+        _contentor_proven_context(),
+        _cadastro_message("  " + "x" * 90 + "  "),
+    )
+    assert decision.next_state == "v24_cadastro_endereco"
+    assert decision.context["forma"] == "x" * 80
+
+
+def test_cadastro_contentor_endereco_textual_e_coordenadas():
+    decision = ContentorCadastroAgent().decide_endereco(
+        _contentor_proven_context(),
+        _cadastro_message(" Rua Teste "),
+        (38.7, -9.1),
+    )
+    assert decision.next_state == "v24_cadastro_referencia_opcao"
+    assert decision.context["endereco"] == "Rua Teste"
+    assert decision.context["endereco_latitude"] == 38.7
+    assert decision.context["endereco_longitude"] == -9.1
+
+
+@pytest.mark.parametrize("choice,next_state", [("1", "v24_cadastro_referencia"), ("sim", "v24_cadastro_referencia")])
+def test_cadastro_contentor_referencia_opcao_sim(choice, next_state):
+    decision = ContentorCadastroAgent().decide_referencia_opcao(
+        _contentor_proven_context(),
+        _cadastro_message(choice),
+    )
+    assert decision.next_state == next_state
+
+
+def test_cadastro_contentor_referencia_valida_prepara_confirmacao():
+    decision = ContentorCadastroAgent().decide_referencia(
+        _contentor_proven_context(),
+        _cadastro_message("  Portão azul  "),
+    )
+    assert decision.next_state == "v24_cadastro_confirmacao"
+    assert decision.context["referencia"] == "Portão azul"
+
+
+@pytest.mark.parametrize(
     "context,expected",
     [
         ({"tipo_solicitacao": "CONTENTOR"}, TipoEquipamentoPedido.CONTENTOR),

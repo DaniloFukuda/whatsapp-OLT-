@@ -2293,6 +2293,10 @@ class PedidoV24Agent:
         )
         return "\n".join(linhas)
 
+    def cadastro_confirmacao_prompt(self, context):
+        """Reutiliza o resumo legado sem persistir ou alterar o contexto."""
+        return self._format_confirmacao_cadastro(context)
+
     def _tipo_label(self, tipo):
         return "Carrinha" if tipo == TipoEquipamentoPedido.CARRINHA.value else "Contentor"
 

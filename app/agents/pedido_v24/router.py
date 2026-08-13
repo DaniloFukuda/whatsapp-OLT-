@@ -170,6 +170,44 @@ class PedidoV24OperationalRouter:
                 return self._backend.apply_operational_transition(conversa, decision)
             return decision
         if (
+            cadastro_state in {
+                "v24_cadastro_pago",
+                "v24_cadastro_forma",
+                "v24_cadastro_forma_outro",
+                "v24_cadastro_endereco",
+                "v24_cadastro_referencia_opcao",
+                "v24_cadastro_referencia",
+            }
+            and cadastro_modality is CadastroModality.CONTENTOR_PROVEN
+        ):
+            if cadastro_state == "v24_cadastro_endereco":
+                decision = self._contentor_cadastro.decide_endereco(
+                    cadastro_context,
+                    message,
+                    self._backend._coordinates(message, (message.texto or "").strip()),
+                )
+            else:
+                decide = {
+                    "v24_cadastro_pago": self._contentor_cadastro.decide_pago,
+                    "v24_cadastro_forma": self._contentor_cadastro.decide_forma,
+                    "v24_cadastro_forma_outro": self._contentor_cadastro.decide_forma_outro,
+                    "v24_cadastro_referencia_opcao": self._contentor_cadastro.decide_referencia_opcao,
+                    "v24_cadastro_referencia": self._contentor_cadastro.decide_referencia,
+                }[cadastro_state]
+                decision = decide(cadastro_context, message)
+            if (
+                isinstance(decision, AdvanceTransition)
+                and decision.next_state == "v24_cadastro_confirmacao"
+            ):
+                decision = AdvanceTransition(
+                    decision.next_state,
+                    decision.context,
+                    self._backend.cadastro_confirmacao_prompt(decision.context),
+                )
+            if isinstance(decision, AdvanceTransition):
+                return self._backend.apply_operational_transition(conversa, decision)
+            return decision
+        if (
             getattr(conversa, "estado_atual", None)
             == "v24_cadastro_tipo_solicitacao"
             and self._contentor_cadastro.is_contentor_selection(message.texto)
