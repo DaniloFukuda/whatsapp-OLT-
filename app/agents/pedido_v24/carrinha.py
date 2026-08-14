@@ -56,7 +56,7 @@ class CarrinhaOperationalAgent:
         if selection is None or not selection["pedido_exists"]:
             return "Selecione um pedido da lista."
         if not selection["carrinha_ids"]:
-            return IdleTransition("Esse pedido já não possui ativos pendentes de entrega.")
+            return IdleTransition("Esse pedido já não possui carrinhas aguardando chegada.")
         ctx = dict(conversa.contexto_json or {})
         ctx.update({
             "pedido_id": selection["pedido_id"],
@@ -74,11 +74,11 @@ class CarrinhaOperationalAgent:
         if snapshot["ativo_exists"] and not snapshot["is_carrinha"]:
             return None
         if not snapshot["ativo_exists"] or snapshot["status_operacional"] != "AGUARDANDO_CHEGADA":
-            return IdleTransition("Esse ativo já não está pendente. Reinicie a entrega.")
+            return IdleTransition("Esse ativo já não está pendente. Reinicie a chegada.")
         if not re.fullmatch(r"\d{1,6}", number):
             return "Informe o número da frota da carrinha ou 0 se não houver."
         if number != "0" and number in [str(item.get("numero_adesivo")) for item in ctx.get("entregas") or []]:
-            return "Esse adesivo ja foi informado neste lote."
+            return "Esse número de frota já foi informado neste lote."
         entregas = list(ctx.get("entregas") or [])
         entregas.append({
             "contentor_id": ctx["contentores"][ctx["indice"]],
@@ -143,10 +143,10 @@ class CarrinhaOperationalAgent:
                 if match:
                     coords = float(match.group(1)), float(match.group(2))
         if not coords:
-            return "Compartilhe a localização nativa do WhatsApp para confirmar a entrega."
+            return "Compartilhe a localização nativa do WhatsApp para confirmar a chegada."
         ctx = dict(conversa.contexto_json or {})
         ctx["latitude"], ctx["longitude"] = coords
-        return AdvanceTransition("v24_entrega_referencia_opcao", ctx, "Deseja informar algum ponto de referência para a entrega?\n\n1. Sim\n2. Não")
+        return AdvanceTransition("v24_entrega_referencia_opcao", ctx, "Deseja informar algum ponto de referência para a chegada?\n\n1. Sim\n2. Não")
 
     def decide_referencia_opcao(self, conversa, message, confirm_prompt):
         choice = self._normalize(message.texto)
@@ -168,17 +168,20 @@ class CarrinhaOperationalAgent:
 
     def decide_confirmacao(self, conversa, message):
         choice = self._normalize(message.texto)
-        if choice in {"1", "confirmar entrega", "✅ confirmar entrega"}:
+        if choice in {
+            "1", "confirmar chegada", "✅ confirmar chegada",
+            "confirmar entrega", "✅ confirmar entrega",
+        }:
             return ConfirmarChegadaCarrinha(dict(conversa.contexto_json or {}))
         if choice in {"2", "cancelar", "❌ cancelar"}:
-            return IdleTransition("Entrega cancelada. Nenhum ativo foi marcado como entregue.")
-        return "Escolha Confirmar entrega ou Cancelar."
+            return IdleTransition("Chegada cancelada. Nenhuma carrinha foi marcada como chegada.")
+        return "Escolha Confirmar chegada ou Cancelar."
 
     def select_partida_pedido(self, conversa, selection):
         if selection is None or not selection["pedido_exists"]:
             return "Selecione um pedido da lista."
         if not selection["carrinha_ids"]:
-            return IdleTransition("Esse pedido ja nao possui ativos pendentes de recolha.")
+            return IdleTransition("Esse pedido já não possui carrinhas aguardando partida.")
         ctx = dict(conversa.contexto_json or {})
         ctx.update({"pedido_id": selection["pedido_id"], "recolhas": []})
         ctx.update(selection["selection_context"])
@@ -245,11 +248,11 @@ class CarrinhaOperationalAgent:
         if not avarias_enabled and (ctx.get("avariado") or ctx.get("relato_avaria")):
             return self._recover_disabled_partida_avaria(ctx)
         choice = self._normalize(message.texto)
-        if choice in {"1", "confirmar recolha", "confirmar"}:
+        if choice in {"1", "confirmar partida", "confirmar recolha", "confirmar"}:
             return ConfirmarPartidaCarrinha(ctx)
         if choice in {"2", "cancelar ativo", "cancelar"}:
             return CancelarPartidaCarrinha(ctx)
-        return "Escolha Confirmar recolha ou Cancelar ativo."
+        return "Escolha Confirmar partida ou Cancelar ativo."
 
     @staticmethod
     def _recover_disabled_partida_avaria(ctx):

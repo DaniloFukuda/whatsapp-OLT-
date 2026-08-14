@@ -4365,6 +4365,128 @@ def test_adapter_despejo_carrinha_comprova_status_vinculo_e_prepara_cotas(monkey
     backend.db.commit.assert_not_called()
 
 
+def test_despejo_carrinha_conformidade_nao_usa_identidade_contentor(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24_agent.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True, feature_carrinhas_enabled=True),
+    )
+    item = _item_despejo(
+        id=12,
+        tipo_equipamento="CARRINHA",
+        status_recolha="PENDENTE",
+        status_operacional_carrinha="AGUARDANDO_DESPEJO",
+        numero_adesivo_contentor=None,
+    )
+    backend = _despejo_backend(item, {
+        "Entulho Limpo": {"saldo": 1},
+        "Entulho Misto": {"saldo": 0},
+    })
+    contexto = {
+        "pedido_id": 9,
+        "contentores": [12],
+        "terminar_indice": 2,
+        "despejos": [],
+    }
+
+    selection = backend.resolve_despejo_carrinha_ativo_selection(
+        mensagem("1"), contexto
+    )
+
+    assert selection["modality"] is TipoEquipamentoPedido.CARRINHA
+    assert selection["contentor_id"] == 12
+    assert selection["next_state"] == "v24_despejo_conformidade"
+    assert selection["context_updates"]["residuo_assumido"] == "Entulho Limpo"
+    assert selection["response"] == (
+        "O entulho desta Carrinha corresponde a Entulho Limpo?\n\n"
+        "1. ✅ Sim, tudo certo\n"
+        "2. 🚨 Não, está misturado/errado"
+    )
+    assert "Contentor" not in selection["response"]
+    assert "adesivo" not in selection["response"].lower()
+    assert contexto == {
+        "pedido_id": 9,
+        "contentores": [12],
+        "terminar_indice": 2,
+        "despejos": [],
+    }
+
+
+def test_despejo_contentor_preserva_prompt_historico_de_conformidade(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24_agent.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True, feature_carrinhas_enabled=True),
+    )
+    backend = _despejo_backend(_item_despejo(), {
+        "Entulho Limpo": {"saldo": 1},
+        "Entulho Misto": {"saldo": 0},
+    })
+    contexto = {
+        "pedido_id": 9,
+        "contentores": [17],
+        "terminar_indice": 2,
+        "despejos": [],
+    }
+
+    selection = backend.resolve_despejo_ativo_selection(mensagem("1"), contexto)
+
+    assert selection["modality"] is TipoEquipamentoPedido.CONTENTOR
+    assert selection["response"] == (
+        "O entulho do Contentor 42 corresponde a Entulho Limpo?\n\n"
+        "1. ✅ Sim, tudo certo\n"
+        "2. 🚨 Não, está misturado/errado"
+    )
+
+
+def test_despejo_carrinha_sucesso_final_preserva_boundary_e_terminologia(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.pedido_v24_agent.get_settings",
+        lambda: SimpleNamespace(feature_contentores_enabled=True, feature_carrinhas_enabled=True),
+    )
+    item = _item_despejo(
+        id=12,
+        tipo_equipamento="CARRINHA",
+        status_recolha="PENDENTE",
+        status_operacional_carrinha="AGUARDANDO_DESPEJO",
+        numero_adesivo_contentor=None,
+        horario_agendado="23:00",
+        frota_carrinha=None,
+    )
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.db = Mock()
+    backend.db.get.return_value = item
+    backend.db.get_bind.return_value.dialect.name = "postgresql"
+    backend.service = Mock()
+    backend.service.confirmar_despejo_carrinha.return_value = item
+    backend.service.get.return_value = SimpleNamespace(nome_cliente="Cliente")
+    backend._despejo_pendentes_por_pedido = Mock(return_value=[])
+    backend._idle_sem_commit = Mock(side_effect=lambda conversa, response: response)
+    contexto = _contexto_despejo_moderno(
+        pedido_id=9,
+        contentor_id=12,
+        fotos_despejo=["foto"],
+        residuo_efetivo="Entulho Limpo",
+    )
+    conversa = SimpleNamespace(telefone="operador")
+
+    response = backend._confirmar_despejo_atual(conversa, contexto)
+
+    backend.service.confirmar_despejo_carrinha.assert_called_once_with(
+        12,
+        "Entulho Limpo",
+        False,
+        None,
+        "operador",
+        ["foto"],
+        pedido_id=9,
+        _defer_commit=True,
+    )
+    assert "Carrinha (23:00) processado" in response
+    assert "Contentor" not in response
+    assert "contentor" not in response
+    assert "Nenhuma carrinha pendente" in response
+    backend.db.commit.assert_called_once_with()
+
+
 def test_despejo_pedido_carrinha_moderno_usa_adapter_e_agente(monkeypatch):
     monkeypatch.setattr(
         "app.agents.pedido_v24.router.get_settings",
@@ -4569,6 +4691,106 @@ def test_opcao_cinco_permanece_fora_do_seam(whatsapp_router, monkeypatch):
 
     assert router.handle(mensagem("5")) == "painel-atual"
     assert spy.calls == []
+
+
+def _assert_semanticamente_carrinha(*responses):
+    proibidos = ("contentor", "adesivo", "entrega", "recolha")
+    for response in responses:
+        texto = response.response if isinstance(response, (AdvanceTransition, IdleTransition)) else response
+        normalizado = texto.casefold()
+        assert all(termo not in normalizado for termo in proibidos), texto
+
+
+def _assert_semanticamente_contentor(*responses):
+    proibidos = ("carrinha", "frota", "chegada", "partida")
+    for response in responses:
+        texto = response.response if isinstance(response, (AdvanceTransition, IdleTransition)) else response
+        normalizado = texto.casefold()
+        assert all(termo not in normalizado for termo in proibidos), texto
+
+
+def test_propriedade_semantica_carrinha_chegada_e_partida_nao_vazam_modalidade_oposta():
+    agent = CarrinhaOperationalAgent()
+    chegada = SimpleNamespace(
+        contexto_json={
+            "pedido_id": 9,
+            "contentores": [12],
+            "indice": 0,
+            "entregas": [{"contentor_id": 12, "numero_adesivo": "77", "fotos": []}],
+        }
+    )
+    partida = SimpleNamespace(contexto_json={"pedido_id": 9})
+    responses = [
+        agent.select_entrega_pedido(chegada, {"pedido_exists": True, "carrinha_ids": (), "pedido_id": 9}),
+        agent.decide_frota(chegada, mensagem("77"), {"ativo_exists": True, "is_carrinha": True, "status_operacional": "AGUARDANDO_CHEGADA"}),
+        agent.decide_gps(chegada, mensagem("sem gps")),
+        agent.decide_referencia_opcao(chegada, mensagem("talvez"), ""),
+        agent.decide_confirmacao(chegada, mensagem("2")),
+        agent.select_partida_pedido(partida, {"pedido_exists": True, "carrinha_ids": (), "pedido_id": 9}),
+        agent.decide_partida_confirmacao(partida, mensagem("inválido"), avarias_enabled=True),
+    ]
+    _assert_semanticamente_carrinha(*responses)
+
+
+@pytest.mark.parametrize(
+    "frota,expected",
+    [
+        ("0", "Envie a foto da Carrinha posicionada no local."),
+        ("77", "Envie a foto da Carrinha de frota 77 posicionada no local."),
+    ],
+)
+def test_h1_frota_carrinha_produz_identidade_operacional_sem_contentor_zero(frota, expected):
+    agent = CarrinhaOperationalAgent()
+    conversa = SimpleNamespace(contexto_json={"contentores": [12], "indice": 0, "entregas": []})
+    decision = agent.decide_frota(
+        conversa,
+        mensagem(frota),
+        {"ativo_exists": True, "is_carrinha": True, "status_operacional": "AGUARDANDO_CHEGADA"},
+    )
+    assert decision.response == expected
+    _assert_semanticamente_carrinha(decision)
+
+
+def test_propriedade_semantica_contentor_operacional_nao_vaza_identidade_carrinha():
+    backend = Mock()
+    backend.entrega_confirmacao_prompt.return_value = "Confirme a entrega."
+    agent = ContentorOperationalAgent(backend, Mock())
+    conversa = SimpleNamespace(
+        contexto_json={
+            "pedido_id": 9, "contentores": [17], "indice": 0,
+            "entregas": [], "contentor_id": 17, "fotos_recolha": [],
+        }
+    )
+    responses = [
+        agent.decide_entrega_adesivo(conversa, mensagem("42"), {"ativo_exists": True, "is_contentor": True, "status_entrega": "PENDENTE", "adesivo_em_ciclo_ativo": False}),
+        agent.decide_entrega_gps(conversa, mensagem("sem gps")),
+        agent.decide_recolha_foto(conversa, mensagem("sem foto")),
+        agent.decide_recolha_confirmacao(conversa, mensagem("inválido"), avarias_enabled=True),
+    ]
+    _assert_semanticamente_contentor(*responses)
+
+
+def test_propriedade_semantica_partida_carrinha_cobre_prompts_do_boundary():
+    item = SimpleNamespace(
+        id=12,
+        tipo_equipamento=TipoEquipamentoPedido.CARRINHA.value,
+        horario_agendado="14:00",
+        frota_carrinha=77,
+    )
+    backend = PedidoV24Agent.__new__(PedidoV24Agent)
+    backend.db = Mock()
+    backend.db.get.return_value = item
+    ctx = {"contentor_id": 12, "fotos_recolha": ["foto"], "avariado": False}
+    selection_ctx = {}
+
+    responses = [
+        backend._recolha_foto_prompt_for(item),
+        backend._recolha_confirmacao_prompt(ctx),
+        backend._recolha_selecao_prompt(selection_ctx, [item]),
+    ]
+
+    _assert_semanticamente_carrinha(*responses)
+    assert "frota 77" in "\n".join(responses)
 
 
 def test_autorizacao_acontece_antes_do_seam(whatsapp_router, monkeypatch):

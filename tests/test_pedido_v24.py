@@ -549,7 +549,7 @@ def test_cadastro_v24_resumo_mostra_quantidade_de_carrinhas(db_session):
     )
 
     assert "Quantidade de carrinhas: 1" in response
-    assert "Hora da entrega: 14:00" in response
+    assert "Hora da chegada: 14:00" in response
 
 
 @pytest.mark.parametrize(
@@ -1020,7 +1020,7 @@ def test_cadastro_v24_carrinha_valida_horario_e_mao_de_obra(db_session, monkeypa
     assert "Carrinha" in response
     assert "Quantidade de carrinhas: 1" in response
     assert "Pessoal para carregamento: Sim" in response
-    assert "Hora da entrega: 09:30" in response
+    assert "Hora da chegada: 09:30" in response
     assert "Valor total: 250,00 €" in response
     response = router.handle(msg("1"))
 
@@ -1042,7 +1042,7 @@ def test_cadastro_v24_carrinha_ordem_quantidade_cliente_data_hora_residuo(db_ses
     assert "carrinhas" in router.handle(msg("carrinha")).lower()
     assert "nome do cliente" in router.handle(msg("2")).lower()
     assert "telefone do cliente" in router.handle(msg("Cliente Ordem")).lower()
-    assert "planejada a entrega" in router.handle(msg("351912345678")).lower()
+    assert "planejada a chegada" in router.handle(msg("351912345678")).lower()
     assert "HH:MM" in router.handle(msg("Hoje"))
     assert "Resíduo da carrinha 1/2" in router.handle(msg("08:45"))
 

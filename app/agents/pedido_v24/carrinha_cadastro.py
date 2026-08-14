@@ -348,7 +348,7 @@ class CarrinhaCadastroAgent:
     @staticmethod
     def _quantidade_prompt(): return "🔢 Quantas carrinhas são necessárias para este pedido?"
     @staticmethod
-    def _data_prompt(): return "Quando está planejada a entrega?\n\n1. Hoje\n2. Amanhã\n3. Outra data"
+    def _data_prompt(): return "Quando está planejada a chegada?\n\n1. Hoje\n2. Amanhã\n3. Outra data"
     @staticmethod
     def _horario_prompt(): return "Qual o horário agendado da carrinha? Envie no formato HH:MM. Ex: 14:00"
     @staticmethod
