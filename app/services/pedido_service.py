@@ -845,6 +845,8 @@ class PedidoService:
         operador: str,
         fotos: list[str],
         pedido_id: int | None = None,
+        *,
+        _defer_commit: bool = False,
     ) -> PedidoContentor:
         if residuo_efetivo not in RESIDUOS_CANONICOS:
             raise ValueError("Residuo efetivo invalido.")
@@ -910,7 +912,8 @@ class PedidoService:
                     url_foto=foto_url,
                     tipo=TipoFoto.DESPEJO.value.lower(),
                 ))
-            self.db.commit()
+            if not _defer_commit:
+                self.db.commit()
             return carrinha
         except Exception:
             self.db.rollback()
@@ -1057,6 +1060,8 @@ class PedidoService:
         operador: str | None = None,
         pedido_id: int | None = None,
         fotos: list[str] | None = None,
+        *,
+        _defer_commit: bool = False,
     ) -> PedidoContentor:
         if residuo_efetivo not in RESIDUOS_CANONICOS:
             raise ValueError("Residuo efetivo invalido.")
@@ -1121,7 +1126,8 @@ class PedidoService:
             contentor.despejo_feito_por = operador
             contentor.despejo_data_hora = utcnow()
             contentor.status_ciclo = StatusCicloPedido.CONCLUIDO.value
-            self.db.commit()
+            if not _defer_commit:
+                self.db.commit()
         except Exception:
             self.db.rollback()
             raise

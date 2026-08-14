@@ -962,6 +962,7 @@ class PedidoV24Agent:
                     operador,
                     fotos,
                     pedido_id=pedido_id,
+                    _defer_commit=True,
                 )
             else:
                 contentor = self.service.confirmar_despejo(
@@ -972,6 +973,7 @@ class PedidoV24Agent:
                     operador=operador,
                     pedido_id=pedido_id,
                     fotos=fotos,
+                    _defer_commit=True,
                 )
         except ValueError as exc:
             pendentes = self._despejo_pendentes_por_pedido(ctx["pedido_id"])
@@ -986,28 +988,35 @@ class PedidoV24Agent:
                 )
             return self._idle(conversa, str(exc))
 
-        despejos = list(ctx.get("despejos") or [])
-        despejos.append({"contentor_id": contentor_id, "fotos": len(fotos), "carga_errada": tem_divergencia})
-        ctx["despejos"] = despejos
-        self._limpar_despejo_atual(ctx)
-        pendentes = self._despejo_pendentes_por_pedido(ctx["pedido_id"])
-        label = self._equipamento_label(contentor)
-        if pendentes:
-            return self._advance(
-                conversa,
-                "v24_despejo_ativo",
-                ctx,
-                f"✅ {label} processado no vazadouro.\nRestam {len(pendentes)} contentores pendentes neste pedido.\n\n"
-                "Selecione a proxima unidade deste cliente:\n\n"
-                + self._despejo_selecao_prompt(ctx, pendentes),
-            )
-        pedido = self.service.get(ctx["pedido_id"])
-        cliente = pedido.nome_cliente if pedido else ctx["pedido_id"]
-        numero = contentor.numero_adesivo_contentor or contentor.id
-        return self._idle(
-            conversa,
-            f"✅ Contentor {numero} processado no vazadouro. Pedido do cliente {cliente} concluído. Nenhum contentor pendente.",
-        )
+        try:
+            despejos = list(ctx.get("despejos") or [])
+            despejos.append({"contentor_id": contentor_id, "fotos": len(fotos), "carga_errada": tem_divergencia})
+            ctx["despejos"] = despejos
+            self._limpar_despejo_atual(ctx)
+            pendentes = self._despejo_pendentes_por_pedido(ctx["pedido_id"])
+            label = self._equipamento_label(contentor)
+            if pendentes:
+                response = self._advance_sem_commit(
+                    conversa,
+                    "v24_despejo_ativo",
+                    ctx,
+                    f"✅ {label} processado no vazadouro.\nRestam {len(pendentes)} contentores pendentes neste pedido.\n\n"
+                    "Selecione a proxima unidade deste cliente:\n\n"
+                    + self._despejo_selecao_prompt(ctx, pendentes),
+                )
+            else:
+                pedido = self.service.get(ctx["pedido_id"])
+                cliente = pedido.nome_cliente if pedido else ctx["pedido_id"]
+                numero = contentor.numero_adesivo_contentor or contentor.id
+                response = self._idle_sem_commit(
+                    conversa,
+                    f"✅ Contentor {numero} processado no vazadouro. Pedido do cliente {cliente} concluído. Nenhum contentor pendente.",
+                )
+            self.db.commit()
+            return response
+        except Exception:
+            self.db.rollback()
+            raise
 
     def _limpar_despejo_atual(self, ctx):
         for key in (
@@ -2605,6 +2614,11 @@ class PedidoV24Agent:
         raise TypeError("Transição operacional inválida.")
 
     def _advance(self, conversa, state, ctx, response):
+        response = self._advance_sem_commit(conversa, state, ctx, response)
+        self.db.commit()
+        return response
+
+    def _advance_sem_commit(self, conversa, state, ctx, response):
         if state == "v24_cadastro_tipo_solicitacao":
             response = self._tipo_solicitacao_prompt()
         elif state == "v24_cadastro_quantidade":
@@ -2630,12 +2644,15 @@ class PedidoV24Agent:
             response = self._residuo_prompt(ctx)
         conversa.estado_atual = state
         conversa.contexto_json = ctx
-        self.db.commit()
         return response
 
     def _idle(self, conversa, response):
-        self._aplicar_idle(conversa)
+        response = self._idle_sem_commit(conversa, response)
         self.db.commit()
+        return response
+
+    def _idle_sem_commit(self, conversa, response):
+        self._aplicar_idle(conversa)
         return response
 
     def _aplicar_idle(self, conversa):
