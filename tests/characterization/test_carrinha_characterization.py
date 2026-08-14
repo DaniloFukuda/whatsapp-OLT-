@@ -26,7 +26,7 @@ from app.models.pedido import (
 from app.services.pedido_service import PedidoService
 
 
-def criar_pedido_carrinha(service: PedidoService):
+def criar_pedido_carrinha(service: PedidoService, residuo="Entulho Limpo"):
     return service.criar(
         nome_cliente="Cliente Carrinha C2",
         telefone_cliente="351912345678",
@@ -40,7 +40,7 @@ def criar_pedido_carrinha(service: PedidoService):
         itens=[
             {
                 "tipo_equipamento": TipoEquipamentoPedido.CARRINHA.value,
-                "residuo_contratado": "Entulho Limpo",
+                "residuo_contratado": residuo,
                 "horario_agendado": "10:00",
             }
         ],
@@ -448,7 +448,9 @@ def test_despejo_conforme_mantem_campos_sem_divergencia(db_session):
 
 def test_despejo_divergente_persiste_carga_e_relato(db_session):
     service = PedidoService(db_session)
-    carrinha = preparar_despejo(service, criar_pedido_carrinha(service), "55")
+    carrinha = preparar_despejo(
+        service, criar_pedido_carrinha(service, "Entulho Misto"), "55"
+    )
     service.confirmar_despejo_carrinha(carrinha.id, "Entulho Misto", True, "carga misturada no vazadouro", "op", ["d55"])
     assert carrinha.carga_errada is True
     assert carrinha.relato_carga == "carga misturada no vazadouro"

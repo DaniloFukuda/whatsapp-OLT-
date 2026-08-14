@@ -302,7 +302,7 @@ def test_falha_no_commit_do_despejo_faz_rollback_integral_e_preserva_excecao(
     with pytest.raises(SQLAlchemyError) as exc_info:
         service.confirmar_despejo_carrinha(
             carrinha.id,
-            "Entulho Misto",
+            "Entulho Limpo",
             True,
             "Carga diferente da contratada",
             "motorista-despejo",

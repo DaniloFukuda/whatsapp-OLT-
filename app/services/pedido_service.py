@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import re
 
-from sqlalchemy import update
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.time import utcnow
@@ -844,15 +844,8 @@ class PedidoService:
         relato: str | None,
         operador: str,
         fotos: list[str],
+        pedido_id: int | None = None,
     ) -> PedidoContentor:
-        carrinha = self.db.get(PedidoContentor, carrinha_id)
-        if (
-            not carrinha
-            or carrinha.tipo_equipamento != TipoEquipamentoPedido.CARRINHA.value
-            or carrinha.status_operacional_carrinha
-            != StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
-        ):
-            raise ValueError("Carrinha não disponível para despejo.")
         if residuo_efetivo not in RESIDUOS_CANONICOS:
             raise ValueError("Residuo efetivo invalido.")
         fotos_unicas = list(dict.fromkeys(foto for foto in fotos if foto))
@@ -862,6 +855,21 @@ class PedidoService:
         if carga_errada and len(relato_limpo) < 10:
             raise ValueError("O relato da carga precisa ter pelo menos 10 caracteres.")
         try:
+            pedido_protegido_id = self._proteger_cotas_despejo(
+                carrinha_id, pedido_id
+            )
+            carrinha = self.db.get(PedidoContentor, carrinha_id)
+            if (
+                not carrinha
+                or carrinha.tipo_equipamento != TipoEquipamentoPedido.CARRINHA.value
+                or carrinha.pedido_id != pedido_protegido_id
+                or carrinha.status_operacional_carrinha
+                != StatusOperacionalCarrinha.AGUARDANDO_DESPEJO.value
+            ):
+                raise ValueError("Carrinha não disponível para despejo.")
+            cotas = self.cotas_residuos(pedido_protegido_id)
+            if cotas[residuo_efetivo]["saldo"] <= 0:
+                raise ValueError("Não existe cota em aberto para esse tipo de resíduo.")
             agora = utcnow()
             resultado = self.db.execute(
                 update(PedidoContentor)
@@ -950,6 +958,51 @@ class PedidoService:
             }
         return cotas
 
+    def _proteger_cotas_despejo(
+        self, contentor_id: int, pedido_id: int | None = None
+    ) -> int:
+        """Serializa a recomprovação final das cotas do pedido atual."""
+        pedido_alvo = pedido_id
+        if self.db.get_bind().dialect.name == "sqlite":
+            if pedido_alvo is None:
+                resultado = self.db.execute(
+                    text(
+                        "UPDATE pedidos SET id = id "
+                        "WHERE id = (SELECT pedido_id FROM pedido_contentores WHERE id = :contentor_id)"
+                    ),
+                    {"contentor_id": contentor_id},
+                )
+            else:
+                resultado = self.db.execute(
+                    text("UPDATE pedidos SET id = id WHERE id = :pedido_id"),
+                    {"pedido_id": pedido_alvo},
+                )
+            if resultado.rowcount != 1:
+                raise ValueError("Pedido não encontrado.")
+            if pedido_alvo is None:
+                pedido_alvo = self.db.scalar(
+                    select(PedidoContentor.pedido_id).where(
+                        PedidoContentor.id == contentor_id
+                    )
+                )
+        else:
+            if pedido_alvo is None:
+                pedido_alvo = self.db.scalar(
+                    select(PedidoContentor.pedido_id).where(
+                        PedidoContentor.id == contentor_id
+                    )
+                )
+            if pedido_alvo is None:
+                raise ValueError("Ativo não disponível para despejo.")
+            bloqueado = self.db.scalar(
+                select(Pedido.id)
+                .where(Pedido.id == pedido_alvo)
+                .with_for_update()
+            )
+            if bloqueado is None:
+                raise ValueError("Pedido não encontrado.")
+        return pedido_alvo
+
     def contentores_pendentes_despejo(self, pedido_id: int) -> list[PedidoContentor]:
         pedido = self.get(pedido_id)
         if not pedido:
@@ -1005,22 +1058,6 @@ class PedidoService:
         pedido_id: int | None = None,
         fotos: list[str] | None = None,
     ) -> PedidoContentor:
-        contentor = self.db.get(PedidoContentor, contentor_id)
-        if (
-            contentor
-            and contentor.tipo_equipamento
-            != TipoEquipamentoPedido.CONTENTOR.value
-        ):
-            raise ValueError("Esta operação aceita apenas contentores.")
-        if (
-            not contentor
-            or contentor.status_recolha != StatusRecolhaPedido.RECOLHIDO.value
-            or contentor.status_ciclo != StatusCicloPedido.EM_ANDAMENTO.value
-            or contentor.despejo_data_hora is not None
-        ):
-            raise ValueError("Contentor não disponível para despejo.")
-        if pedido_id is not None and contentor.pedido_id != pedido_id:
-            raise ValueError("Ativo nao pertence ao pedido selecionado.")
         if residuo_efetivo not in RESIDUOS_CANONICOS:
             raise ValueError("Residuo efetivo invalido.")
         fotos_unicas = []
@@ -1030,13 +1067,32 @@ class PedidoService:
                 fotos_unicas.append(foto_limpa)
         if fotos is not None and not fotos_unicas:
             raise ValueError("Envie pelo menos uma foto do despejo.")
-        cotas = self.cotas_residuos(contentor.pedido_id)
-        if cotas[residuo_efetivo]["saldo"] <= 0:
-            raise ValueError("Não existe cota em aberto para esse tipo de resíduo.")
         relato_limpo = (relato or "").strip()
         if carga_errada and len(relato_limpo) < 10:
             raise ValueError("O relato da carga precisa ter pelo menos 10 caracteres.")
         try:
+            pedido_protegido_id = self._proteger_cotas_despejo(
+                contentor_id, pedido_id
+            )
+            contentor = self.db.get(PedidoContentor, contentor_id)
+            if (
+                contentor
+                and contentor.tipo_equipamento
+                != TipoEquipamentoPedido.CONTENTOR.value
+            ):
+                raise ValueError("Esta operação aceita apenas contentores.")
+            if (
+                not contentor
+                or contentor.status_recolha != StatusRecolhaPedido.RECOLHIDO.value
+                or contentor.status_ciclo != StatusCicloPedido.EM_ANDAMENTO.value
+                or contentor.despejo_data_hora is not None
+            ):
+                raise ValueError("Contentor não disponível para despejo.")
+            if contentor.pedido_id != pedido_protegido_id:
+                raise ValueError("Ativo nao pertence ao pedido selecionado.")
+            cotas = self.cotas_residuos(pedido_protegido_id)
+            if cotas[residuo_efetivo]["saldo"] <= 0:
+                raise ValueError("Não existe cota em aberto para esse tipo de resíduo.")
             contentor.residuo_efetivo_vazadouro = residuo_efetivo
             contentor.carga_errada = carga_errada
             contentor.relato_carga = relato_limpo if carga_errada else None

@@ -946,6 +946,12 @@ class PedidoV24Agent:
             and not get_settings().feature_carrinhas_enabled
         ):
             return self._idle(conversa, self._carrinha_despejo_desabilitada_message())
+        operador = conversa.telefone
+        pedido_id = ctx.get("pedido_id")
+        # As leituras do router/boundary abrem uma transação SQLite diferida.
+        # Encerre-a para que o service adquira o writer lock antes de reler cotas.
+        if self.db.get_bind().dialect.name == "sqlite":
+            self.db.rollback()
         try:
             if contentor and contentor.tipo_equipamento == TipoEquipamentoPedido.CARRINHA.value:
                 contentor = self.service.confirmar_despejo_carrinha(
@@ -953,8 +959,9 @@ class PedidoV24Agent:
                     ctx.get("residuo_efetivo"),
                     tem_divergencia,
                     ctx.get("relato_carga"),
-                    conversa.telefone,
+                    operador,
                     fotos,
+                    pedido_id=pedido_id,
                 )
             else:
                 contentor = self.service.confirmar_despejo(
@@ -962,8 +969,8 @@ class PedidoV24Agent:
                     ctx.get("residuo_efetivo"),
                     tem_divergencia,
                     ctx.get("relato_carga"),
-                    operador=conversa.telefone,
-                    pedido_id=ctx.get("pedido_id"),
+                    operador=operador,
+                    pedido_id=pedido_id,
                     fotos=fotos,
                 )
         except ValueError as exc:
