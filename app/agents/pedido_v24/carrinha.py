@@ -86,10 +86,15 @@ class CarrinhaOperationalAgent:
             "fotos": [],
         })
         ctx["entregas"] = entregas
+        foto_prompt = (
+            "Envie a foto da Carrinha posicionada no local."
+            if number == "0"
+            else f"Envie a foto da Carrinha de frota {number} posicionada no local."
+        )
         return AdvanceTransition(
             "v24_entrega_foto",
             ctx,
-            f"Envie a foto do Contentor {number} posicionado no local.",
+            foto_prompt,
         )
 
     def decide_foto(self, conversa, message):
@@ -111,7 +116,7 @@ class CarrinhaOperationalAgent:
         choice = self._normalize(message.texto)
         ctx = dict(conversa.contexto_json or {})
         if choice in {"1", "outra foto", "➕ outra foto"}:
-            return AdvanceTransition("v24_entrega_foto", ctx, "Envie a próxima foto deste contentor.")
+            return AdvanceTransition("v24_entrega_foto", ctx, "Envie a próxima foto desta carrinha.")
         if choice not in {"2", "proximo passo", "➡️ proximo passo"}:
             return "Selecione Outra Foto ou Próximo Passo."
         registrado = ctx["indice"] + 1
@@ -120,12 +125,12 @@ class CarrinhaOperationalAgent:
         if ctx["indice"] < total:
             return AdvanceTransition(
                 "v24_entrega_adesivo", ctx,
-                f"Contentor {registrado} de {total} registrado.\n\nVamos registrar o próximo.\n\n"
+                f"Carrinha {registrado} de {total} registrada.\n\nVamos registrar a próxima.\n\n"
                 "Confirme o número da frota da carrinha alocada (ou digite 0 se não houver):",
             )
         return AdvanceTransition(
             "v24_entrega_gps", ctx,
-            f"Contentor {registrado} de {total} registrado.\n\nCompartilhe a localização GPS da obra.",
+            f"Carrinha {registrado} de {total} registrada.\n\nCompartilhe a localização GPS da obra.",
         )
 
     def decide_gps(self, conversa, message):

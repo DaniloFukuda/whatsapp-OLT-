@@ -4222,9 +4222,33 @@ def test_chegada_carrinha_frota_zero_e_foto_permanecem_conversacionais():
     })
     assert decision.next_state == "v24_entrega_foto"
     assert decision.context["entregas"][0]["numero_adesivo"] == "0"
+    assert decision.response == "Envie a foto da Carrinha posicionada no local."
+    assert "Contentor" not in decision.response
+    assert " 0 " not in decision.response
     foto = SimpleNamespace(tipo="image", media_id="foto-1", filename=None, message_id="m1")
     foto_decision = agent.decide_foto(SimpleNamespace(contexto_json=decision.context), foto)
     assert foto_decision.context["entregas"][0]["fotos"] == ["foto-1"]
+
+
+def test_chegada_carrinha_frota_real_exibe_identidade_da_carrinha():
+    agent = CarrinhaOperationalAgent()
+    conversa = SimpleNamespace(contexto_json={
+        "pedido_id": 17, "contentores": [5], "indice": 0, "entregas": [],
+    })
+
+    decision = agent.decide_frota(conversa, mensagem("12"), {
+        "ativo_exists": True, "is_carrinha": True,
+        "status_operacional": "AGUARDANDO_CHEGADA",
+    })
+
+    assert decision.next_state == "v24_entrega_foto"
+    assert decision.context["entregas"] == [
+        {"contentor_id": 5, "numero_adesivo": "12", "fotos": []},
+    ]
+    assert decision.response == (
+        "Envie a foto da Carrinha de frota 12 posicionada no local."
+    )
+    assert "Contentor" not in decision.response
 
 
 def test_chegada_carrinha_gps_referencia_e_confirmacao_produzem_comando():
