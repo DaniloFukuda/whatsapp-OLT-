@@ -2052,6 +2052,11 @@ class PedidoV24Agent:
             is not CadastroModality.CONTENTOR_PROVEN
         ):
             return None
+        if not get_settings().feature_contentores_enabled:
+            return (
+                "A modalidade Contentor está temporariamente indisponível. "
+                "O cadastro foi preservado; tente confirmar novamente quando ela estiver habilitada."
+            )
         ctx = dict(context)
         ctx["_confirmado"] = True
         return self._finish_cadastro(conversa, ctx)
@@ -2067,6 +2072,11 @@ class PedidoV24Agent:
             return None
         if classify_carrinha_cadastro(context) is not CarrinhaCadastroModality.CARRINHA_PROVEN:
             return None
+        if not get_settings().feature_carrinhas_enabled:
+            return (
+                "A modalidade Carrinha está temporariamente indisponível. "
+                "O cadastro foi preservado; tente confirmar novamente quando ela estiver habilitada."
+            )
         ctx = dict(context)
         ctx["_confirmado"] = True
         return self._finish_cadastro(conversa, ctx)
